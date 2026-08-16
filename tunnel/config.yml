@@ -1,0 +1,10 @@
+# Local-only SearaBoom OTA tunnel. Do not point other hostnames here.
+# QUIC/UDP 7844 is blocked on this network; force HTTP/2.
+protocol: http2
+tunnel: e70a4d09-968d-4dac-b0a2-6a39e009da6b
+credentials-file: /home/lucas/Work/SearaBoom/tunnel/e70a4d09-968d-4dac-b0a2-6a39e009da6b.json
+
+ingress:
+  - hostname: searaboom.goossen.dev
+    service: http://127.0.0.1:8080
+  - service: http_status:404

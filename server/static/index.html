@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SearaBoom OTA</title>
+  <style>
+    :root {
+      --bg: #0f1a14;
+      --panel: rgba(20, 40, 28, 0.92);
+      --text: #f2f7f3;
+      --muted: #a7b9ad;
+      --accent: #1ccc33;
+      --warn: #e6b422;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", Helvetica, Arial, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 20% 10%, #1b3a28, transparent 40%),
+        radial-gradient(circle at 80% 0%, #243d2d, transparent 35%),
+        linear-gradient(160deg, #0b1210, #142018 55%, #0f1a14);
+      padding: 2rem 1rem;
+    }
+    main {
+      max-width: 720px;
+      margin: 0 auto;
+      background: var(--panel);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 16px;
+      padding: 1.5rem;
+    }
+    h1 { margin: 0 0 .25rem; font-weight: 650; }
+    p.lead { color: var(--muted); margin-top: 0; }
+    .row { display: grid; gap: .75rem; margin: 1rem 0; }
+    label { display: block; font-size: .9rem; color: var(--muted); margin-bottom: .35rem; }
+    input[type=text], input[type=password], input[type=file] {
+      width: 100%;
+      padding: .7rem .8rem;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(0,0,0,0.25);
+      color: var(--text);
+    }
+    button {
+      background: var(--accent);
+      color: #05310c;
+      border: 0;
+      border-radius: 10px;
+      padding: .85rem 1.1rem;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .card {
+      background: rgba(0,0,0,0.22);
+      border-radius: 12px;
+      padding: 1rem;
+      margin-top: 1rem;
+    }
+    code { color: var(--warn); }
+    #msg { margin-top: 1rem; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>SearaBoom</h1>
+    <p class="lead">OTA management — devices check this host on every boot.</p>
+
+    <div class="card" id="status">Loading status…</div>
+
+    <form id="uploadForm" class="row">
+      <div>
+        <label for="version">Firmware version (X.Y.Z)</label>
+        <input id="version" name="version" type="text" placeholder="1.0.1" required />
+      </div>
+      <div>
+        <label for="token">Admin token</label>
+        <input id="token" name="token" type="password" value="searaboom-dev" required />
+      </div>
+      <div>
+        <label for="firmware">Firmware binary (.bin)</label>
+        <input id="firmware" name="firmware" type="file" accept=".bin" required />
+      </div>
+      <button type="submit">Publish update</button>
+    </form>
+    <div id="msg"></div>
+  </main>
+  <script>
+    async function refresh() {
+      const r = await fetch('/api/status');
+      const j = await r.json();
+      const f = j.firmware || {};
+      document.getElementById('status').innerHTML =
+        `<strong>Latest:</strong> <code>${f.version || 'none'}</code><br/>` +
+        `<strong>File:</strong> ${f.filename || '—'}<br/>` +
+        `<strong>Size:</strong> ${f.size || 0} bytes<br/>` +
+        `<strong>SHA256:</strong> <code>${f.sha256 || '—'}</code><br/>` +
+        `<strong>Uploaded:</strong> ${f.uploaded_at || '—'}`;
+    }
+    document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const msg = document.getElementById('msg');
+      msg.textContent = 'Uploading…';
+      const r = await fetch('/api/firmware/upload', { method: 'POST', body: fd, headers: { 'X-Admin-Token': fd.get('token') } });
+      const j = await r.json();
+      msg.textContent = r.ok ? JSON.stringify(j, null, 2) : ('Error: ' + JSON.stringify(j));
+      await refresh();
+    });
+    refresh();
+  </script>
+</body>
+</html>

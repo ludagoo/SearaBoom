@@ -1,0 +1,47 @@
+menu "SearaBoom Configuration"
+
+config SEARABOOM_WIFI_SSID
+    string "Default WiFi SSID"
+    default ""
+
+config SEARABOOM_WIFI_PASSWORD
+    string "Default WiFi Password"
+    default ""
+
+config SEARABOOM_OTA_URL
+    string "OTA base URL"
+    default "https://searaboom.goossen.dev"
+
+config SEARABOOM_FW_VERSION
+    string "Firmware version"
+    default "1.0.4"
+
+config SEARABOOM_I2S_DOUT
+    int "I2S DOUT GPIO"
+    default 2
+
+config SEARABOOM_I2S_BCLK
+    int "I2S BCLK GPIO"
+    default 3
+
+config SEARABOOM_I2S_LRC
+    int "I2S LRC/WS GPIO"
+    default 4
+
+config SEARABOOM_BTN_VOL_UP
+    int "Volume up touch pad GPIO (T7)"
+    default 7
+
+config SEARABOOM_BTN_VOL_DOWN
+    int "Volume down touch pad GPIO (T6)"
+    default 6
+
+config SEARABOOM_LED_GPIO
+    int "WS2812 LED GPIO (ESP32-S3-Zero)"
+    default 21
+
+config SEARABOOM_WIFI_TIMEOUT_MS
+    int "WiFi connect timeout before setup AP (ms)"
+    default 25000
+
+endmenu

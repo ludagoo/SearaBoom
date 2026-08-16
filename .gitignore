@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.cursor/
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/managed_components/
+firmware/dependencies.lock
+tunnel/*.json
+server/firmware/*.bin
+server/firmware/latest.json
+.env
+*.log
+docs/dev-cam-*.jpg
+*.swp
+.DS_Store

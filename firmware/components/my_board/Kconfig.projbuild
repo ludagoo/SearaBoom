@@ -1,0 +1,14 @@
+menu "My Audio Board"
+
+choice CUSTOMER_AUDIO_BOARD
+    prompt "My audio board"
+    default MY_BOARD_SEARABOOM
+    help
+        Select an audio board to use with the ESP-ADF
+
+config MY_BOARD_SEARABOOM
+    bool "SearaBoom ESP32-S3-Zero + external I2S amp"
+
+endchoice
+
+endmenu
