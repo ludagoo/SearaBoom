@@ -1,17 +1,12 @@
-*{margin:0; padding:0; font-family: Arial, Helvetica, sans-serif;}
-html,body{max-width:100%; overflow-x:hidden; background-color:white;}
-html{height:100%;}
-body{min-height:100%;}
-article{width:100%; min-height:100%; min-width:0; display:flex; align-items:center; justify-content:center;}
-form{max-width:400px; width:calc(100% - 4em); min-width:0; margin:1em auto; border-radius:.5em; padding:.5em; background-color:rgba(0,0,0,.25); box-sizing:border-box;}
-h1{text-align:center; color:#FFF; margin:0 5px; font-weight:400; font-size:1.2em; max-width:100%;}
-h1 img{display:block; width:100%; max-width:100%; height:auto; margin:0 auto;}
-h1 b{font-size: 1.5em; font-style: italic;}
-fieldset{border:0; background-color:rgba(0,0,0,.5); border-radius: .4em; margin:1em; padding:1em;}
-legend{display:block; float:left; width:100%; box-sizing:border-box; color:#FFF; padding:0 0 .6em 0; font-weight: 600; text-align:center;}
-legend+*{clear:both;}
-label{display: block; color:#FFF; margin:0 0 .5em 0; font-weight: 400;}
-label:not(:first-of-type){margin-top:1em;}
-select,input{height:2em; width: calc(100% - 2em); border-radius:.4em; line-height: 2em; padding:.4em; border:0; background-color:rgba(0,0,0,.5); color:#FFF; font-size:16px; -ms-box-sizing:content-box; -moz-box-sizing:content-box; box-sizing:content-box; -webkit-box-sizing:content-box; }
-input:invalid{border-bottom:2px solid rgb(255, 0, 0);}
-button{display: block; height:3em; width:calc(100% - 2em); margin:1em; box-sizing: border-box; border-radius:.4em; border:0; padding:1em; background-color: rgb(28, 204, 51); color:white; font-size:1.1em;}
+*{margin:0;padding:0;box-sizing:border-box;font-family:Arial,Helvetica,sans-serif;-webkit-text-size-adjust:100%;text-size-adjust:100%;}
+html,body{width:100%;max-width:100%;overflow-x:hidden;background:#fff;}
+article{width:100%;padding:8px;}
+form{width:100%;max-width:360px;margin:0 auto;padding:8px;border-radius:.5em;background:rgba(0,0,0,.25);}
+h1{margin:0;text-align:center;color:#fff;}
+h1 img{display:block;width:100%;max-width:240px;height:auto;margin:0 auto;}
+fieldset{border:0;margin:8px 0;padding:10px;border-radius:.4em;background:rgba(0,0,0,.5);}
+legend{display:block;float:none;width:100%;color:#fff;padding:0 0 .4em;font-weight:600;text-align:center;}
+label{display:block;color:#fff;margin:.5em 0 .3em;font-weight:400;}
+select,input,button{display:block;width:100%;font-size:16px;border:0;border-radius:.4em;}
+select,input{height:2.4em;padding:.4em;background:rgba(0,0,0,.5);color:#fff;}
+button{margin-top:8px;padding:.9em;background:#1ccc33;color:#fff;font-size:1.05em;}
