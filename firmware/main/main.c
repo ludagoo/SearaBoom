@@ -132,8 +132,8 @@ void app_main(void)
 
     bool play_updated = config_store_take_play_updated();
     play_updated = config_store_consume_fw_change(app->version) || play_updated;
-    if (play_updated) {
-        ESP_LOGI(TAG, "First boot after update — playing atualizado clip");
+    if (play_updated && !config_store_has_wifi(&s_cfg)) {
+        ESP_LOGI(TAG, "First boot after update, no Wi-Fi — atualizado then setup AP");
         clip_player_play_wait(SB_CLIP_OTA_DONE, 20000);
         /* Drop I2S/AAC before WiFi AP — leftover HOLD + decoder reset brownouts the 5V rail. */
         clip_player_release_pipe();
@@ -146,17 +146,29 @@ void app_main(void)
 
     log_shipper_init();
 
-    ESP_LOGI(TAG, "WiFi OK, checking OTA (stable policy: major.minor only)");
-    if (xTaskCreatePinnedToCore(ota_task_fn, "ota", 12288, xTaskGetCurrentTaskHandle(), 5, NULL, 0) == pdPASS) {
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(120000));
-    } else {
-        ota_update_check_on_boot();
-    }
-
     const char *url = config_store_stream_url(&s_cfg);
-    ESP_LOGI(TAG, "Connecting to stream %s (%s) vol=%d", s_cfg.url_key, url, s_cfg.volume);
-    if (radio_player_start(url, s_cfg.volume) != ESP_OK) {
-        ESP_LOGE(TAG, "Radio start failed");
+    if (play_updated) {
+        /* Prefetch HTTP while atualizado plays on the LC clip-only pipe. */
+        ESP_LOGI(TAG, "Prefetch stream %s (%s) vol=%d while playing atualizado",
+                 s_cfg.url_key, url, s_cfg.volume);
+        radio_player_prefetch(url, s_cfg.volume);
+        ESP_LOGI(TAG, "First boot after update — playing atualizado (LC clip pipe)");
+        clip_player_play_wait(SB_CLIP_OTA_DONE, 20000);
+        clip_player_release_pipe();
+        if (radio_player_start(url, s_cfg.volume) != ESP_OK) {
+            ESP_LOGE(TAG, "Radio start failed");
+        }
+    } else {
+        ESP_LOGI(TAG, "WiFi OK, checking OTA (stable policy: major.minor only)");
+        if (xTaskCreatePinnedToCore(ota_task_fn, "ota", 12288, xTaskGetCurrentTaskHandle(), 5, NULL, 0) == pdPASS) {
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(120000));
+        } else {
+            ota_update_check_on_boot();
+        }
+        ESP_LOGI(TAG, "Connecting to stream %s (%s) vol=%d", s_cfg.url_key, url, s_cfg.volume);
+        if (radio_player_start(url, s_cfg.volume) != ESP_OK) {
+            ESP_LOGE(TAG, "Radio start failed");
+        }
     }
     led_status_set(SB_LED_GREEN, 500);
 

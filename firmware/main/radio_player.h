@@ -5,6 +5,9 @@
 #include "searaboom.h"
 
 esp_err_t radio_player_start(const char *url, int volume);
+/* Start HTTP only (HOLD inject) so the 256 KB ringbuffer fills. Clip-only I2S can run. */
+esp_err_t radio_player_prefetch(const char *url, int volume);
+bool radio_player_is_prefetching(void);
 void radio_player_stop(void);
 void radio_player_request_stop(void);
 void radio_player_resume(void);

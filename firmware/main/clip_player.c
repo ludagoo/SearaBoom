@@ -6,7 +6,6 @@
 #include "esp_timer.h"
 #include "clip_player.h"
 #include "radio_player.h"
-#include "aac_inject.h"
 #include "adts_util.h"
 #include "audio_element.h"
 #include "audio_pipeline.h"
@@ -32,7 +31,7 @@ extern const uint8_t ap_saved_aac_end[] asm("_binary_ap_saved_aac_end");
 
 #define SB_ALC_MAX_DB (2)
 /* Decoder + I2S still hold PCM after the last ADTS byte is queued. */
-#define SB_CLIP_TAIL_MS (500)
+#define SB_CLIP_TAIL_MS (800)
 
 static const char *clip_name[SB_CLIP_COUNT] = {
     [SB_CLIP_OTA_UPDATING] = "ota_updating",
@@ -58,11 +57,21 @@ static const uint8_t *clip_end[SB_CLIP_COUNT] = {
 };
 
 static audio_pipeline_handle_t s_pipe;
+static audio_element_handle_t s_src;
 static audio_element_handle_t s_aac;
 static audio_element_handle_t s_m2s;
 static audio_element_handle_t s_i2s;
 static audio_event_iface_handle_t s_evt;
 static bool s_own_pipe;
+
+static const uint8_t *s_src_data;
+static size_t s_src_len;
+static size_t s_src_pos;
+static bool s_src_loop;
+static bool s_src_playing;
+static bool s_src_started;
+static int s_src_gap_ms;
+static int64_t s_src_gap_until;
 
 static esp_err_t m2s_open(audio_element_handle_t self)
 {
@@ -97,32 +106,96 @@ static int m2s_process(audio_element_handle_t self, char *in_buffer, int in_len)
         memcpy(out + (i * 2) * bps, in_buffer + i * bps, bps);
         memcpy(out + (i * 2 + 1) * bps, in_buffer + i * bps, bps);
     }
-    int w = audio_element_output(self, out, out_bytes);
-    return w;
+    return audio_element_output(self, out, out_bytes);
 }
 
-static void clip_reset_decoder(void)
+static esp_err_t clip_src_open(audio_element_handle_t self)
 {
-    if (!s_aac) {
-        return;
-    }
-    audio_element_reset_input_ringbuf(s_aac);
-    audio_element_reset_state(s_aac);
-    audio_element_resume(s_aac, 0, 500);
+    audio_element_info_t info = {0};
+    info.sample_rates = 22050;
+    info.bits = 16;
+    info.channels = 1;
+    audio_element_setinfo(self, &info);
+    return ESP_OK;
 }
 
-static void clip_on_clip(bool active)
+static int clip_src_process(audio_element_handle_t self, char *in_buffer, int in_len)
 {
-    if (!s_i2s || !active) {
-        return;
+    if (!s_src_playing || !s_src_data) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        return AEL_IO_TIMEOUT;
     }
-    /* Do not call i2s_stream_set_clk here — it pauses I2S and drops SoftAP STAs. */
-    i2s_alc_volume_set(s_i2s, SB_ALC_MAX_DB);
+    if (s_src_gap_until > 0) {
+        if (esp_timer_get_time() < s_src_gap_until) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            return AEL_IO_TIMEOUT;
+        }
+        s_src_gap_until = 0;
+        s_src_pos = 0;
+    }
+    if (s_src_pos >= s_src_len) {
+        if (s_src_loop) {
+            if (s_src_gap_ms > 0) {
+                s_src_gap_until = esp_timer_get_time() + (int64_t)s_src_gap_ms * 1000;
+                vTaskDelay(pdMS_TO_TICKS(20));
+                return AEL_IO_TIMEOUT;
+            }
+            s_src_pos = 0;
+        } else {
+            s_src_playing = false;
+            vTaskDelay(pdMS_TO_TICKS(10));
+            return AEL_IO_TIMEOUT;
+        }
+    }
+    int n = in_len;
+    if ((size_t)n > s_src_len - s_src_pos) {
+        n = (int)(s_src_len - s_src_pos);
+    }
+    memcpy(in_buffer, s_src_data + s_src_pos, (size_t)n);
+    s_src_pos += (size_t)n;
+    s_src_started = true;
+    return audio_element_output(self, in_buffer, n);
+}
+
+static audio_element_handle_t clip_src_init(void)
+{
+    audio_element_cfg_t cfg = DEFAULT_AUDIO_ELEMENT_CONFIG();
+    cfg.open = clip_src_open;
+    cfg.process = clip_src_process;
+    cfg.tag = "clip";
+    cfg.out_rb_size = 16 * 1024;
+    cfg.task_stack = 3 * 1024;
+    cfg.task_prio = 6;
+    cfg.task_core = 0;
+    cfg.stack_in_ext = false;
+    cfg.buffer_len = 2048;
+    return audio_element_init(&cfg);
+}
+
+static void clip_src_play(const uint8_t *data, size_t len, bool loop, int gap_ms)
+{
+    s_src_data = data;
+    s_src_len = len;
+    s_src_pos = 0;
+    s_src_loop = loop;
+    s_src_gap_ms = gap_ms > 0 ? gap_ms : 0;
+    s_src_gap_until = 0;
+    s_src_started = false;
+    s_src_playing = true;
+}
+
+static void clip_src_stop(void)
+{
+    s_src_playing = false;
+    s_src_data = NULL;
+    s_src_len = 0;
+    s_src_pos = 0;
+    s_src_gap_until = 0;
 }
 
 static void pump_music_info(void)
 {
-    if (!s_evt || !s_aac || !s_i2s) {
+    if (!s_evt || !s_aac || !s_m2s) {
         return;
     }
     audio_event_iface_msg_t msg;
@@ -144,26 +217,24 @@ static void pump_music_info(void)
 
 static esp_err_t ensure_pipe(void)
 {
-    if (radio_player_is_running() || s_own_pipe) {
+    if (s_own_pipe) {
         return ESP_OK;
     }
+    if (radio_player_is_running()) {
+        ESP_LOGW(TAG, "clip-only pipe requested while radio owns I2S");
+        return ESP_ERR_INVALID_STATE;
+    }
 
-    ESP_LOGI(TAG, "starting clip-only pipe (inj -> aac -> m2s -> i2s)");
+    ESP_LOGI(TAG, "starting clip-only pipe (clip -> aac -> m2s -> i2s)");
     audio_board_handle_t board_handle = audio_board_init();
     if (board_handle && board_handle->audio_hal) {
         audio_hal_ctrl_codec(board_handle->audio_hal, AUDIO_HAL_CODEC_MODE_DECODE, AUDIO_HAL_CTRL_START);
     }
 
-    audio_element_handle_t inj = aac_inject_init();
-    aac_inject_set_passthrough(false);
-    aac_inject_hooks_t hooks = {
-        .reset_decoder = clip_reset_decoder,
-        .on_clip = clip_on_clip,
-    };
-    aac_inject_set_hooks(&hooks);
-
     audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
     s_pipe = audio_pipeline_init(&pipeline_cfg);
+
+    s_src = clip_src_init();
 
     aac_decoder_cfg_t aac_cfg = DEFAULT_AAC_DECODER_CONFIG();
     /* Clips are AAC-LC @ 22050. plus_enable reports 44100 and Mickey-Mouses them. */
@@ -198,11 +269,11 @@ static esp_err_t ensure_pipe(void)
     /* Default I2S is 44100. Set once before run — never again while AP is up. */
     i2s_stream_set_clk(s_i2s, 22050, 16, 2);
 
-    audio_pipeline_register(s_pipe, inj, "inj");
+    audio_pipeline_register(s_pipe, s_src, "clip");
     audio_pipeline_register(s_pipe, s_aac, "aac");
     audio_pipeline_register(s_pipe, s_m2s, "m2s");
     audio_pipeline_register(s_pipe, s_i2s, "i2s");
-    const char *link[] = {"inj", "aac", "m2s", "i2s"};
+    const char *link[] = {"clip", "aac", "m2s", "i2s"};
     audio_pipeline_link(s_pipe, &link[0], 4);
 
     audio_event_iface_cfg_t evt_cfg = AUDIO_EVENT_IFACE_DEFAULT_CFG();
@@ -215,31 +286,41 @@ static esp_err_t ensure_pipe(void)
 
 void clip_player_release_pipe(void)
 {
-    aac_inject_stop();
+    clip_src_stop();
     if (!s_own_pipe) {
         return;
     }
     audio_pipeline_stop(s_pipe);
     audio_pipeline_wait_for_stop(s_pipe);
     audio_pipeline_terminate(s_pipe);
-    audio_pipeline_unregister(s_pipe, aac_inject_element());
+    audio_pipeline_unregister(s_pipe, s_src);
     audio_pipeline_unregister(s_pipe, s_aac);
     audio_pipeline_unregister(s_pipe, s_m2s);
     audio_pipeline_unregister(s_pipe, s_i2s);
     audio_pipeline_remove_listener(s_pipe);
     audio_event_iface_destroy(s_evt);
     audio_pipeline_deinit(s_pipe);
+    audio_element_deinit(s_src);
     audio_element_deinit(s_aac);
     audio_element_deinit(s_m2s);
     audio_element_deinit(s_i2s);
-    aac_inject_set_hooks(NULL);
-    aac_inject_deinit();
     s_pipe = NULL;
+    s_src = NULL;
     s_aac = NULL;
     s_m2s = NULL;
     s_i2s = NULL;
     s_evt = NULL;
     s_own_pipe = false;
+}
+
+static void clip_reset_decoder(void)
+{
+    if (!s_aac) {
+        return;
+    }
+    audio_element_reset_input_ringbuf(s_aac);
+    audio_element_reset_state(s_aac);
+    audio_element_resume(s_aac, 0, 500);
 }
 
 static esp_err_t play_id(sb_clip_id_t id, bool loop, bool wait, int timeout_ms)
@@ -250,33 +331,30 @@ static esp_err_t play_id(sb_clip_id_t id, bool loop, bool wait, int timeout_ms)
     const uint8_t *start = clip_start[id];
     size_t len = (size_t)(clip_end[id] - start);
     int dur = sb_adts_duration_ms(start, len);
-    /* Short pause only — a clip-length TIMEOUT gap stalls AAC and the next play dies. */
     int gap = loop ? 800 : 0;
-    if (!radio_player_is_running()) {
-        if (ensure_pipe() != ESP_OK) {
-            return ESP_FAIL;
-        }
+
+    if (ensure_pipe() != ESP_OK) {
+        return ESP_FAIL;
     }
-    pump_music_info();
-    ESP_LOGI(TAG, "CLIP play name=%s loop=%d dur_ms=%d wait=%d",
-             clip_name[id], (int)loop, dur, (int)wait);
-    esp_err_t err = aac_inject_play(start, len, loop, gap);
-    if (err != ESP_OK) {
-        return err;
-    }
+
+    ESP_LOGI(TAG, "CLIP play name=%s loop=%d dur_ms=%d wait=%d prefetch=%d",
+             clip_name[id], (int)loop, dur, (int)wait, (int)radio_player_is_prefetching());
+    clip_src_play(start, len, loop, gap);
     if (!wait) {
         return ESP_OK;
     }
-    /* Inject queues the whole file in milliseconds. Wait out speaker time. */
+
     int wait_ms = dur + SB_CLIP_TAIL_MS;
     if (timeout_ms > 0 && timeout_ms < wait_ms) {
         wait_ms = timeout_ms;
     }
+    /* Wait full speaker time — s_src_playing clears when bytes are queued, not when I2S is done. */
     int64_t deadline = esp_timer_get_time() + (int64_t)wait_ms * 1000;
     while (esp_timer_get_time() < deadline) {
         pump_music_info();
         vTaskDelay(pdMS_TO_TICKS(50));
     }
+    clip_src_stop();
     return ESP_OK;
 }
 
@@ -306,12 +384,12 @@ esp_err_t clip_player_wait_started(int timeout_ms)
     int64_t deadline = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
     while (esp_timer_get_time() < deadline) {
         pump_music_info();
-        if (aac_inject_has_started()) {
+        if (s_src_started) {
             return ESP_OK;
         }
         vTaskDelay(pdMS_TO_TICKS(20));
     }
-    return aac_inject_has_started() ? ESP_OK : ESP_ERR_TIMEOUT;
+    return s_src_started ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
 void clip_player_tick(void)
@@ -321,10 +399,10 @@ void clip_player_tick(void)
 
 void clip_player_stop(void)
 {
-    aac_inject_stop();
+    clip_src_stop();
 }
 
 bool clip_player_is_active(void)
 {
-    return aac_inject_is_playing();
+    return s_src_playing;
 }

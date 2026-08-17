@@ -15,6 +15,7 @@ typedef enum {
     INJ_HOLD,
     INJ_CLIP,
     INJ_GAP,
+    INJ_DRAIN,
 } inj_mode_t;
 
 static audio_element_handle_t s_el;
@@ -29,6 +30,7 @@ static size_t s_len;
 static size_t s_pos;
 static int s_gap_ms;
 static int64_t s_gap_until;
+static int64_t s_drain_until;
 static TaskHandle_t s_waiter;
 static SemaphoreHandle_t s_mu;
 
@@ -74,6 +76,12 @@ static void clip_ended_locked(void)
     s_data = NULL;
     s_len = 0;
     s_pos = 0;
+    if (s_drain_until > 0 && esp_timer_get_time() < s_drain_until) {
+        /* Keep decoder/I2S fed from in-rb until speaker time is done. PASS/HOLD
+         * here would underrun into zeros — that is the end-of-atualizado blip. */
+        s_mode = INJ_DRAIN;
+        return;
+    }
     s_mode = s_passthrough ? INJ_PASS : INJ_HOLD;
     notify_done();
 }
@@ -91,6 +99,22 @@ static esp_err_t inject_open(audio_element_handle_t self)
 static int inject_process(audio_element_handle_t self, char *in_buffer, int in_len)
 {
     inj_mode_t mode = s_mode;
+    if (mode == INJ_DRAIN) {
+        if (esp_timer_get_time() >= s_drain_until) {
+            bool pass;
+            lock();
+            s_drain_until = 0;
+            pass = s_passthrough;
+            s_mode = pass ? INJ_PASS : INJ_HOLD;
+            notify_done();
+            unlock();
+            if (pass && s_hooks.reset_decoder) {
+                s_hooks.reset_decoder();
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+        return AEL_IO_TIMEOUT;
+    }
     if (mode == INJ_HOLD) {
         vTaskDelay(pdMS_TO_TICKS(10));
         return AEL_IO_TIMEOUT;
@@ -201,19 +225,31 @@ void aac_inject_set_passthrough(bool on)
     }
 }
 
+void aac_inject_hold(void)
+{
+    lock();
+    if (!s_playing) {
+        s_mode = INJ_HOLD;
+    }
+    unlock();
+}
+
 esp_err_t aac_inject_play(const uint8_t *data, size_t len, bool loop, int gap_ms)
 {
     if (!s_el || !data || len < 16) {
         return ESP_ERR_INVALID_ARG;
     }
     lock();
-    bool live = s_playing || s_mode == INJ_CLIP || s_mode == INJ_GAP;
+    bool live = s_playing || s_mode == INJ_CLIP || s_mode == INJ_GAP || s_mode == INJ_DRAIN;
     s_playing = true;
     s_data = data;
     s_len = len;
     s_pos = 0;
     s_loop = loop;
     s_gap_ms = gap_ms > 0 ? gap_ms : 0;
+    s_drain_until = (!loop && gap_ms > 0)
+        ? (esp_timer_get_time() + (int64_t)gap_ms * 1000)
+        : 0;
     if (live) {
         /* Same-rate UI clips: swap ADTS in place. Decoder reset + i2s_set_clk
          * pauses I2S and drops SoftAP clients. */
@@ -223,11 +259,13 @@ esp_err_t aac_inject_play(const uint8_t *data, size_t len, bool loop, int gap_ms
         return ESP_OK;
     }
     s_started = false;
-    s_mode = INJ_CLIP;
     unlock();
     if (s_hooks.on_clip) {
         s_hooks.on_clip(true);
     }
+    lock();
+    s_mode = INJ_CLIP;
+    unlock();
     ESP_LOGI(TAG, "inject clip %u bytes loop=%d gap=%d", (unsigned)len, (int)loop, gap_ms);
     return ESP_OK;
 }
@@ -239,6 +277,7 @@ void aac_inject_stop(void)
     s_len = 0;
     s_pos = 0;
     s_loop = false;
+    s_drain_until = 0;
     s_mode = s_passthrough ? INJ_PASS : INJ_HOLD;
     bool was = s_playing;
     unlock();

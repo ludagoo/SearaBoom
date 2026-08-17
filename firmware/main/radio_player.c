@@ -38,6 +38,7 @@ static audio_element_handle_t s_i2s;
 static audio_event_iface_handle_t s_evt;
 static int s_volume = SB_DEFAULT_VOLUME;
 static bool s_running;
+static bool s_prefetching;
 static bool s_got_music_info;
 static int s_sample_rate = 22050;
 static volatile int64_t s_last_pcm_ms;
@@ -267,9 +268,76 @@ static void radio_on_inject_clip(bool active)
         i2s_stream_set_clk(s_i2s, 22050, 16, 2);
     } else {
         i2s_alc_volume_set(s_i2s, volume_to_alc(s_volume));
-        int rate = s_sample_rate > 0 ? s_sample_rate : 44100;
+        /* Called after DRAIN, so the voice has finished. 22050 was the clip; stream is HE-AAC. */
+        int rate = (s_sample_rate >= 32000) ? s_sample_rate : 44100;
         i2s_stream_set_clk(s_i2s, rate, 16, 2);
     }
+}
+
+static int _http_stream_event_handle(http_stream_event_msg_t *msg);
+
+static void radio_store_url_volume(const char *url, int volume)
+{
+    s_volume = volume;
+    strncpy(s_url, url ? url : "", sizeof(s_url) - 1);
+    s_url[sizeof(s_url) - 1] = 0;
+}
+
+static void radio_init_http(void)
+{
+    http_stream_cfg_t http_cfg = HTTP_STREAM_CFG_DEFAULT();
+    http_cfg.type = AUDIO_STREAM_READER;
+    http_cfg.enable_playlist_parser = false;
+    http_cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    http_cfg.event_handle = _http_stream_event_handle;
+    http_cfg.user_agent = "SearaBoom/1.0";
+    http_cfg.out_rb_size = 256 * 1024;
+    http_cfg.task_stack = 5 * 1024;
+    http_cfg.stack_in_ext = false;
+    s_http = http_stream_init(&http_cfg);
+}
+
+static void radio_init_inject(void)
+{
+    s_inject = aac_inject_init();
+    aac_inject_set_passthrough(true);
+    aac_inject_hooks_t hooks = {
+        .reset_decoder = radio_reset_decoder,
+        .on_clip = radio_on_inject_clip,
+    };
+    aac_inject_set_hooks(&hooks);
+}
+
+static void radio_init_decoder_i2s(int volume)
+{
+    i2s_stream_cfg_t i2s_cfg = I2S_STREAM_CFG_DEFAULT();
+    i2s_cfg.type = AUDIO_STREAM_WRITER;
+    i2s_cfg.use_alc = true;
+    i2s_cfg.volume = volume_to_alc(volume);
+    i2s_stream_set_channel_type(&i2s_cfg, I2S_CHANNEL_TYPE_RIGHT_LEFT);
+    s_i2s = i2s_stream_init(&i2s_cfg);
+
+    aac_decoder_cfg_t aac_cfg = DEFAULT_AAC_DECODER_CONFIG();
+    /* Stream is HE-AACv2 @ 44.1 kHz; without plus we only get the LC core @ 22.05 kHz. */
+    aac_cfg.plus_enable = true;
+    aac_cfg.out_rb_size = 16 * 1024;
+    aac_cfg.task_stack = 8 * 1024;
+    aac_cfg.stack_in_ext = false;
+    s_aac = aac_decoder_init(&aac_cfg);
+
+    s_m2s = mono_to_stereo_init();
+}
+
+static void radio_mark_started(void)
+{
+    s_got_music_info = false;
+    s_running = true;
+    s_prefetching = false;
+    int64_t now = esp_timer_get_time() / 1000;
+    s_last_pcm_ms = now;
+    s_stall_grace_until_ms = now + SB_STREAM_STALL_GRACE_MS;
+    s_stall_strikes = 0;
+    s_restart_backoff_ms = 500;
 }
 
 static int _http_stream_event_handle(http_stream_event_msg_t *msg)
@@ -287,58 +355,97 @@ static int _http_stream_event_handle(http_stream_event_msg_t *msg)
     return ESP_OK;
 }
 
+static void radio_start_listener(void)
+{
+    if (!s_evt) {
+        audio_event_iface_cfg_t evt_cfg = AUDIO_EVENT_IFACE_DEFAULT_CFG();
+        s_evt = audio_event_iface_init(&evt_cfg);
+    }
+    audio_pipeline_set_listener(s_pipeline, s_evt);
+}
+
+static void radio_board_codec_start(void)
+{
+    audio_board_handle_t board_handle = audio_board_init();
+    if (board_handle && board_handle->audio_hal) {
+        audio_hal_ctrl_codec(board_handle->audio_hal, AUDIO_HAL_CODEC_MODE_DECODE, AUDIO_HAL_CTRL_START);
+    }
+}
+
+esp_err_t radio_player_prefetch(const char *url, int volume)
+{
+    if (s_running || s_prefetching) {
+        return ESP_OK;
+    }
+    radio_store_url_volume(url, volume);
+    radio_board_codec_start();
+
+    ESP_LOGI(TAG, "Prefetch stream %s (HTTP filling, no decoder)", url);
+    audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
+    s_pipeline = audio_pipeline_init(&pipeline_cfg);
+    radio_init_http();
+    radio_init_inject();
+    aac_inject_hold();
+
+    audio_pipeline_register(s_pipeline, s_http, "http");
+    audio_pipeline_register(s_pipeline, s_inject, "inj");
+    const char *link_tag[2] = {"http", "inj"};
+    audio_pipeline_link(s_pipeline, &link_tag[0], 2);
+    audio_element_set_uri(s_http, url);
+    audio_pipeline_run(s_pipeline);
+    s_prefetching = true;
+    return ESP_OK;
+}
+
+bool radio_player_is_prefetching(void)
+{
+    return s_prefetching;
+}
+
+static esp_err_t radio_attach_decoder_from_prefetch(int volume)
+{
+    ESP_LOGI(TAG, "Attach HE-AAC decoder to prefetched HTTP");
+    radio_init_decoder_i2s(volume);
+    audio_pipeline_register(s_pipeline, s_aac, "aac");
+    audio_pipeline_register(s_pipeline, s_m2s, "m2s");
+    audio_pipeline_register(s_pipeline, s_i2s, "i2s");
+
+    audio_pipeline_pause(s_pipeline);
+    audio_pipeline_breakup_elements(s_pipeline, s_inject);
+    const char *link_tag[5] = {"http", "inj", "aac", "m2s", "i2s"};
+    if (audio_pipeline_relink(s_pipeline, &link_tag[0], 5) != ESP_OK) {
+        ESP_LOGE(TAG, "relink after prefetch failed");
+        return ESP_FAIL;
+    }
+    radio_start_listener();
+    aac_inject_set_passthrough(true);
+    audio_pipeline_run(s_pipeline);
+    audio_pipeline_resume(s_pipeline);
+    radio_player_set_volume(volume);
+    radio_mark_started();
+    return ESP_OK;
+}
+
 esp_err_t radio_player_start(const char *url, int volume)
 {
     if (s_running) {
         radio_player_stop();
     }
     clip_player_release_pipe();
+    radio_store_url_volume(url, volume);
+
+    if (s_prefetching && s_http && s_pipeline) {
+        return radio_attach_decoder_from_prefetch(volume);
+    }
 
     ESP_LOGI(TAG, "Start stream %s", url);
-
-    audio_board_handle_t board_handle = audio_board_init();
-    if (board_handle && board_handle->audio_hal) {
-        audio_hal_ctrl_codec(board_handle->audio_hal, AUDIO_HAL_CODEC_MODE_DECODE, AUDIO_HAL_CTRL_START);
-    }
+    radio_board_codec_start();
 
     audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
     s_pipeline = audio_pipeline_init(&pipeline_cfg);
-
-    http_stream_cfg_t http_cfg = HTTP_STREAM_CFG_DEFAULT();
-    http_cfg.type = AUDIO_STREAM_READER;
-    http_cfg.enable_playlist_parser = false;
-    http_cfg.crt_bundle_attach = esp_crt_bundle_attach;
-    http_cfg.event_handle = _http_stream_event_handle;
-    http_cfg.user_agent = "SearaBoom/1.0";
-    http_cfg.out_rb_size = 256 * 1024;
-    http_cfg.task_stack = 5 * 1024;
-    http_cfg.stack_in_ext = false;
-    s_http = http_stream_init(&http_cfg);
-
-    s_inject = aac_inject_init();
-    aac_inject_set_passthrough(true);
-    aac_inject_hooks_t hooks = {
-        .reset_decoder = radio_reset_decoder,
-        .on_clip = radio_on_inject_clip,
-    };
-    aac_inject_set_hooks(&hooks);
-
-    i2s_stream_cfg_t i2s_cfg = I2S_STREAM_CFG_DEFAULT();
-    i2s_cfg.type = AUDIO_STREAM_WRITER;
-    i2s_cfg.use_alc = true;
-    i2s_cfg.volume = volume_to_alc(volume);
-    i2s_stream_set_channel_type(&i2s_cfg, I2S_CHANNEL_TYPE_RIGHT_LEFT);
-    s_i2s = i2s_stream_init(&i2s_cfg);
-
-    aac_decoder_cfg_t aac_cfg = DEFAULT_AAC_DECODER_CONFIG();
-    /* Stream is HE-AACv2 @ 44.1 kHz; without plus we only get the LC core @ 22.05 kHz. */
-    aac_cfg.plus_enable = true;
-    aac_cfg.out_rb_size = 16 * 1024;
-    aac_cfg.task_stack = 8 * 1024;
-    aac_cfg.stack_in_ext = false;
-    s_aac = aac_decoder_init(&aac_cfg);
-
-    s_m2s = mono_to_stereo_init();
+    radio_init_http();
+    radio_init_inject();
+    radio_init_decoder_i2s(volume);
 
     audio_pipeline_register(s_pipeline, s_http, "http");
     audio_pipeline_register(s_pipeline, s_inject, "inj");
@@ -349,24 +456,10 @@ esp_err_t radio_player_start(const char *url, int volume)
     const char *link_tag[5] = {"http", "inj", "aac", "m2s", "i2s"};
     audio_pipeline_link(s_pipeline, &link_tag[0], 5);
     audio_element_set_uri(s_http, url);
-
-    audio_event_iface_cfg_t evt_cfg = AUDIO_EVENT_IFACE_DEFAULT_CFG();
-    s_evt = audio_event_iface_init(&evt_cfg);
-    audio_pipeline_set_listener(s_pipeline, s_evt);
-
+    radio_start_listener();
     audio_pipeline_run(s_pipeline);
     radio_player_set_volume(volume);
-    s_got_music_info = false;
-    s_running = true;
-    {
-        int64_t now = esp_timer_get_time() / 1000;
-        s_last_pcm_ms = now;
-        s_stall_grace_until_ms = now + SB_STREAM_STALL_GRACE_MS;
-        s_stall_strikes = 0;
-        s_restart_backoff_ms = 500;
-    }
-    strncpy(s_url, url ? url : "", sizeof(s_url) - 1);
-    s_url[sizeof(s_url) - 1] = 0;
+    radio_mark_started();
     return ESP_OK;
 }
 
@@ -394,36 +487,59 @@ void radio_player_resume(void)
 
 void radio_player_stop(void)
 {
-    if (!s_running) {
+    if (!s_running && !s_prefetching) {
         s_want_stop = false;
         return;
     }
-    audio_pipeline_stop(s_pipeline);
-    audio_pipeline_wait_for_stop(s_pipeline);
-    audio_pipeline_terminate(s_pipeline);
-    audio_pipeline_unregister(s_pipeline, s_http);
-    audio_pipeline_unregister(s_pipeline, s_inject);
-    audio_pipeline_unregister(s_pipeline, s_aac);
-    audio_pipeline_unregister(s_pipeline, s_m2s);
-    audio_pipeline_unregister(s_pipeline, s_i2s);
-    audio_pipeline_remove_listener(s_pipeline);
-    audio_event_iface_destroy(s_evt);
-    audio_pipeline_deinit(s_pipeline);
-    audio_element_deinit(s_http);
-    audio_element_deinit(s_aac);
-    audio_element_deinit(s_m2s);
-    audio_element_deinit(s_i2s);
+    if (s_pipeline) {
+        audio_pipeline_stop(s_pipeline);
+        audio_pipeline_wait_for_stop(s_pipeline);
+        audio_pipeline_terminate(s_pipeline);
+        if (s_http) {
+            audio_pipeline_unregister(s_pipeline, s_http);
+        }
+        if (s_inject) {
+            audio_pipeline_unregister(s_pipeline, s_inject);
+        }
+        if (s_aac) {
+            audio_pipeline_unregister(s_pipeline, s_aac);
+        }
+        if (s_m2s) {
+            audio_pipeline_unregister(s_pipeline, s_m2s);
+        }
+        if (s_i2s) {
+            audio_pipeline_unregister(s_pipeline, s_i2s);
+        }
+        audio_pipeline_remove_listener(s_pipeline);
+        audio_pipeline_deinit(s_pipeline);
+        s_pipeline = NULL;
+    }
+    if (s_evt) {
+        audio_event_iface_destroy(s_evt);
+        s_evt = NULL;
+    }
+    if (s_http) {
+        audio_element_deinit(s_http);
+        s_http = NULL;
+    }
+    if (s_aac) {
+        audio_element_deinit(s_aac);
+        s_aac = NULL;
+    }
+    if (s_m2s) {
+        audio_element_deinit(s_m2s);
+        s_m2s = NULL;
+    }
+    if (s_i2s) {
+        audio_element_deinit(s_i2s);
+        s_i2s = NULL;
+    }
     aac_inject_set_hooks(NULL);
     aac_inject_deinit();
     aac_inject_set_passthrough(false);
-    s_pipeline = NULL;
-    s_http = NULL;
     s_inject = NULL;
-    s_aac = NULL;
-    s_m2s = NULL;
-    s_i2s = NULL;
-    s_evt = NULL;
     s_running = false;
+    s_prefetching = false;
     s_got_music_info = false;
     s_want_stop = false;
 }
@@ -492,7 +608,10 @@ void radio_player_loop(void)
         return;
     }
 
-    check_stream_stall();
+    bool clip = aac_inject_is_playing();
+    if (!clip) {
+        check_stream_stall();
+    }
 
     if (!s_evt) {
         return;
@@ -507,6 +626,11 @@ void radio_player_loop(void)
         && msg.cmd == AEL_MSG_CMD_REPORT_MUSIC_INFO) {
         audio_element_info_t music_info = {0};
         audio_element_getinfo(s_aac, &music_info);
+        if (clip || (music_info.sample_rates > 0 && music_info.sample_rates < 32000)) {
+            ESP_LOGI(TAG, "clip music info rate=%d bits=%d ch=%d (I2S stays 22050 until stream)",
+                     music_info.sample_rates, music_info.bits, music_info.channels);
+            return;
+        }
         ESP_LOGI(TAG, "music info rate=%d bits=%d ch=%d -> stereo I2S",
                  music_info.sample_rates, music_info.bits, music_info.channels);
         if (music_info.sample_rates > 0) {
@@ -530,7 +654,7 @@ void radio_player_loop(void)
         && ((int)msg.data == AEL_STATUS_ERROR_OPEN || (int)msg.data == AEL_STATUS_ERROR_INPUT
             || (int)msg.data == AEL_STATUS_ERROR_PROCESS)
         && (msg.source == (void *)s_http || msg.source == (void *)s_aac);
-    if (!bad) {
+    if (!bad || clip) {
         return;
     }
 

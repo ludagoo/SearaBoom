@@ -23,7 +23,7 @@ EXPECTED_MS = {
     "ap_saved.aac": 7105,
 }
 
-CLIP_TAIL_MS = 500
+CLIP_TAIL_MS = 800
 WIFI_TIMEOUT_MS = 25000
 
 
