@@ -7,6 +7,8 @@ idf_component_register(
         "captive_portal.c"
         "radio_player.c"
         "ota_update.c"
+        "log_shipper.c"
+        "serial_cmd.c"
     INCLUDE_DIRS "."
     REQUIRES
         nvs_flash

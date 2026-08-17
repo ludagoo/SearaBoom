@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-"""SearaBoom OTA management server."""
+"""SearaBoom OTA management server + multi-device log hub."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import queue
 import re
 import shutil
 import threading
+import time
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, Response, jsonify, redirect, request, send_from_directory, stream_with_context, url_for
+from flask import Flask, Response, jsonify, request, send_from_directory, stream_with_context
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent
@@ -22,9 +25,16 @@ STATIC_DIR = ROOT / "static"
 ADMIN_TOKEN = os.environ.get("SEARABOOM_ADMIN_TOKEN", "searaboom-dev")
 HOST = os.environ.get("SEARABOOM_HOST", "0.0.0.0")
 PORT = int(os.environ.get("SEARABOOM_PORT", "8080"))
+PUBLIC_URL = os.environ.get("SEARABOOM_PUBLIC_URL", "https://searaboom.goossen.dev").rstrip("/")
+
+LOG_LINES_PER_DEVICE = 2000
 
 app = Flask(__name__, static_folder=str(STATIC_DIR))
 lock = threading.Lock()
+log_lock = threading.RLock()
+device_logs: dict[str, deque[dict]] = defaultdict(lambda: deque(maxlen=LOG_LINES_PER_DEVICE))
+device_seen: dict[str, float] = {}
+subscribers: list[queue.Queue] = []
 
 FW_DIR.mkdir(parents=True, exist_ok=True)
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
@@ -53,6 +63,19 @@ def version_tuple(v: str) -> tuple[int, int, int]:
     return tuple(int(x) for x in m.groups())  # type: ignore[return-value]
 
 
+def publish_log_event(event: dict) -> None:
+    dead: list[queue.Queue] = []
+    with log_lock:
+        for q in subscribers:
+            try:
+                q.put_nowait(event)
+            except queue.Full:
+                dead.append(q)
+        for q in dead:
+            if q in subscribers:
+                subscribers.remove(q)
+
+
 @app.get("/")
 def index():
     return send_from_directory(STATIC_DIR, "index.html")
@@ -61,7 +84,12 @@ def index():
 @app.get("/api/status")
 def status():
     meta = load_meta()
-    return jsonify({"ok": True, "firmware": meta})
+    with log_lock:
+        devices = [
+            {"device_id": did, "last_seen": device_seen.get(did), "lines": len(device_logs[did])}
+            for did in sorted(device_logs.keys())
+        ]
+    return jsonify({"ok": True, "firmware": meta, "devices": devices})
 
 
 @app.get("/api/firmware/check")
@@ -69,16 +97,18 @@ def firmware_check():
     current = request.args.get("current", "0.0.0")
     meta = load_meta()
     latest = meta.get("version") or "0.0.0"
-    update = version_tuple(latest) > version_tuple(current) and bool(meta.get("filename"))
+    cur_t = version_tuple(current)
+    lat_t = version_tuple(latest)
+    newer_full = lat_t > cur_t and bool(meta.get("filename"))
+    newer_stable = (lat_t[0], lat_t[1]) > (cur_t[0], cur_t[1]) and bool(meta.get("filename"))
     url = None
-    if update:
-        url = url_for("firmware_download", filename=meta["filename"], _external=True)
-        # Prefer public host if behind tunnel
-        public = os.environ.get("SEARABOOM_PUBLIC_URL", "https://searaboom.goossen.dev").rstrip("/")
-        url = f"{public}/api/firmware/download/{meta['filename']}"
+    if newer_full:
+        url = f"{PUBLIC_URL}/api/firmware/download/{meta['filename']}"
     return jsonify(
         {
-            "update": update,
+            "update": newer_full,
+            "update_stable": newer_stable,
+            "update_dev": newer_full,
             "version": latest,
             "current": current,
             "url": url,
@@ -90,7 +120,6 @@ def firmware_check():
 
 @app.get("/api/firmware/download/<path:filename>")
 def firmware_download(filename: str):
-    # Prevent path traversal
     safe = Path(filename).name
     return send_from_directory(FW_DIR, safe, as_attachment=True, mimetype="application/octet-stream")
 
@@ -120,10 +149,81 @@ def firmware_upload():
             "uploaded_at": datetime.now(timezone.utc).isoformat(),
         }
         save_meta(meta)
-        # Keep a stable latest.bin symlink/copy for convenience
         latest_bin = FW_DIR / "latest.bin"
         shutil.copyfile(dest, latest_bin)
     return jsonify({"ok": True, "firmware": meta})
+
+
+@app.post("/api/logs")
+def logs_ingest():
+    data = request.get_json(silent=True) or {}
+    device_id = (data.get("device_id") or "unknown").strip().lower()
+    text = data.get("text") or ""
+    if not text:
+        return jsonify({"ok": True, "accepted": 0})
+    now = time.time()
+    entries = []
+    for line in text.splitlines():
+        if not line:
+            continue
+        entry = {
+            "device_id": device_id,
+            "line": line,
+            "ts": now,
+            "server_ts": datetime.now(timezone.utc).isoformat(),
+        }
+        entries.append(entry)
+    with log_lock:
+        device_seen[device_id] = now
+        for entry in entries:
+            device_logs[device_id].append(entry)
+            publish_log_event(entry)
+    return jsonify({"ok": True, "accepted": len(entries)})
+
+
+@app.get("/api/logs")
+def logs_get():
+    device = (request.args.get("device") or "").strip().lower()
+    limit = min(int(request.args.get("limit", "200")), 1000)
+    with log_lock:
+        if device:
+            lines = list(device_logs.get(device, []))[-limit:]
+        else:
+            merged: list[dict] = []
+            for dq in device_logs.values():
+                merged.extend(dq)
+            merged.sort(key=lambda e: e.get("ts", 0))
+            lines = merged[-limit:]
+    return jsonify({"ok": True, "lines": lines})
+
+
+@app.get("/api/logs/stream")
+def logs_stream():
+    device = (request.args.get("device") or "").strip().lower()
+    q: queue.Queue = queue.Queue(maxsize=500)
+    with log_lock:
+        subscribers.append(q)
+
+    @stream_with_context
+    def gen():
+        try:
+            yield ": connected\n\n"
+            while True:
+                try:
+                    event = q.get(timeout=15)
+                except queue.Empty:
+                    yield ": ping\n\n"
+                    continue
+                if device and event.get("device_id") != device:
+                    continue
+                payload = json.dumps(event, separators=(",", ":"))
+                yield f"data: {payload}\n\n"
+        finally:
+            with log_lock:
+                if q in subscribers:
+                    subscribers.remove(q)
+
+    return Response(gen(), mimetype="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 STREAMS = {
@@ -134,13 +234,7 @@ STREAMS = {
 
 @app.get("/stream/<station>")
 def stream_proxy(station: str):
-    """Proxy live AAC with a Content-Type ADF will not mis-classify.
-
-    ESP-ADF maps:
-      - audio/aac → RAW AAC (needs ASC; fails on ADTS live streams)
-      - application/octet-stream → MP3 (wrong codec for this pipe)
-    Use a neutral type so the AAC decoder ADTS-syncs on the payload.
-    """
+    """Proxy live AAC with a Content-Type ADF will not mis-classify."""
     upstream = STREAMS.get(station)
     if not upstream:
         return jsonify({"error": "unknown station"}), 404

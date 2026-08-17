@@ -29,7 +29,13 @@ esp_err_t config_store_load(sb_config_t *cfg)
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NS, NVS_READONLY, &h);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "No saved config, using defaults");
+        ESP_LOGW(TAG, "No saved config, using defaults (vol=%d)", SB_DEFAULT_VOLUME);
+        if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+            nvs_set_i32(h, "volume", SB_DEFAULT_VOLUME);
+            nvs_set_i32(h, "vol_curve", 2);
+            nvs_commit(h);
+            nvs_close(h);
+        }
         return ESP_OK;
     }
 
@@ -46,7 +52,8 @@ esp_err_t config_store_load(sb_config_t *cfg)
         strncpy(cfg->url_key, "URL1", sizeof(cfg->url_key) - 1);
     }
     int32_t vol = SB_DEFAULT_VOLUME;
-    if (nvs_get_i32(h, "volume", &vol) == ESP_OK) {
+    bool had_volume = (nvs_get_i32(h, "volume", &vol) == ESP_OK);
+    if (had_volume) {
         cfg->volume = (int)vol;
     }
     int32_t vol_curve = 0;
@@ -65,6 +72,7 @@ esp_err_t config_store_load(sb_config_t *cfg)
      * Curve 2: 1→-36dB … 21→+2dB (clean max measured at old step 18).
      * Remap so perceived loudness is preserved.
      */
+    bool dirty = false;
     if (vol_curve < 2) {
         int old = cfg->volume;
         int old_alc = -36 + ((old - 1) * 45) / (SB_VOLUME_MAX - 1);
@@ -79,10 +87,16 @@ esp_err_t config_store_load(sb_config_t *cfg)
             cfg->volume = SB_VOLUME_MAX;
         }
         ESP_LOGI(TAG, "Migrated volume curve v1→v2: step %d → %d", old, cfg->volume);
+        dirty = true;
+        vol_curve = 2;
+    }
+
+    /* Seed default (max) or migrated volume into NVS so it survives reboot/OTA. */
+    if (!had_volume || dirty) {
         nvs_handle_t hw;
         if (nvs_open(NVS_NS, NVS_READWRITE, &hw) == ESP_OK) {
             nvs_set_i32(hw, "volume", cfg->volume);
-            nvs_set_i32(hw, "vol_curve", 2);
+            nvs_set_i32(hw, "vol_curve", vol_curve < 2 ? 2 : vol_curve);
             nvs_commit(hw);
             nvs_close(hw);
         }
@@ -100,9 +114,11 @@ esp_err_t config_store_save(const sb_config_t *cfg)
     ESP_ERROR_CHECK(nvs_set_str(h, "pass", cfg->password));
     ESP_ERROR_CHECK(nvs_set_str(h, "url", cfg->url_key));
     ESP_ERROR_CHECK(nvs_set_i32(h, "volume", cfg->volume));
+    /* Keep curve marker so boot does not remigrate a user-chosen level. */
+    ESP_ERROR_CHECK(nvs_set_i32(h, "vol_curve", 2));
     ESP_ERROR_CHECK(nvs_commit(h));
     nvs_close(h);
-    ESP_LOGI(TAG, "Saved config");
+    ESP_LOGI(TAG, "Saved config (vol=%d)", cfg->volume);
     return ESP_OK;
 }
 

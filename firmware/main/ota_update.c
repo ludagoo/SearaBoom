@@ -12,6 +12,7 @@
 #include "cJSON.h"
 #include "ota_update.h"
 #include "led_status.h"
+#include "log_shipper.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "ota_update";
@@ -36,26 +37,52 @@ static esp_err_t http_event(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-static int version_cmp(const char *a, const char *b)
+static bool parse_version(const char *v, int *a, int *b, int *c)
 {
-    int a1 = 0, a2 = 0, a3 = 0, b1 = 0, b2 = 0, b3 = 0;
-    sscanf(a, "%d.%d.%d", &a1, &a2, &a3);
-    sscanf(b, "%d.%d.%d", &b1, &b2, &b3);
-    if (a1 != b1) {
-        return a1 - b1;
+    *a = *b = *c = 0;
+    if (!v || !*v) {
+        return false;
     }
-    if (a2 != b2) {
-        return a2 - b2;
-    }
-    return a3 - b3;
+    return sscanf(v, "%d.%d.%d", a, b, c) >= 1;
 }
 
-esp_err_t ota_update_check_on_boot(void)
+/* Full semver: latest > current */
+static bool is_newer_full(const char *latest, const char *current)
+{
+    int l1, l2, l3, c1, c2, c3;
+    parse_version(latest, &l1, &l2, &l3);
+    parse_version(current, &c1, &c2, &c3);
+    if (l1 != c1) {
+        return l1 > c1;
+    }
+    if (l2 != c2) {
+        return l2 > c2;
+    }
+    return l3 > c3;
+}
+
+/* Boot policy: only major.minor (ignore patch / 3rd digit) */
+static bool is_newer_stable(const char *latest, const char *current)
+{
+    int l1, l2, l3, c1, c2, c3;
+    parse_version(latest, &l1, &l2, &l3);
+    parse_version(current, &c1, &c2, &c3);
+    (void)l3;
+    (void)c3;
+    if (l1 != c1) {
+        return l1 > c1;
+    }
+    return l2 > c2;
+}
+
+esp_err_t ota_update_check(ota_policy_t policy)
 {
     const esp_app_desc_t *app = esp_app_get_description();
-    ESP_LOGI(TAG, "Current firmware %s", app->version);
+    const char *policy_name = (policy == OTA_POLICY_DEV) ? "dev" : "stable";
+    ESP_LOGI(TAG, "OTA check policy=%s current=%s", policy_name, app->version);
 
     led_status_set(SB_LED_YELLOW, 250);
+    log_shipper_set_paused(true);
 
     char check_url[256];
     snprintf(check_url, sizeof(check_url), "%s/api/firmware/check?current=%s",
@@ -81,37 +108,51 @@ esp_err_t ota_update_check_on_boot(void)
         ESP_LOGW(TAG, "OTA check failed err=%s status=%d (continuing)", esp_err_to_name(err), status);
         led_status_set(SB_LED_MAGENTA, 200);
         vTaskDelay(pdMS_TO_TICKS(1500));
+        log_shipper_set_paused(false);
         return err == ESP_OK ? ESP_FAIL : err;
     }
 
     cJSON *root = cJSON_Parse(body);
     if (!root) {
         ESP_LOGW(TAG, "Bad OTA JSON");
+        log_shipper_set_paused(false);
         return ESP_FAIL;
     }
-    cJSON *update = cJSON_GetObjectItem(root, "update");
     cJSON *version = cJSON_GetObjectItem(root, "version");
     cJSON *url = cJSON_GetObjectItem(root, "url");
-    bool need = cJSON_IsTrue(update);
-    if (!need && cJSON_IsString(version)) {
-        need = version_cmp(version->valuestring, app->version) > 0;
+    const char *latest = cJSON_IsString(version) ? version->valuestring : NULL;
+    const char *fw_url_in = cJSON_IsString(url) ? url->valuestring : NULL;
+
+    bool need = false;
+    if (latest && fw_url_in) {
+        if (policy == OTA_POLICY_DEV) {
+            need = is_newer_full(latest, app->version);
+        } else {
+            need = is_newer_stable(latest, app->version);
+        }
     }
-    if (!need || !cJSON_IsString(url)) {
-        ESP_LOGI(TAG, "Firmware up to date");
+
+    if (!need) {
+        if (latest && is_newer_full(latest, app->version) && policy == OTA_POLICY_STABLE) {
+            ESP_LOGI(TAG, "Patch-only update %s -> %s ignored on boot (use serial 'ota')",
+                     app->version, latest);
+        } else {
+            ESP_LOGI(TAG, "Firmware up to date (%s)", app->version);
+        }
         cJSON_Delete(root);
+        led_status_set(SB_LED_GREEN, 500);
+        log_shipper_set_paused(false);
         return ESP_OK;
     }
 
     char fw_url[256];
-    strncpy(fw_url, url->valuestring, sizeof(fw_url) - 1);
+    strncpy(fw_url, fw_url_in, sizeof(fw_url) - 1);
     fw_url[sizeof(fw_url) - 1] = 0;
     char new_ver[32] = {0};
-    if (cJSON_IsString(version)) {
-        strncpy(new_ver, version->valuestring, sizeof(new_ver) - 1);
-    }
+    strncpy(new_ver, latest, sizeof(new_ver) - 1);
     cJSON_Delete(root);
 
-    ESP_LOGW(TAG, "OTA update available -> %s (%s)", new_ver, fw_url);
+    ESP_LOGW(TAG, "OTA update available -> %s (%s) policy=%s", new_ver, fw_url, policy_name);
     led_status_set(SB_LED_YELLOW, 100);
 
     esp_http_client_config_t ota_http = {
@@ -126,7 +167,7 @@ esp_err_t ota_update_check_on_boot(void)
 
     esp_err_t ota_err = esp_https_ota(&ota_config);
     if (ota_err == ESP_OK) {
-        ESP_LOGI(TAG, "OTA success, rebooting");
+        ESP_LOGI(TAG, "OTA success, rebooting into %s", new_ver);
         led_status_set(SB_LED_GREEN, 0);
         vTaskDelay(pdMS_TO_TICKS(500));
         esp_restart();
@@ -135,5 +176,11 @@ esp_err_t ota_update_check_on_boot(void)
     ESP_LOGE(TAG, "OTA failed: %s", esp_err_to_name(ota_err));
     led_status_set(SB_LED_MAGENTA, 150);
     vTaskDelay(pdMS_TO_TICKS(2000));
+    log_shipper_set_paused(false);
     return ota_err;
+}
+
+esp_err_t ota_update_check_on_boot(void)
+{
+    return ota_update_check(OTA_POLICY_STABLE);
 }

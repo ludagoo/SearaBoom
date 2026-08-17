@@ -12,9 +12,15 @@ config SEARABOOM_OTA_URL
     string "OTA base URL"
     default "https://searaboom.goossen.dev"
 
+config SEARABOOM_LOG_URL
+    string "Log ingest base URL"
+    default "https://searaboom.goossen.dev"
+    help
+        Public OTA host is most reliable (AP client isolation / dual-NIC LAN can break LAN http).
+
 config SEARABOOM_FW_VERSION
-    string "Firmware version"
-    default "1.0.4"
+    string "Firmware version (keep in sync with firmware/VERSION)"
+    default "0.0.1"
 
 config SEARABOOM_I2S_DOUT
     int "I2S DOUT GPIO"

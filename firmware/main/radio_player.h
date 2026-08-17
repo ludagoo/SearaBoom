@@ -10,5 +10,7 @@ void radio_player_loop(void);
 esp_err_t radio_player_set_volume(int volume);
 int radio_player_get_volume(void);
 bool radio_player_has_music_info(void);
+/* Short confirmation tone mixed into the live stream (touch feedback). */
+void radio_player_beep(void);
 
 #endif

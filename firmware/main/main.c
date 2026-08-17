@@ -6,6 +6,7 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
+#include "esp_app_desc.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
 
@@ -16,6 +17,8 @@
 #include "captive_portal.h"
 #include "radio_player.h"
 #include "ota_update.h"
+#include "log_shipper.h"
+#include "serial_cmd.h"
 
 static const char *TAG = "searaboom";
 static sb_config_t s_cfg;
@@ -35,6 +38,7 @@ static void volume_cb(int delta, void *ctx)
     radio_player_set_volume(v);
     s_cfg.volume = v;
     config_store_save(&s_cfg);
+    radio_player_beep();
 }
 
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -92,19 +96,23 @@ static void ota_task_fn(void *arg)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "SearaBoom ADF starting (fw %s)", CONFIG_SEARABOOM_FW_VERSION);
+    const esp_app_desc_t *app = esp_app_get_description();
+    ESP_LOGI(TAG, "SearaBoom ADF starting (fw %s)", app->version);
     ESP_ERROR_CHECK(config_store_init());
     ESP_ERROR_CHECK(led_status_init());
     led_status_set(SB_LED_WHITE, 0);
 
     config_store_load(&s_cfg);
+    serial_cmd_init();
 
     if (!wifi_connect_or_setup()) {
         ESP_LOGW(TAG, "WiFi timeout -> captive portal");
         captive_portal_run(); /* never returns */
     }
 
-    ESP_LOGI(TAG, "WiFi OK, checking OTA");
+    log_shipper_init();
+
+    ESP_LOGI(TAG, "WiFi OK, checking OTA (stable policy: major.minor only)");
     if (xTaskCreatePinnedToCore(ota_task_fn, "ota", 12288, xTaskGetCurrentTaskHandle(), 5, NULL, 0) == pdPASS) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(120000));
     } else {
@@ -112,10 +120,7 @@ void app_main(void)
     }
 
     const char *url = config_store_stream_url(&s_cfg);
-    ESP_LOGI(TAG, "Connecting to stream %s (%s)", s_cfg.url_key, url);
-    if (s_cfg.volume < 8) {
-        s_cfg.volume = SB_DEFAULT_VOLUME;
-    }
+    ESP_LOGI(TAG, "Connecting to stream %s (%s) vol=%d", s_cfg.url_key, url, s_cfg.volume);
     if (radio_player_start(url, s_cfg.volume) != ESP_OK) {
         ESP_LOGE(TAG, "Radio start failed");
     }

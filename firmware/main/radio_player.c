@@ -1,4 +1,5 @@
 #include <string.h>
+#include <stdint.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -26,10 +27,94 @@ static audio_event_iface_handle_t s_evt;
 static int s_volume = SB_DEFAULT_VOLUME;
 static bool s_running;
 static bool s_got_music_info;
+static int s_sample_rate = 22050;
+static volatile int s_beep_frames;
+static uint32_t s_beep_phase;
+static int s_beep_total_frames;
+
+#define SB_BEEP_HZ 2000
+#define SB_BEEP_MS 55
+#define SB_BEEP_AMP 4200
+
+/* Quarter-wave sine, 0..63 → 0..32767; gentler than a square click. */
+static const int16_t s_sin_q[64] = {
+    0, 804, 1608, 2410, 3212, 4011, 4808, 5600, 6389, 7173, 7952, 8724, 9490, 10249, 11000, 11743,
+    12476, 13200, 13914, 14617, 15308, 15988, 16655, 17309, 17949, 18575, 19186, 19782, 20362, 20926, 21473, 22003,
+    22516, 23011, 23488, 23946, 24385, 24805, 25205, 25585, 25945, 26284, 26602, 26900, 27176, 27431, 27665, 27876,
+    28066, 28234, 28379, 28502, 28603, 28681, 28736, 28769, 28779, 28766, 28731, 28673, 28593, 28490, 28365, 28217,
+};
+
+static int16_t soft_sine(uint32_t phase)
+{
+    unsigned idx = (phase >> 10) & 0xFFu;
+    unsigned quad = idx >> 6;
+    unsigned i = idx & 63;
+    int16_t v = s_sin_q[i];
+    if (quad == 1) {
+        v = s_sin_q[63 - i];
+    } else if (quad == 2) {
+        v = (int16_t)(-s_sin_q[i]);
+    } else if (quad == 3) {
+        v = (int16_t)(-s_sin_q[63 - i]);
+    }
+    return v;
+}
 
 bool radio_player_has_music_info(void)
 {
     return s_got_music_info;
+}
+
+void radio_player_beep(void)
+{
+    if (!s_running) {
+        return;
+    }
+    int rate = s_sample_rate > 0 ? s_sample_rate : 22050;
+    s_beep_total_frames = (rate * SB_BEEP_MS) / 1000;
+    if (s_beep_total_frames < 16) {
+        s_beep_total_frames = 16;
+    }
+    s_beep_phase = 0;
+    s_beep_frames = s_beep_total_frames;
+}
+
+static void mix_beep_s16le(int16_t *samples, int frames, int channels)
+{
+    if (s_beep_frames <= 0 || channels < 1) {
+        return;
+    }
+    int rate = s_sample_rate > 0 ? s_sample_rate : 22050;
+    uint32_t incr = (uint32_t)((SB_BEEP_HZ * 65536u) / (unsigned)rate);
+    int total = s_beep_total_frames > 0 ? s_beep_total_frames : 1;
+    int edge = total / 3;
+    if (edge < 1) {
+        edge = 1;
+    }
+
+    for (int i = 0; i < frames && s_beep_frames > 0; i++) {
+        int left = s_beep_frames;
+        int elapsed = total - left;
+        int amp = SB_BEEP_AMP;
+        if (elapsed < edge) {
+            amp = (amp * elapsed) / edge;
+        } else if (left < edge) {
+            amp = (amp * left) / edge;
+        }
+        int16_t tone = (int16_t)(((int32_t)soft_sine(s_beep_phase) * amp) / 32767);
+        s_beep_phase += incr;
+        for (int ch = 0; ch < channels; ch++) {
+            int idx = i * channels + ch;
+            int32_t mixed = (int32_t)samples[idx] + tone;
+            if (mixed > 32767) {
+                mixed = 32767;
+            } else if (mixed < -32768) {
+                mixed = -32768;
+            }
+            samples[idx] = (int16_t)mixed;
+        }
+        s_beep_frames--;
+    }
 }
 
 /*
@@ -103,6 +188,9 @@ static int m2s_process(audio_element_handle_t self, char *in_buffer, int in_len)
     }
 
     if (channels >= 2) {
+        if (bps == 2 && s_beep_frames > 0) {
+            mix_beep_s16le((int16_t *)in_buffer, r_size / (bps * channels), channels);
+        }
         return audio_element_output(self, in_buffer, r_size);
     }
 
@@ -115,6 +203,9 @@ static int m2s_process(audio_element_handle_t self, char *in_buffer, int in_len)
     for (int i = 0; i < samples; i++) {
         memcpy(out + (i * 2) * bps, in_buffer + i * bps, bps);
         memcpy(out + (i * 2 + 1) * bps, in_buffer + i * bps, bps);
+    }
+    if (bps == 2 && s_beep_frames > 0) {
+        mix_beep_s16le((int16_t *)out, samples, 2);
     }
     int w = audio_element_output(self, out, out_bytes);
     audio_free(out);
@@ -261,6 +352,9 @@ void radio_player_loop(void)
         audio_element_getinfo(s_aac, &music_info);
         ESP_LOGI(TAG, "music info rate=%d bits=%d ch=%d -> stereo I2S",
                  music_info.sample_rates, music_info.bits, music_info.channels);
+        if (music_info.sample_rates > 0) {
+            s_sample_rate = music_info.sample_rates;
+        }
         audio_element_setinfo(s_m2s, &music_info);
         i2s_stream_set_clk(s_i2s, music_info.sample_rates, music_info.bits, 2);
         s_got_music_info = true;
