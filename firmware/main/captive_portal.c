@@ -139,7 +139,7 @@ static esp_err_t root_get(httpd_req_t *req)
 {
     const char *html1 =
         "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,minimum-scale=1\">"
         "<meta http-equiv=\"X-UA-Compatible\" content=\"ie=edge\">"
         "<title>SearaBoom Configuração</title>"
         "<link rel=\"stylesheet\" href=\"styles.css\"></head><body><article>"
