@@ -13,9 +13,28 @@
 #include "ota_update.h"
 #include "led_status.h"
 #include "log_shipper.h"
+#include "clip_player.h"
+#include "config_store.h"
+#include "radio_player.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "ota_update";
+
+static void stop_radio_for_ota(void)
+{
+    if (!radio_player_is_running()) {
+        return;
+    }
+    radio_player_request_stop();
+    for (int i = 0; i < 100; i++) {
+        if (!radio_player_is_running()) {
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    ESP_LOGW(TAG, "forcing radio stop before OTA");
+    radio_player_stop();
+}
 
 typedef struct {
     char *buf;
@@ -81,6 +100,9 @@ esp_err_t ota_update_check(ota_policy_t policy)
     const char *policy_name = (policy == OTA_POLICY_DEV) ? "dev" : "stable";
     ESP_LOGI(TAG, "OTA check policy=%s current=%s", policy_name, app->version);
 
+    /* Radio AAC + TLS on the same core trips the task WDT. Stop first. */
+    stop_radio_for_ota();
+
     led_status_set(SB_LED_YELLOW, 250);
     log_shipper_set_paused(true);
 
@@ -109,6 +131,7 @@ esp_err_t ota_update_check(ota_policy_t policy)
         led_status_set(SB_LED_MAGENTA, 200);
         vTaskDelay(pdMS_TO_TICKS(1500));
         log_shipper_set_paused(false);
+        radio_player_resume();
         return err == ESP_OK ? ESP_FAIL : err;
     }
 
@@ -116,6 +139,7 @@ esp_err_t ota_update_check(ota_policy_t policy)
     if (!root) {
         ESP_LOGW(TAG, "Bad OTA JSON");
         log_shipper_set_paused(false);
+        radio_player_resume();
         return ESP_FAIL;
     }
     cJSON *version = cJSON_GetObjectItem(root, "version");
@@ -142,6 +166,7 @@ esp_err_t ota_update_check(ota_policy_t policy)
         cJSON_Delete(root);
         led_status_set(SB_LED_GREEN, 500);
         log_shipper_set_paused(false);
+        radio_player_resume();
         return ESP_OK;
     }
 
@@ -154,6 +179,10 @@ esp_err_t ota_update_check(ota_policy_t policy)
 
     ESP_LOGW(TAG, "OTA update available -> %s (%s) policy=%s", new_ver, fw_url, policy_name);
     led_status_set(SB_LED_YELLOW, 100);
+    clip_player_loop(SB_CLIP_OTA_UPDATING);
+    if (clip_player_wait_started(12000) != ESP_OK) {
+        ESP_LOGW(TAG, "updating clip did not start; continuing OTA anyway");
+    }
 
     esp_http_client_config_t ota_http = {
         .url = fw_url,
@@ -166,10 +195,12 @@ esp_err_t ota_update_check(ota_policy_t policy)
     };
 
     esp_err_t ota_err = esp_https_ota(&ota_config);
+    clip_player_stop();
     if (ota_err == ESP_OK) {
         ESP_LOGI(TAG, "OTA success, rebooting into %s", new_ver);
+        config_store_set_play_updated(true);
         led_status_set(SB_LED_GREEN, 0);
-        vTaskDelay(pdMS_TO_TICKS(500));
+        vTaskDelay(pdMS_TO_TICKS(300));
         esp_restart();
     }
 
@@ -177,6 +208,7 @@ esp_err_t ota_update_check(ota_policy_t policy)
     led_status_set(SB_LED_MAGENTA, 150);
     vTaskDelay(pdMS_TO_TICKS(2000));
     log_shipper_set_paused(false);
+    radio_player_resume();
     return ota_err;
 }
 

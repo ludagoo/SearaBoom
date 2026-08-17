@@ -47,12 +47,22 @@ Prefer OTA for changes so that path stays tested. Boot OTA only applies when **m
 ```bash
 ./scripts/dev_ota.sh
 ./scripts/dev_ota.sh --no-trigger    # publish only
-./scripts/serial_cmd.sh ota|ver|help|reboot|logtest
+./scripts/serial_cmd.sh ota|ver|help|reboot|logtest|'wifi wipe'
 ./scripts/watch_serial.sh
 ./scripts/watch_logs.sh
 ```
 
 `firmware/VERSION` is the app version (`PROJECT_VER`). Keep `CONFIG_SEARABOOM_FW_VERSION` in sync — `dev_ota.sh` does that when bumping.
+
+## Tests
+
+```bash
+python3 tests/test_adts.py          # host: clip durations + play_wait policy
+python3 tests/e2e_setup.py          # device: NVS wipe, atualizado, welcome, join AP, portal
+python3 tests/e2e_setup.py --host-only
+```
+
+The E2E run erases NVS (setup AP). Serial `wifi wipe` does the same after this firmware. Do not POST home credentials unless `SEARABOOM_TEST_SSID` / `SEARABOOM_TEST_PASS` are set.
 
 ## Captive portal
 
@@ -61,6 +71,8 @@ STA connect timeout (~25s) → AP `SearBoomSetup` → setup UI at `http://4.3.2.
 ## Remote logs
 
 Devices POST to the public `/api/logs` after WiFi is up (LAN HTTP to the host often fails here — dual NIC / AP isolation). Watch the management UI or `watch_logs.sh`.
+
+Stream health: look for `stream stall` / `stream/decoder error` (auto-restart). Silence with no such lines usually means the box is offline or not shipping logs.
 
 ## Pitfalls worth knowing
 

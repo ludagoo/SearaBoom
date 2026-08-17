@@ -12,6 +12,8 @@
 #define SB_DEFAULT_VOLUME SB_VOLUME_MAX
 #define SB_DEBOUNCE_MS 250
 
+void wifi_set_sta_retry(bool on);
+
 typedef enum {
     SB_LED_OFF = 0,
     SB_LED_WHITE,

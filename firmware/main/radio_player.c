@@ -3,7 +3,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "radio_player.h"
+#include "clip_player.h"
+#include "aac_inject.h"
 #include "audio_element.h"
 #include "audio_pipeline.h"
 #include "audio_event_iface.h"
@@ -15,11 +18,20 @@
 #include "board.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
+#include "esp_heap_caps.h"
+#include "esp_system.h"
 
 static const char *TAG = "radio_player";
 
+/* No PCM through m2s for this long (after first music info) → treat as stall. */
+#define SB_STREAM_STALL_MS 15000
+/* Ignore stall checks this long after start/restart (TLS + first decode). */
+#define SB_STREAM_STALL_GRACE_MS 35000
+#define SB_STREAM_HARD_RESTART_AFTER 3
+
 static audio_pipeline_handle_t s_pipeline;
 static audio_element_handle_t s_http;
+static audio_element_handle_t s_inject;
 static audio_element_handle_t s_aac;
 static audio_element_handle_t s_m2s;
 static audio_element_handle_t s_i2s;
@@ -28,6 +40,13 @@ static int s_volume = SB_DEFAULT_VOLUME;
 static bool s_running;
 static bool s_got_music_info;
 static int s_sample_rate = 22050;
+static volatile int64_t s_last_pcm_ms;
+static int64_t s_stall_grace_until_ms;
+static int s_restart_backoff_ms = 500;
+static int s_stall_strikes;
+static char s_url[256];
+
+static volatile bool s_want_stop;
 static volatile int s_beep_frames;
 static uint32_t s_beep_phase;
 static int s_beep_total_frames;
@@ -178,6 +197,7 @@ static int m2s_process(audio_element_handle_t self, char *in_buffer, int in_len)
     if (r_size <= 0) {
         return r_size;
     }
+    s_last_pcm_ms = esp_timer_get_time() / 1000;
 
     audio_element_info_t info = {0};
     audio_element_getinfo(self, &info);
@@ -218,13 +238,38 @@ static audio_element_handle_t mono_to_stereo_init(void)
     cfg.open = m2s_open;
     cfg.process = m2s_process;
     cfg.tag = "m2s";
-    cfg.out_rb_size = 8 * 1024;
+    cfg.out_rb_size = 16 * 1024;
     cfg.task_stack = 3 * 1024;
     cfg.task_prio = 5;
     cfg.task_core = 0;
     cfg.stack_in_ext = false; /* PSRAM stacks fail RestrictedPinnedToCore on this board */
     cfg.buffer_len = 2048;
     return audio_element_init(&cfg);
+}
+
+static void radio_reset_decoder(void)
+{
+    if (!s_aac) {
+        return;
+    }
+    audio_element_reset_input_ringbuf(s_aac);
+    audio_element_reset_state(s_aac);
+    audio_element_resume(s_aac, 0, 500);
+}
+
+static void radio_on_inject_clip(bool active)
+{
+    if (!s_i2s) {
+        return;
+    }
+    if (active) {
+        i2s_alc_volume_set(s_i2s, SB_ALC_MAX_DB);
+        i2s_stream_set_clk(s_i2s, 22050, 16, 2);
+    } else {
+        i2s_alc_volume_set(s_i2s, volume_to_alc(s_volume));
+        int rate = s_sample_rate > 0 ? s_sample_rate : 44100;
+        i2s_stream_set_clk(s_i2s, rate, 16, 2);
+    }
 }
 
 static int _http_stream_event_handle(http_stream_event_msg_t *msg)
@@ -247,6 +292,7 @@ esp_err_t radio_player_start(const char *url, int volume)
     if (s_running) {
         radio_player_stop();
     }
+    clip_player_release_pipe();
 
     ESP_LOGI(TAG, "Start stream %s", url);
 
@@ -264,10 +310,18 @@ esp_err_t radio_player_start(const char *url, int volume)
     http_cfg.crt_bundle_attach = esp_crt_bundle_attach;
     http_cfg.event_handle = _http_stream_event_handle;
     http_cfg.user_agent = "SearaBoom/1.0";
-    http_cfg.out_rb_size = 16 * 1024;
+    http_cfg.out_rb_size = 256 * 1024;
     http_cfg.task_stack = 5 * 1024;
     http_cfg.stack_in_ext = false;
     s_http = http_stream_init(&http_cfg);
+
+    s_inject = aac_inject_init();
+    aac_inject_set_passthrough(true);
+    aac_inject_hooks_t hooks = {
+        .reset_decoder = radio_reset_decoder,
+        .on_clip = radio_on_inject_clip,
+    };
+    aac_inject_set_hooks(&hooks);
 
     i2s_stream_cfg_t i2s_cfg = I2S_STREAM_CFG_DEFAULT();
     i2s_cfg.type = AUDIO_STREAM_WRITER;
@@ -277,21 +331,23 @@ esp_err_t radio_player_start(const char *url, int volume)
     s_i2s = i2s_stream_init(&i2s_cfg);
 
     aac_decoder_cfg_t aac_cfg = DEFAULT_AAC_DECODER_CONFIG();
-    aac_cfg.plus_enable = false;
-    aac_cfg.out_rb_size = 8 * 1024;
-    aac_cfg.task_stack = 6 * 1024;
+    /* Stream is HE-AACv2 @ 44.1 kHz; without plus we only get the LC core @ 22.05 kHz. */
+    aac_cfg.plus_enable = true;
+    aac_cfg.out_rb_size = 16 * 1024;
+    aac_cfg.task_stack = 8 * 1024;
     aac_cfg.stack_in_ext = false;
     s_aac = aac_decoder_init(&aac_cfg);
 
     s_m2s = mono_to_stereo_init();
 
     audio_pipeline_register(s_pipeline, s_http, "http");
+    audio_pipeline_register(s_pipeline, s_inject, "inj");
     audio_pipeline_register(s_pipeline, s_aac, "aac");
     audio_pipeline_register(s_pipeline, s_m2s, "m2s");
     audio_pipeline_register(s_pipeline, s_i2s, "i2s");
 
-    const char *link_tag[4] = {"http", "aac", "m2s", "i2s"};
-    audio_pipeline_link(s_pipeline, &link_tag[0], 4);
+    const char *link_tag[5] = {"http", "inj", "aac", "m2s", "i2s"};
+    audio_pipeline_link(s_pipeline, &link_tag[0], 5);
     audio_element_set_uri(s_http, url);
 
     audio_event_iface_cfg_t evt_cfg = AUDIO_EVENT_IFACE_DEFAULT_CFG();
@@ -302,18 +358,51 @@ esp_err_t radio_player_start(const char *url, int volume)
     radio_player_set_volume(volume);
     s_got_music_info = false;
     s_running = true;
+    {
+        int64_t now = esp_timer_get_time() / 1000;
+        s_last_pcm_ms = now;
+        s_stall_grace_until_ms = now + SB_STREAM_STALL_GRACE_MS;
+        s_stall_strikes = 0;
+        s_restart_backoff_ms = 500;
+    }
+    strncpy(s_url, url ? url : "", sizeof(s_url) - 1);
+    s_url[sizeof(s_url) - 1] = 0;
     return ESP_OK;
+}
+
+bool radio_player_is_running(void)
+{
+    return s_running;
+}
+
+void radio_player_request_stop(void)
+{
+    if (!s_running) {
+        return;
+    }
+    s_want_stop = true;
+}
+
+void radio_player_resume(void)
+{
+    if (s_running || !s_url[0]) {
+        return;
+    }
+    ESP_LOGI(TAG, "Resuming stream after pause");
+    radio_player_start(s_url, s_volume);
 }
 
 void radio_player_stop(void)
 {
     if (!s_running) {
+        s_want_stop = false;
         return;
     }
     audio_pipeline_stop(s_pipeline);
     audio_pipeline_wait_for_stop(s_pipeline);
     audio_pipeline_terminate(s_pipeline);
     audio_pipeline_unregister(s_pipeline, s_http);
+    audio_pipeline_unregister(s_pipeline, s_inject);
     audio_pipeline_unregister(s_pipeline, s_aac);
     audio_pipeline_unregister(s_pipeline, s_m2s);
     audio_pipeline_unregister(s_pipeline, s_i2s);
@@ -324,20 +413,88 @@ void radio_player_stop(void)
     audio_element_deinit(s_aac);
     audio_element_deinit(s_m2s);
     audio_element_deinit(s_i2s);
+    aac_inject_set_hooks(NULL);
+    aac_inject_deinit();
+    aac_inject_set_passthrough(false);
     s_pipeline = NULL;
     s_http = NULL;
+    s_inject = NULL;
     s_aac = NULL;
     s_m2s = NULL;
     s_i2s = NULL;
     s_evt = NULL;
     s_running = false;
+    s_got_music_info = false;
+    s_want_stop = false;
 }
 
-static int s_restart_backoff_ms = 500;
+static void pipeline_soft_restart(const char *reason)
+{
+    ESP_LOGW(TAG, "%s — soft restart in %d ms (strike %d)", reason, s_restart_backoff_ms,
+             s_stall_strikes + 1);
+    audio_pipeline_stop(s_pipeline);
+    audio_pipeline_wait_for_stop(s_pipeline);
+    vTaskDelay(pdMS_TO_TICKS(s_restart_backoff_ms));
+    if (s_restart_backoff_ms < 8000) {
+        s_restart_backoff_ms *= 2;
+    }
+    audio_element_reset_state(s_http);
+    audio_element_reset_state(s_inject);
+    audio_element_reset_state(s_aac);
+    audio_element_reset_state(s_m2s);
+    audio_element_reset_state(s_i2s);
+    audio_pipeline_reset_ringbuffer(s_pipeline);
+    audio_pipeline_reset_items_state(s_pipeline);
+    audio_pipeline_run(s_pipeline);
+    int64_t now = esp_timer_get_time() / 1000;
+    s_last_pcm_ms = now;
+    s_stall_grace_until_ms = now + SB_STREAM_STALL_GRACE_MS;
+    s_got_music_info = false;
+}
+
+static void check_stream_stall(void)
+{
+    if (!s_running || !s_got_music_info) {
+        return;
+    }
+    int64_t now = esp_timer_get_time() / 1000;
+    if (now < s_stall_grace_until_ms) {
+        return;
+    }
+    int64_t idle = now - s_last_pcm_ms;
+    if (idle < SB_STREAM_STALL_MS) {
+        return;
+    }
+
+    s_stall_strikes++;
+    ESP_LOGW(TAG, "stream stall: no PCM for %lld ms", (long long)idle);
+
+    if (s_stall_strikes >= SB_STREAM_HARD_RESTART_AFTER && s_url[0]) {
+        ESP_LOGW(TAG, "stream stall: hard restart of pipeline");
+        int vol = s_volume;
+        char url[sizeof(s_url)];
+        memcpy(url, s_url, sizeof(url));
+        radio_player_stop();
+        vTaskDelay(pdMS_TO_TICKS(500));
+        radio_player_start(url, vol);
+        return;
+    }
+    pipeline_soft_restart("stream stall");
+}
 
 void radio_player_loop(void)
 {
-    if (!s_running || !s_evt) {
+    if (s_want_stop) {
+        radio_player_stop();
+        return;
+    }
+    if (!s_running) {
+        return;
+    }
+
+    check_stream_stall();
+
+    if (!s_evt) {
         return;
     }
     audio_event_iface_msg_t msg;
@@ -359,6 +516,12 @@ void radio_player_loop(void)
         i2s_stream_set_clk(s_i2s, music_info.sample_rates, music_info.bits, 2);
         s_got_music_info = true;
         s_restart_backoff_ms = 500;
+        s_stall_strikes = 0;
+        s_last_pcm_ms = esp_timer_get_time() / 1000;
+        ESP_LOGI(TAG, "heap after music: free=%u spiram=%u internal=%u",
+                 (unsigned)esp_get_free_heap_size(),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
         return;
     }
 
@@ -371,17 +534,19 @@ void radio_player_loop(void)
         return;
     }
 
-    ESP_LOGW(TAG, "stream/decoder error, restarting in %d ms", s_restart_backoff_ms);
-    audio_pipeline_stop(s_pipeline);
-    audio_pipeline_wait_for_stop(s_pipeline);
-    vTaskDelay(pdMS_TO_TICKS(s_restart_backoff_ms));
-    if (s_restart_backoff_ms < 8000) {
-        s_restart_backoff_ms *= 2;
+    s_stall_strikes++;
+    if (s_stall_strikes >= SB_STREAM_HARD_RESTART_AFTER && s_url[0]) {
+        ESP_LOGW(TAG, "stream/decoder error — hard restart");
+        int vol = s_volume;
+        char url[sizeof(s_url)];
+        memcpy(url, s_url, sizeof(url));
+        radio_player_stop();
+        vTaskDelay(pdMS_TO_TICKS(s_restart_backoff_ms));
+        if (s_restart_backoff_ms < 8000) {
+            s_restart_backoff_ms *= 2;
+        }
+        radio_player_start(url, vol);
+        return;
     }
-    audio_element_reset_state(s_aac);
-    audio_element_reset_state(s_m2s);
-    audio_element_reset_state(s_i2s);
-    audio_pipeline_reset_ringbuffer(s_pipeline);
-    audio_pipeline_reset_items_state(s_pipeline);
-    audio_pipeline_run(s_pipeline);
+    pipeline_soft_restart("stream/decoder error");
 }

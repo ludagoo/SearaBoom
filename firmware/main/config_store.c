@@ -129,3 +129,73 @@ const char *config_store_stream_url(const sb_config_t *cfg)
     }
     return SB_URL1;
 }
+
+esp_err_t config_store_set_play_updated(bool on)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_u8(h, "play_upd", on ? 1 : 0);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    return err;
+}
+
+bool config_store_take_play_updated(void)
+{
+    nvs_handle_t h;
+    uint8_t v = 0;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
+        return false;
+    }
+    nvs_get_u8(h, "play_upd", &v);
+    if (v) {
+        nvs_set_u8(h, "play_upd", 0);
+        nvs_commit(h);
+    }
+    nvs_close(h);
+    return v != 0;
+}
+
+bool config_store_consume_fw_change(const char *version)
+{
+    if (!version || !version[0]) {
+        return false;
+    }
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
+        return false;
+    }
+    char prev[32] = {0};
+    size_t len = sizeof(prev);
+    nvs_get_str(h, "last_fw", prev, &len);
+    bool changed = (strcmp(prev, version) != 0);
+    nvs_set_str(h, "last_fw", version);
+    nvs_commit(h);
+    nvs_close(h);
+    return changed;
+}
+
+bool config_store_has_wifi(const sb_config_t *cfg)
+{
+    return cfg && cfg->ssid[0] != 0;
+}
+
+esp_err_t config_store_clear_wifi(void)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    nvs_set_str(h, "ssid", "");
+    nvs_set_str(h, "pass", "");
+    err = nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGW(TAG, "Cleared saved WiFi");
+    return err;
+}

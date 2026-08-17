@@ -6,6 +6,9 @@ idf_component_register(
         "volume_buttons.c"
         "captive_portal.c"
         "radio_player.c"
+        "clip_player.c"
+        "adts_util.c"
+        "aac_inject.c"
         "ota_update.c"
         "log_shipper.c"
         "serial_cmd.c"
@@ -30,6 +33,12 @@ idf_component_register(
         audio_sal
         esp_peripherals
         audio_board
+    EMBED_FILES
+        "../clips/ota_updating.aac"
+        "../clips/ota_done.aac"
+        "../clips/ap_welcome.aac"
+        "../clips/ap_connected.aac"
+        "../clips/ap_saved.aac"
 )
 
 spiffs_create_partition_image(storage ../spiffs_image FLASH_IN_PROJECT)

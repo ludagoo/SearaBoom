@@ -5,17 +5,65 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
+#include "esp_event.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "esp_http_server.h"
 #include "esp_spiffs.h"
 #include "lwip/sockets.h"
 #include "captive_portal.h"
 #include "config_store.h"
 #include "led_status.h"
+#include "clip_player.h"
+#include "esp_mac.h"
 
 static const char *TAG = "captive_portal";
 static httpd_handle_t s_server;
 static char s_ssid_options[2048];
+static volatile sb_clip_id_t s_want_clip = SB_CLIP_COUNT;
+static volatile int64_t s_clip_at;
+
+static void request_ap_clip(sb_clip_id_t id, int delay_ms)
+{
+    s_want_clip = id;
+    s_clip_at = esp_timer_get_time() + (int64_t)delay_ms * 1000;
+}
+
+static void ap_clip_tick(void)
+{
+    if (s_want_clip >= SB_CLIP_COUNT || esp_timer_get_time() < s_clip_at) {
+        return;
+    }
+    sb_clip_id_t id = s_want_clip;
+    s_want_clip = SB_CLIP_COUNT;
+    if (id == SB_CLIP_AP_CONNECTED) {
+        wifi_sta_list_t list = {0};
+        esp_wifi_ap_get_sta_list(&list);
+        if (list.num == 0) {
+            id = SB_CLIP_AP_WELCOME;
+        }
+    }
+    clip_player_loop(id);
+}
+
+static void ap_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+    if (id == WIFI_EVENT_AP_STACONNECTED) {
+        wifi_event_ap_staconnected_t *e = (wifi_event_ap_staconnected_t *)data;
+        ESP_LOGI(TAG, "STA joined " MACSTR, MAC2STR(e->mac));
+        /* Swap only — do not pause I2S. Short delay so DHCP can start. */
+        request_ap_clip(SB_CLIP_AP_CONNECTED, 300);
+    } else if (id == WIFI_EVENT_AP_STADISCONNECTED) {
+        wifi_sta_list_t list = {0};
+        esp_wifi_ap_get_sta_list(&list);
+        ESP_LOGI(TAG, "STA left, remaining=%d", list.num);
+        if (list.num == 0) {
+            request_ap_clip(SB_CLIP_AP_WELCOME, 2500);
+        }
+    }
+}
 
 static void build_ssid_options(void)
 {
@@ -171,7 +219,9 @@ static esp_err_t root_post(httpd_req_t *req)
 
     config_store_save(&cfg);
     httpd_resp_send(req, "Done. Will restart", HTTPD_RESP_USE_STRLEN);
-    vTaskDelay(pdMS_TO_TICKS(3000));
+    s_want_clip = SB_CLIP_COUNT;
+    clip_player_play_wait(SB_CLIP_AP_SAVED, 12000);
+    vTaskDelay(pdMS_TO_TICKS(300));
     esp_restart();
     return ESP_OK;
 }
@@ -232,10 +282,17 @@ void captive_portal_run(void)
 {
     ESP_LOGI(TAG, "Entering setup AP mode");
     led_status_set(SB_LED_WHITE, 0);
+    wifi_set_sta_retry(false);
 
     /* WiFi stack already initialized by app_main */
     esp_wifi_disconnect();
-    esp_wifi_stop();
+    esp_wifi_set_ps(WIFI_PS_NONE);
+    {
+        esp_err_t stop_err = esp_wifi_stop();
+        if (stop_err != ESP_OK && stop_err != ESP_ERR_WIFI_NOT_STARTED) {
+            ESP_LOGW(TAG, "wifi_stop: %s", esp_err_to_name(stop_err));
+        }
+    }
 
     if (esp_netif_get_handle_from_ifkey("WIFI_AP_DEF") == NULL) {
         esp_netif_create_default_wifi_ap();
@@ -244,24 +301,42 @@ void captive_portal_run(void)
     build_ssid_options();
     esp_wifi_stop();
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+    /* APSTA: some phones fail open AP-only; STA stays idle (retry off). */
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
 
+    wifi_config_t ap = {0};
+    strncpy((char *)ap.ap.ssid, SB_AP_SSID, sizeof(ap.ap.ssid));
+    ap.ap.ssid_len = strlen(SB_AP_SSID);
+    ap.ap.channel = 6;
+    ap.ap.max_connection = 4;
+    ap.ap.authmode = WIFI_AUTH_OPEN;
+    ap.ap.ssid_hidden = 0;
+    ap.ap.beacon_interval = 100;
+    ap.ap.pmf_cfg.capable = false;
+    ap.ap.pmf_cfg.required = false;
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_AP_STACONNECTED, ap_wifi_event, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_AP_STADISCONNECTED, ap_wifi_event, NULL));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
+    esp_wifi_set_ps(WIFI_PS_NONE);
+    /* USB 5V brownouts when AP TX is at 20 dBm plus I2S. */
+    esp_wifi_set_max_tx_power(52);
+
+    /* wifi_start() resets the AP netif to 192.168.4.1 — apply 4.3.2.1 after it is up. */
     esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
     esp_netif_ip_info_t ip_info;
     IP4_ADDR(&ip_info.ip, 4, 3, 2, 1);
     IP4_ADDR(&ip_info.gw, 4, 3, 2, 1);
     IP4_ADDR(&ip_info.netmask, 255, 255, 255, 0);
-    esp_netif_dhcps_stop(ap_netif);
-    esp_netif_set_ip_info(ap_netif, &ip_info);
-    esp_netif_dhcps_start(ap_netif);
-
-    wifi_config_t ap = {0};
-    strncpy((char *)ap.ap.ssid, SB_AP_SSID, sizeof(ap.ap.ssid));
-    ap.ap.ssid_len = strlen(SB_AP_SSID);
-    ap.ap.max_connection = 4;
-    ap.ap.authmode = WIFI_AUTH_OPEN;
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
-    ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_ERROR_CHECK(esp_netif_dhcps_stop(ap_netif));
+    ESP_ERROR_CHECK(esp_netif_set_ip_info(ap_netif, &ip_info));
+    ESP_ERROR_CHECK(esp_netif_dhcps_start(ap_netif));
+    esp_netif_ip_info_t got = {0};
+    esp_netif_get_ip_info(ap_netif, &got);
+    ESP_LOGI(TAG, "AP netif " IPSTR, IP2STR(&got.ip));
+    ESP_LOGI(TAG, "AP %s up at http://4.3.2.1/", SB_AP_SSID);
+    clip_player_loop(SB_CLIP_AP_WELCOME);
 
     esp_vfs_spiffs_conf_t spiffs = {
         .base_path = "/spiffs",
@@ -291,9 +366,10 @@ void captive_portal_run(void)
     }
 
     xTaskCreate(dns_server_task, "dns", 4096, NULL, 5, NULL);
-    ESP_LOGI(TAG, "AP %s up at http://4.3.2.1/", SB_AP_SSID);
 
     while (true) {
+        ap_clip_tick();
+        clip_player_tick();
         led_status_set(SB_LED_BLUE, 500);
         led_status_tick();
         vTaskDelay(pdMS_TO_TICKS(50));

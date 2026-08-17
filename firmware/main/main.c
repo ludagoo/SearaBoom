@@ -16,6 +16,7 @@
 #include "volume_buttons.h"
 #include "captive_portal.h"
 #include "radio_player.h"
+#include "clip_player.h"
 #include "ota_update.h"
 #include "log_shipper.h"
 #include "serial_cmd.h"
@@ -23,6 +24,7 @@
 static const char *TAG = "searaboom";
 static sb_config_t s_cfg;
 static EventGroupHandle_t s_wifi_events;
+static volatile bool s_sta_retry = true;
 #define WIFI_OK_BIT BIT0
 
 static void volume_cb(int delta, void *ctx)
@@ -45,6 +47,9 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
     (void)data;
+    if (!s_sta_retry) {
+        return;
+    }
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
@@ -57,6 +62,14 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     }
 }
 
+void wifi_set_sta_retry(bool on)
+{
+    s_sta_retry = on;
+    if (!on) {
+        esp_wifi_disconnect();
+    }
+}
+
 static bool wifi_connect_or_setup(void)
 {
     s_wifi_events = xEventGroupCreate();
@@ -65,9 +78,20 @@ static bool wifi_connect_or_setup(void)
     esp_netif_create_default_wifi_sta();
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    /* SoftAP unicast (ARP/HTTP) dies with AMPDU + I2S; radio bitrate does not need it. */
+    cfg.ampdu_tx_enable = 0;
+    cfg.ampdu_rx_enable = 0;
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event, NULL));
+
+    if (!config_store_has_wifi(&s_cfg)) {
+        ESP_LOGW(TAG, "No WiFi SSID saved -> setup AP");
+        s_sta_retry = false;
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+        ESP_ERROR_CHECK(esp_wifi_start());
+        return false;
+    }
 
     wifi_config_t wifi = {0};
     strncpy((char *)wifi.sta.ssid, s_cfg.ssid, sizeof(wifi.sta.ssid));
@@ -104,9 +128,19 @@ void app_main(void)
 
     config_store_load(&s_cfg);
     serial_cmd_init();
+    clip_player_init(s_cfg.volume);
+
+    bool play_updated = config_store_take_play_updated();
+    play_updated = config_store_consume_fw_change(app->version) || play_updated;
+    if (play_updated) {
+        ESP_LOGI(TAG, "First boot after update — playing atualizado clip");
+        clip_player_play_wait(SB_CLIP_OTA_DONE, 20000);
+        /* Drop I2S/AAC before WiFi AP — leftover HOLD + decoder reset brownouts the 5V rail. */
+        clip_player_release_pipe();
+    }
 
     if (!wifi_connect_or_setup()) {
-        ESP_LOGW(TAG, "WiFi timeout -> captive portal");
+        ESP_LOGW(TAG, "Starting captive portal");
         captive_portal_run(); /* never returns */
     }
 

@@ -12,6 +12,7 @@
 #include "esp_heap_caps.h"
 #include "serial_cmd.h"
 #include "ota_update.h"
+#include "config_store.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "serial_cmd";
@@ -70,12 +71,26 @@ static void handle_line(char *line)
         esp_http_client_cleanup(client);
         return;
     }
+    if (strcasecmp(line, "heap") == 0) {
+        printf("heap free=%u min_free=%u\n",
+               (unsigned)esp_get_free_heap_size(),
+               (unsigned)esp_get_minimum_free_heap_size());
+        printf("  internal free=%u largest=%u\n",
+               (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        printf("  spiram   free=%u largest=%u\n",
+               (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+        return;
+    }
     if (strcasecmp(line, "help") == 0 || strcmp(line, "?") == 0) {
-        printf("commands: help | ver | ota | logtest | reboot\n");
-        printf("  ota     - force OTA now (applies any newer X.Y.Z including patch)\n");
-        printf("  logtest - probe log URL + OTA host connectivity\n");
-        printf("  ver     - print firmware version\n");
-        printf("  reboot  - restart\n");
+        printf("commands: help | ver | ota | heap | logtest | reboot | wifi wipe\n");
+        printf("  ota        - force OTA now (applies any newer X.Y.Z including patch)\n");
+        printf("  heap       - free internal / PSRAM (buffer headroom)\n");
+        printf("  logtest    - probe log URL + OTA host connectivity\n");
+        printf("  ver        - print firmware version\n");
+        printf("  reboot     - restart\n");
+        printf("  wifi wipe  - clear saved SSID/pass and reboot into setup AP\n");
         return;
     }
     if (strcasecmp(line, "ver") == 0 || strcasecmp(line, "version") == 0) {
@@ -86,6 +101,13 @@ static void handle_line(char *line)
     if (strcasecmp(line, "reboot") == 0 || strcasecmp(line, "reset") == 0) {
         printf("rebooting...\n");
         vTaskDelay(pdMS_TO_TICKS(100));
+        esp_restart();
+        return;
+    }
+    if (strcasecmp(line, "wifi wipe") == 0 || strcasecmp(line, "wifiwipe") == 0) {
+        printf("wiping WiFi, rebooting into setup AP...\n");
+        config_store_clear_wifi();
+        vTaskDelay(pdMS_TO_TICKS(150));
         esp_restart();
         return;
     }
