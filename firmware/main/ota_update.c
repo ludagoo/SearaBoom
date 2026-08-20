@@ -100,9 +100,9 @@ esp_err_t ota_update_check(ota_policy_t policy)
     const char *policy_name = (policy == OTA_POLICY_DEV) ? "dev" : "stable";
     ESP_LOGI(TAG, "OTA check policy=%s current=%s", policy_name, app->version);
 
-    /* Radio AAC + TLS on the same core trips the task WDT. Stop first. */
-    stop_radio_for_ota();
-
+    /* Version JSON is a small GET. Stopping the radio here made boot go
+     * live, then silent, then start the stream again. Only pause the
+     * station if we are actually going to download firmware. */
     led_status_set(SB_LED_YELLOW, 250);
     log_shipper_set_paused(true);
 
@@ -179,9 +179,11 @@ esp_err_t ota_update_check(ota_policy_t policy)
 
     ESP_LOGW(TAG, "OTA update available -> %s (%s) policy=%s", new_ver, fw_url, policy_name);
     led_status_set(SB_LED_YELLOW, 100);
-    clip_player_loop(SB_CLIP_OTA_UPDATING);
+    stop_radio_for_ota();
+    radio_player_start_idle(radio_player_get_volume());
+    clip_player_loop(SB_CLIP_OTA_AVAILABLE);
     if (clip_player_wait_started(12000) != ESP_OK) {
-        ESP_LOGW(TAG, "updating clip did not start; continuing OTA anyway");
+        ESP_LOGW(TAG, "available clip did not start; continuing OTA anyway");
     }
 
     esp_http_client_config_t ota_http = {
@@ -195,14 +197,15 @@ esp_err_t ota_update_check(ota_policy_t policy)
     };
 
     esp_err_t ota_err = esp_https_ota(&ota_config);
-    clip_player_stop();
     if (ota_err == ESP_OK) {
-        ESP_LOGI(TAG, "OTA success, rebooting into %s", new_ver);
+        ESP_LOGI(TAG, "OTA success, announcing reboot into %s", new_ver);
         config_store_set_play_updated(true);
         led_status_set(SB_LED_GREEN, 0);
-        vTaskDelay(pdMS_TO_TICKS(300));
+        clip_player_play_wait(SB_CLIP_OTA_REBOOTING, 10000);
+        vTaskDelay(pdMS_TO_TICKS(200));
         esp_restart();
     }
+    clip_player_stop();
 
     ESP_LOGE(TAG, "OTA failed: %s", esp_err_to_name(ota_err));
     led_status_set(SB_LED_MAGENTA, 150);

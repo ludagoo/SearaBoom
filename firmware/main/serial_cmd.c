@@ -1,9 +1,11 @@
 #include <string.h>
 #include <strings.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_err.h"
 #include "esp_system.h"
 #include "esp_app_desc.h"
 #include "driver/usb_serial_jtag.h"
@@ -13,6 +15,8 @@
 #include "serial_cmd.h"
 #include "ota_update.h"
 #include "config_store.h"
+#include "clip_player.h"
+#include "radio_player.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "serial_cmd";
@@ -84,13 +88,16 @@ static void handle_line(char *line)
         return;
     }
     if (strcasecmp(line, "help") == 0 || strcmp(line, "?") == 0) {
-        printf("commands: help | ver | ota | heap | logtest | reboot | wifi wipe\n");
+        printf("commands: help | ver | ota | heap | logtest | reboot | wifi wipe | vol [n] | clip <name>|stop | audiotest\n");
         printf("  ota        - force OTA now (applies any newer X.Y.Z including patch)\n");
         printf("  heap       - free internal / PSRAM (buffer headroom)\n");
         printf("  logtest    - probe log URL + OTA host connectivity\n");
         printf("  ver        - print firmware version\n");
         printf("  reboot     - restart\n");
         printf("  wifi wipe  - clear saved SSID/pass and reboot into setup AP\n");
+        printf("  vol [n]    - show or set volume 1-21 (quiet test: vol 3)\n");
+        printf("  clip name  - play a UI clip (welcome|connected|page|...|stop)\n");
+        printf("  audiotest  - PCM start/end markers + AAC clip duration at the mixer tap\n");
         return;
     }
     if (strcasecmp(line, "ver") == 0 || strcasecmp(line, "version") == 0) {
@@ -109,6 +116,83 @@ static void handle_line(char *line)
         config_store_clear_wifi();
         vTaskDelay(pdMS_TO_TICKS(150));
         esp_restart();
+        return;
+    }
+    if (strncasecmp(line, "vol", 3) == 0 && (line[3] == 0 || line[3] == ' ')) {
+        sb_config_t cfg;
+        config_store_load(&cfg);
+        const char *arg = line + 3;
+        while (*arg == ' ') {
+            arg++;
+        }
+        if (*arg) {
+            int v = atoi(arg);
+            if (v < SB_VOLUME_MIN) {
+                v = SB_VOLUME_MIN;
+            }
+            if (v > SB_VOLUME_MAX) {
+                v = SB_VOLUME_MAX;
+            }
+            cfg.volume = v;
+            config_store_save(&cfg);
+            radio_player_set_volume(v);
+            clip_player_set_volume(v);
+            printf("volume=%d\n", v);
+        } else {
+            printf("volume=%d\n", cfg.volume);
+        }
+        return;
+    }
+    if (strncasecmp(line, "clip", 4) == 0 && (line[4] == 0 || line[4] == ' ')) {
+        const char *arg = line + 4;
+        while (*arg == ' ') {
+            arg++;
+        }
+        if (*arg == 0 || strcasecmp(arg, "stop") == 0) {
+            clip_player_stop();
+            printf("clip stop\n");
+            return;
+        }
+        sb_clip_id_t id = SB_CLIP_COUNT;
+        for (int i = 0; i < SB_CLIP_COUNT; i++) {
+            const char *nm = clip_player_name((sb_clip_id_t)i);
+            if (strcasecmp(arg, nm) == 0) {
+                id = (sb_clip_id_t)i;
+                break;
+            }
+            if (strncmp(nm, "ap_", 3) == 0 && strcasecmp(arg, nm + 3) == 0) {
+                id = (sb_clip_id_t)i;
+                break;
+            }
+        }
+        if (id == SB_CLIP_COUNT) {
+            printf("unknown clip '%s'\n", arg);
+            return;
+        }
+        bool loop = (id == SB_CLIP_AP_WELCOME || id == SB_CLIP_OTA_AVAILABLE);
+        if (radio_player_start_idle(radio_player_get_volume()) != ESP_OK) {
+            printf("audio out failed\n");
+            return;
+        }
+        clip_player_play(id, loop);
+        printf("clip %s loop=%d\n", clip_player_name(id), (int)loop);
+        return;
+    }
+    if (strcasecmp(line, "audiotest") == 0) {
+        printf("audiotest start\n");
+        radio_probe_result_t pcm = {0};
+        esp_err_t err = clip_player_run_pcm_probe(&pcm, 4000);
+        printf("AUDIOTEST pcm start=%d end=%d dur_ms=%d peak=%d start_hz=%d end_hz=%d err=%s\n",
+               pcm.start_ok, pcm.end_ok, pcm.dur_ms, pcm.peak, pcm.start_hz, pcm.end_hz,
+               esp_err_to_name(err));
+        int heard = 0;
+        int expected = clip_player_duration_ms(SB_CLIP_OTA_REBOOTING);
+        err = clip_player_run_clip_probe(SB_CLIP_OTA_REBOOTING, &heard, expected + 4000);
+        int ok = (heard >= expected - 250) && (heard <= expected + 1500);
+        printf("AUDIOTEST clip name=%s expected_ms=%d heard_ms=%d ok=%d err=%s\n",
+               clip_player_name(SB_CLIP_OTA_REBOOTING), expected, heard, ok,
+               esp_err_to_name(err));
+        printf("audiotest done\n");
         return;
     }
     if (strcasecmp(line, "ota") == 0 || strcasecmp(line, "ota force") == 0) {

@@ -5,8 +5,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "radio_player.h"
-#include "clip_player.h"
-#include "aac_inject.h"
+#include "pcm_upmix.h"
 #include "audio_element.h"
 #include "audio_pipeline.h"
 #include "audio_event_iface.h"
@@ -14,49 +13,97 @@
 #include "audio_mem.h"
 #include "http_stream.h"
 #include "i2s_stream.h"
+#include "raw_stream.h"
 #include "aac_decoder.h"
+#include "downmix.h"
 #include "board.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
+#include "ringbuf.h"
 
 static const char *TAG = "radio_player";
 
-/* No PCM through m2s for this long (after first music info) → treat as stall. */
 #define SB_STREAM_STALL_MS 15000
-/* Ignore stall checks this long after start/restart (TLS + first decode). */
 #define SB_STREAM_STALL_GRACE_MS 35000
 #define SB_STREAM_HARD_RESTART_AFTER 3
+#define SB_MIX_SR 44100
+#define SB_SLOT_RADIO 0
+#define SB_SLOT_CLIP 1
+#define SB_PCM_VOICE_ABS 2000
+#define SB_PCM_HOLD_ABS 400
 
-static audio_pipeline_handle_t s_pipeline;
-static audio_element_handle_t s_http;
-static audio_element_handle_t s_inject;
-static audio_element_handle_t s_aac;
-static audio_element_handle_t s_m2s;
-static audio_element_handle_t s_i2s;
-static audio_event_iface_handle_t s_evt;
-static int s_volume = SB_DEFAULT_VOLUME;
-static bool s_running;
-static bool s_prefetching;
-static bool s_got_music_info;
-static int s_sample_rate = 22050;
-static volatile int64_t s_last_pcm_ms;
-static int64_t s_stall_grace_until_ms;
-static int s_restart_backoff_ms = 500;
-static int s_stall_strikes;
-static char s_url[256];
-
-static volatile bool s_want_stop;
-static volatile int s_beep_frames;
-static uint32_t s_beep_phase;
-static int s_beep_total_frames;
+#define SB_ALC_MIN_DB (-36)
+#define SB_ALC_MAX_DB (2)
+/* Downmix reads slots in series. A mute-slot wait of 20 ticks (20 ms at
+ * 1 kHz) on an empty rb adds 20 ms to every 256-sample block (~6 ms) and
+ * I2S underruns — choppy welcome. Unused slots must be timeout 0: ADF
+ * treats TIMEOUT as silence and continues. Mix then blocks on I2S/clip. */
+#define SB_MIX_MUTE_TIMEOUT 0
+#define SB_MIX_CLIP_TIMEOUT 40
+#define SB_MIX_RADIO_TIMEOUT 50
 
 #define SB_BEEP_HZ 2000
 #define SB_BEEP_MS 55
 #define SB_BEEP_AMP 4200
 
-/* Quarter-wave sine, 0..63 → 0..32767; gentler than a square click. */
+#define SB_PROBE_WIN 512
+#define SB_PROBE_START_LO 5500
+#define SB_PROBE_START_HI 10500
+#define SB_PROBE_END_LO 2000
+#define SB_PROBE_END_HI 4500
+
+static audio_pipeline_handle_t s_mix_pipe;
+static audio_pipeline_handle_t s_radio_pipe;
+static audio_element_handle_t s_downmix;
+static audio_element_handle_t s_tap;
+static audio_element_handle_t s_i2s;
+static audio_element_handle_t s_http;
+static audio_element_handle_t s_aac;
+static audio_element_handle_t s_radio_m2s;
+static audio_element_handle_t s_radio_raw;
+static audio_event_iface_handle_t s_mix_evt;
+static audio_event_iface_handle_t s_radio_evt;
+static ringbuf_handle_t s_mute_radio;
+static ringbuf_handle_t s_mute_clip;
+static ringbuf_handle_t s_radio_pcm;
+static ringbuf_handle_t s_clip_pcm;
+
+static int s_volume = SB_DEFAULT_VOLUME;
+static bool s_running;
+static bool s_prefetching;
+static bool s_got_music_info;
+static bool s_have_out;
+static bool s_clip_active;
+static int s_sample_rate = SB_MIX_SR;
+
+static volatile bool s_pcm_heard;
+static volatile bool s_pcm_flowing;
+static volatile int s_pcm_peak_max;
+static volatile int64_t s_pcm_last_voice_us;
+static volatile bool s_amp_gated;
+static volatile int64_t s_last_pcm_ms;
+static int64_t s_stall_grace_until_ms;
+static int s_restart_backoff_ms = 500;
+static int s_stall_strikes;
+static char s_url[256];
+static volatile bool s_want_stop;
+
+static volatile int s_beep_frames;
+static uint32_t s_beep_phase;
+static int s_beep_total_frames;
+
+static volatile bool s_probe_on;
+static int s_probe_prev;
+static int s_probe_zc;
+static int s_probe_n;
+static int s_probe_win_peak;
+static int s_probe_first_hz;
+static int s_probe_last_hz;
+static int64_t s_probe_first_us;
+static int64_t s_probe_last_us;
+
 static const int16_t s_sin_q[64] = {
     0, 804, 1608, 2410, 3212, 4011, 4808, 5600, 6389, 7173, 7952, 8724, 9490, 10249, 11000, 11743,
     12476, 13200, 13914, 14617, 15308, 15988, 16655, 17309, 17949, 18575, 19186, 19782, 20362, 20926, 21473, 22003,
@@ -80,6 +127,40 @@ static int16_t soft_sine(uint32_t phase)
     return v;
 }
 
+static int volume_to_alc(int volume)
+{
+    if (volume < SB_VOLUME_MIN) {
+        volume = SB_VOLUME_MIN;
+    }
+    if (volume > SB_VOLUME_MAX) {
+        volume = SB_VOLUME_MAX;
+    }
+    return SB_ALC_MIN_DB
+        + ((volume - 1) * (SB_ALC_MAX_DB - SB_ALC_MIN_DB)) / (SB_VOLUME_MAX - 1);
+}
+
+esp_err_t radio_player_set_volume(int volume)
+{
+    if (volume < SB_VOLUME_MIN) {
+        volume = SB_VOLUME_MIN;
+    }
+    if (volume > SB_VOLUME_MAX) {
+        volume = SB_VOLUME_MAX;
+    }
+    s_volume = volume;
+    if (s_i2s && !s_amp_gated) {
+        i2s_alc_volume_set(s_i2s, volume_to_alc(volume));
+    }
+    ESP_LOGI(TAG, "volume=%d alc=%d dB%s", s_volume, volume_to_alc(s_volume),
+             s_amp_gated ? " (amp gated)" : "");
+    return ESP_OK;
+}
+
+int radio_player_get_volume(void)
+{
+    return s_volume;
+}
+
 bool radio_player_has_music_info(void)
 {
     return s_got_music_info;
@@ -87,10 +168,10 @@ bool radio_player_has_music_info(void)
 
 void radio_player_beep(void)
 {
-    if (!s_running) {
+    if (!s_have_out) {
         return;
     }
-    int rate = s_sample_rate > 0 ? s_sample_rate : 22050;
+    int rate = s_sample_rate > 0 ? s_sample_rate : SB_MIX_SR;
     s_beep_total_frames = (rate * SB_BEEP_MS) / 1000;
     if (s_beep_total_frames < 16) {
         s_beep_total_frames = 16;
@@ -104,14 +185,13 @@ static void mix_beep_s16le(int16_t *samples, int frames, int channels)
     if (s_beep_frames <= 0 || channels < 1) {
         return;
     }
-    int rate = s_sample_rate > 0 ? s_sample_rate : 22050;
+    int rate = s_sample_rate > 0 ? s_sample_rate : SB_MIX_SR;
     uint32_t incr = (uint32_t)((SB_BEEP_HZ * 65536u) / (unsigned)rate);
     int total = s_beep_total_frames > 0 ? s_beep_total_frames : 1;
     int edge = total / 3;
     if (edge < 1) {
         edge = 1;
     }
-
     for (int i = 0; i < frames && s_beep_frames > 0; i++) {
         int left = s_beep_frames;
         int elapsed = total - left;
@@ -137,210 +217,183 @@ static void mix_beep_s16le(int16_t *samples, int frames, int channels)
     }
 }
 
-/*
- * Arduino ESP32-audioI2S tops out near 0 dB full-scale stereo.
- * On this MAX98357 + Seara stream, +9 dB clipped; NVS showed the user's
- * clean ceiling at step 18 on that curve (= +2 dB). Cap the scale there.
- */
-#define SB_ALC_MIN_DB (-36)
-#define SB_ALC_MAX_DB (2)
-
-static int volume_to_alc(int volume)
+static void probe_window_done(int zc, int n, int peak, int64_t now)
 {
-    if (volume < SB_VOLUME_MIN) {
-        volume = SB_VOLUME_MIN;
+    if (n < 8 || peak < SB_PCM_VOICE_ABS) {
+        s_probe_prev = 0;
+        return;
     }
-    if (volume > SB_VOLUME_MAX) {
-        volume = SB_VOLUME_MAX;
+    int hz = (int)((zc * (int64_t)SB_MIX_SR) / (2 * n));
+    if (s_probe_first_us == 0) {
+        s_probe_first_us = now;
+        s_probe_first_hz = hz;
     }
-    return SB_ALC_MIN_DB
-        + ((volume - 1) * (SB_ALC_MAX_DB - SB_ALC_MIN_DB)) / (SB_VOLUME_MAX - 1);
+    s_probe_last_us = now;
+    s_probe_last_hz = hz;
 }
 
-esp_err_t radio_player_set_volume(int volume)
+static void pcm_note_s16(const int16_t *s, int n, int channels)
 {
-    if (volume < SB_VOLUME_MIN) {
-        volume = SB_VOLUME_MIN;
+    int peak = 0;
+    int step = channels > 0 ? channels : 1;
+    for (int i = 0; i < n; i++) {
+        int a = s[i];
+        if (a < 0) {
+            a = -a;
+        }
+        if (a > peak) {
+            peak = a;
+        }
     }
-    if (volume > SB_VOLUME_MAX) {
-        volume = SB_VOLUME_MAX;
+    if (peak > s_pcm_peak_max) {
+        s_pcm_peak_max = peak;
     }
-    s_volume = volume;
-    if (s_i2s) {
-        i2s_alc_volume_set(s_i2s, volume_to_alc(volume));
+    int64_t now = esp_timer_get_time();
+    if (peak >= SB_PCM_HOLD_ABS) {
+        s_pcm_last_voice_us = now;
     }
-    ESP_LOGI(TAG, "volume=%d alc=%d dB", s_volume, volume_to_alc(s_volume));
-    return ESP_OK;
+    if (s_probe_on) {
+        for (int i = 0; i < n; i += step) {
+            int v = s[i];
+            int a = v < 0 ? -v : v;
+            if (a > s_probe_win_peak) {
+                s_probe_win_peak = a;
+            }
+            if (s_probe_n > 0 && ((s_probe_prev < 0) != (v < 0))) {
+                s_probe_zc++;
+            }
+            s_probe_prev = v;
+            s_probe_n++;
+            if (s_probe_n >= SB_PROBE_WIN) {
+                probe_window_done(s_probe_zc, s_probe_n, s_probe_win_peak, now);
+                s_probe_zc = 0;
+                s_probe_n = 0;
+                s_probe_win_peak = 0;
+            }
+        }
+    }
+    if (peak < SB_PCM_VOICE_ABS) {
+        return;
+    }
+    if (!s_pcm_heard) {
+        s_pcm_heard = true;
+        ESP_LOGI(TAG, "PCM reached amp peak=%d", peak);
+        if (s_amp_gated && s_i2s) {
+            s_amp_gated = false;
+            i2s_alc_volume_set(s_i2s, volume_to_alc(s_volume));
+            ESP_LOGI(TAG, "amp ungated alc=%d dB", volume_to_alc(s_volume));
+        }
+    }
 }
 
-int radio_player_get_volume(void)
+void radio_player_pcm_arm(void)
 {
-    return s_volume;
+    s_pcm_heard = false;
+    s_pcm_last_voice_us = 0;
+    s_pcm_peak_max = 0;
 }
 
-/* Duplicate mono PCM to stereo — matches Arduino Audio stereo I2S output. */
-static esp_err_t m2s_open(audio_element_handle_t self)
+bool radio_player_pcm_heard(void)
+{
+    return s_pcm_heard;
+}
+
+bool radio_player_pcm_flowing(void)
+{
+    return s_pcm_flowing;
+}
+
+int radio_player_pcm_peak(void)
+{
+    return s_pcm_peak_max;
+}
+
+bool radio_player_pcm_finished(int silence_ms)
+{
+    if (!s_pcm_heard || silence_ms <= 0) {
+        return false;
+    }
+    int64_t last = s_pcm_last_voice_us;
+    if (last <= 0) {
+        return false;
+    }
+    return (esp_timer_get_time() - last) >= (int64_t)silence_ms * 1000;
+}
+
+void radio_player_probe_arm(void)
+{
+    s_probe_on = true;
+    s_probe_prev = 0;
+    s_probe_zc = 0;
+    s_probe_n = 0;
+    s_probe_win_peak = 0;
+    s_probe_first_hz = 0;
+    s_probe_last_hz = 0;
+    s_probe_first_us = 0;
+    s_probe_last_us = 0;
+    radio_player_pcm_arm();
+}
+
+void radio_player_probe_result(radio_probe_result_t *out)
+{
+    if (!out) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    out->peak = s_pcm_peak_max;
+    out->start_hz = s_probe_first_hz;
+    out->end_hz = s_probe_last_hz;
+    if (s_probe_first_us > 0 && s_probe_last_us > s_probe_first_us) {
+        out->dur_ms = (int)((s_probe_last_us - s_probe_first_us) / 1000);
+    }
+    out->start_ok = (s_probe_first_hz >= SB_PROBE_START_LO && s_probe_first_hz <= SB_PROBE_START_HI);
+    out->end_ok = (s_probe_last_hz >= SB_PROBE_END_LO && s_probe_last_hz <= SB_PROBE_END_HI);
+    s_probe_on = false;
+}
+
+static esp_err_t tap_open(audio_element_handle_t self)
 {
     audio_element_info_t info = {0};
-    audio_element_getinfo(self, &info);
-    if (info.sample_rates == 0) {
-        info.sample_rates = 22050;
-        info.bits = 16;
-        info.channels = 1;
-    }
+    info.sample_rates = SB_MIX_SR;
+    info.bits = 16;
+    info.channels = 2;
     audio_element_setinfo(self, &info);
     return ESP_OK;
 }
 
-static int m2s_process(audio_element_handle_t self, char *in_buffer, int in_len)
+static int tap_process(audio_element_handle_t self, char *in_buffer, int in_len)
 {
-    int r_size = audio_element_input(self, in_buffer, in_len);
-    if (r_size <= 0) {
-        return r_size;
+    int r = audio_element_input(self, in_buffer, in_len);
+    if (r <= 0) {
+        return r;
     }
     s_last_pcm_ms = esp_timer_get_time() / 1000;
-
-    audio_element_info_t info = {0};
-    audio_element_getinfo(self, &info);
-    int channels = info.channels > 0 ? info.channels : 1;
-    int bps = (info.bits > 0 ? info.bits : 16) / 8;
-    if (bps <= 0) {
-        bps = 2;
-    }
-
-    if (channels >= 2) {
-        if (bps == 2 && s_beep_frames > 0) {
-            mix_beep_s16le((int16_t *)in_buffer, r_size / (bps * channels), channels);
+    s_pcm_flowing = true;
+    if ((r & 1) == 0) {
+        pcm_note_s16((int16_t *)in_buffer, r / 2, 2);
+        if (s_beep_frames > 0) {
+            mix_beep_s16le((int16_t *)in_buffer, r / 4, 2);
         }
-        return audio_element_output(self, in_buffer, r_size);
     }
-
-    int samples = r_size / bps;
-    int out_bytes = samples * bps * 2;
-    char *out = audio_malloc(out_bytes);
-    if (!out) {
-        return AEL_IO_FAIL;
-    }
-    for (int i = 0; i < samples; i++) {
-        memcpy(out + (i * 2) * bps, in_buffer + i * bps, bps);
-        memcpy(out + (i * 2 + 1) * bps, in_buffer + i * bps, bps);
-    }
-    if (bps == 2 && s_beep_frames > 0) {
-        mix_beep_s16le((int16_t *)out, samples, 2);
-    }
-    int w = audio_element_output(self, out, out_bytes);
-    audio_free(out);
-    return w;
+    return audio_element_output(self, in_buffer, r);
 }
 
-static audio_element_handle_t mono_to_stereo_init(void)
+static audio_element_handle_t tap_init(void)
 {
     audio_element_cfg_t cfg = DEFAULT_AUDIO_ELEMENT_CONFIG();
-    cfg.open = m2s_open;
-    cfg.process = m2s_process;
-    cfg.tag = "m2s";
-    cfg.out_rb_size = 16 * 1024;
+    cfg.open = tap_open;
+    cfg.process = tap_process;
+    cfg.tag = "tap";
+    cfg.out_rb_size = 8 * 1024;
     cfg.task_stack = 3 * 1024;
     cfg.task_prio = 5;
     cfg.task_core = 0;
-    cfg.stack_in_ext = false; /* PSRAM stacks fail RestrictedPinnedToCore on this board */
+    cfg.stack_in_ext = false;
     cfg.buffer_len = 2048;
     return audio_element_init(&cfg);
 }
 
-static void radio_reset_decoder(void)
-{
-    if (!s_aac) {
-        return;
-    }
-    audio_element_reset_input_ringbuf(s_aac);
-    audio_element_reset_state(s_aac);
-    audio_element_resume(s_aac, 0, 500);
-}
-
-static void radio_on_inject_clip(bool active)
-{
-    if (!s_i2s) {
-        return;
-    }
-    if (active) {
-        i2s_alc_volume_set(s_i2s, SB_ALC_MAX_DB);
-        i2s_stream_set_clk(s_i2s, 22050, 16, 2);
-    } else {
-        i2s_alc_volume_set(s_i2s, volume_to_alc(s_volume));
-        /* Called after DRAIN, so the voice has finished. 22050 was the clip; stream is HE-AAC. */
-        int rate = (s_sample_rate >= 32000) ? s_sample_rate : 44100;
-        i2s_stream_set_clk(s_i2s, rate, 16, 2);
-    }
-}
-
-static int _http_stream_event_handle(http_stream_event_msg_t *msg);
-
-static void radio_store_url_volume(const char *url, int volume)
-{
-    s_volume = volume;
-    strncpy(s_url, url ? url : "", sizeof(s_url) - 1);
-    s_url[sizeof(s_url) - 1] = 0;
-}
-
-static void radio_init_http(void)
-{
-    http_stream_cfg_t http_cfg = HTTP_STREAM_CFG_DEFAULT();
-    http_cfg.type = AUDIO_STREAM_READER;
-    http_cfg.enable_playlist_parser = false;
-    http_cfg.crt_bundle_attach = esp_crt_bundle_attach;
-    http_cfg.event_handle = _http_stream_event_handle;
-    http_cfg.user_agent = "SearaBoom/1.0";
-    http_cfg.out_rb_size = 256 * 1024;
-    http_cfg.task_stack = 5 * 1024;
-    http_cfg.stack_in_ext = false;
-    s_http = http_stream_init(&http_cfg);
-}
-
-static void radio_init_inject(void)
-{
-    s_inject = aac_inject_init();
-    aac_inject_set_passthrough(true);
-    aac_inject_hooks_t hooks = {
-        .reset_decoder = radio_reset_decoder,
-        .on_clip = radio_on_inject_clip,
-    };
-    aac_inject_set_hooks(&hooks);
-}
-
-static void radio_init_decoder_i2s(int volume)
-{
-    i2s_stream_cfg_t i2s_cfg = I2S_STREAM_CFG_DEFAULT();
-    i2s_cfg.type = AUDIO_STREAM_WRITER;
-    i2s_cfg.use_alc = true;
-    i2s_cfg.volume = volume_to_alc(volume);
-    i2s_stream_set_channel_type(&i2s_cfg, I2S_CHANNEL_TYPE_RIGHT_LEFT);
-    s_i2s = i2s_stream_init(&i2s_cfg);
-
-    aac_decoder_cfg_t aac_cfg = DEFAULT_AAC_DECODER_CONFIG();
-    /* Stream is HE-AACv2 @ 44.1 kHz; without plus we only get the LC core @ 22.05 kHz. */
-    aac_cfg.plus_enable = true;
-    aac_cfg.out_rb_size = 16 * 1024;
-    aac_cfg.task_stack = 8 * 1024;
-    aac_cfg.stack_in_ext = false;
-    s_aac = aac_decoder_init(&aac_cfg);
-
-    s_m2s = mono_to_stereo_init();
-}
-
-static void radio_mark_started(void)
-{
-    s_got_music_info = false;
-    s_running = true;
-    s_prefetching = false;
-    int64_t now = esp_timer_get_time() / 1000;
-    s_last_pcm_ms = now;
-    s_stall_grace_until_ms = now + SB_STREAM_STALL_GRACE_MS;
-    s_stall_strikes = 0;
-    s_restart_backoff_ms = 500;
-}
-
-static int _http_stream_event_handle(http_stream_event_msg_t *msg)
+static int http_stream_event(http_stream_event_msg_t *msg)
 {
     if (msg->event_id == HTTP_STREAM_PRE_REQUEST) {
         esp_http_client_handle_t client = (esp_http_client_handle_t)msg->http_client;
@@ -355,16 +408,7 @@ static int _http_stream_event_handle(http_stream_event_msg_t *msg)
     return ESP_OK;
 }
 
-static void radio_start_listener(void)
-{
-    if (!s_evt) {
-        audio_event_iface_cfg_t evt_cfg = AUDIO_EVENT_IFACE_DEFAULT_CFG();
-        s_evt = audio_event_iface_init(&evt_cfg);
-    }
-    audio_pipeline_set_listener(s_pipeline, s_evt);
-}
-
-static void radio_board_codec_start(void)
+static void board_codec_start(void)
 {
     audio_board_handle_t board_handle = audio_board_init();
     if (board_handle && board_handle->audio_hal) {
@@ -372,29 +416,418 @@ static void radio_board_codec_start(void)
     }
 }
 
+static void store_url_volume(const char *url, int volume)
+{
+    s_volume = volume;
+    strncpy(s_url, url ? url : "", sizeof(s_url) - 1);
+    s_url[sizeof(s_url) - 1] = 0;
+}
+
+static void radio_flush_pcm(void)
+{
+    if (s_radio_pcm) {
+        rb_reset(s_radio_pcm);
+    }
+}
+
+static void radio_mark_started(void)
+{
+    s_running = true;
+    s_prefetching = false;
+    int64_t now = esp_timer_get_time() / 1000;
+    s_last_pcm_ms = now;
+    s_stall_grace_until_ms = now + SB_STREAM_STALL_GRACE_MS;
+    s_stall_strikes = 0;
+    s_restart_backoff_ms = 500;
+}
+
+static audio_event_iface_handle_t make_evt(void)
+{
+    audio_event_iface_cfg_t evt_cfg = AUDIO_EVENT_IFACE_DEFAULT_CFG();
+    return audio_event_iface_init(&evt_cfg);
+}
+
+static void mix_use_rb(int slot, ringbuf_handle_t rb, int timeout)
+{
+    if (!s_downmix || !rb) {
+        return;
+    }
+    downmix_set_input_rb_timeout(s_downmix, 0, slot);
+    downmix_set_input_rb(s_downmix, rb, slot);
+    downmix_set_input_rb_timeout(s_downmix, timeout, slot);
+}
+
+static void mix_mute_slot(int slot)
+{
+    mix_use_rb(slot, slot == SB_SLOT_RADIO ? s_mute_radio : s_mute_clip,
+               SB_MIX_MUTE_TIMEOUT);
+}
+
+static void mix_route_clip_and_radio(void);
+
+static void mix_rewind(void)
+{
+    if (!s_mix_pipe) {
+        return;
+    }
+    audio_pipeline_stop(s_mix_pipe);
+    audio_pipeline_wait_for_stop(s_mix_pipe);
+    audio_pipeline_reset_ringbuffer(s_mix_pipe);
+    audio_pipeline_reset_elements(s_mix_pipe);
+    audio_pipeline_reset_items_state(s_mix_pipe);
+    audio_pipeline_change_state(s_mix_pipe, AEL_STATE_INIT);
+}
+
+static void mix_restart_if_needed(void)
+{
+    if (!s_mix_pipe || !s_downmix) {
+        return;
+    }
+    audio_element_state_t st = audio_element_get_state(s_downmix);
+    audio_element_state_t i2s_st = s_i2s ? audio_element_get_state(s_i2s) : AEL_STATE_RUNNING;
+    if (st != AEL_STATE_FINISHED && st != AEL_STATE_STOPPED && st != AEL_STATE_ERROR
+        && i2s_st != AEL_STATE_FINISHED && i2s_st != AEL_STATE_STOPPED && i2s_st != AEL_STATE_ERROR) {
+        return;
+    }
+    ESP_LOGW(TAG, "mix dead mix=%d i2s=%d, restarting", (int)st, (int)i2s_st);
+    mix_rewind();
+    mix_mute_slot(SB_SLOT_RADIO);
+    mix_mute_slot(SB_SLOT_CLIP);
+    if (audio_pipeline_run(s_mix_pipe) != ESP_OK) {
+        ESP_LOGE(TAG, "mix restart run failed");
+        return;
+    }
+    if (s_i2s) {
+        i2s_stream_set_clk(s_i2s, SB_MIX_SR, 16, 2);
+        if (!s_amp_gated) {
+            i2s_alc_volume_set(s_i2s, volume_to_alc(s_volume));
+        }
+    }
+    mix_route_clip_and_radio();
+}
+
+static void teardown_radio(void)
+{
+    s_radio_pcm = NULL;
+    s_running = false;
+    s_prefetching = false;
+    mix_route_clip_and_radio();
+    vTaskDelay(pdMS_TO_TICKS(30));
+    if (s_radio_raw) {
+        ringbuf_handle_t old = audio_element_get_input_ringbuf(s_radio_raw);
+        if (old) {
+            rb_abort(old);
+        }
+    }
+    if (s_radio_pipe) {
+        audio_pipeline_stop(s_radio_pipe);
+        audio_pipeline_wait_for_stop(s_radio_pipe);
+        audio_pipeline_terminate(s_radio_pipe);
+        if (s_http) {
+            audio_pipeline_unregister(s_radio_pipe, s_http);
+        }
+        if (s_aac) {
+            audio_pipeline_unregister(s_radio_pipe, s_aac);
+        }
+        if (s_radio_m2s) {
+            audio_pipeline_unregister(s_radio_pipe, s_radio_m2s);
+        }
+        if (s_radio_raw) {
+            audio_pipeline_unregister(s_radio_pipe, s_radio_raw);
+        }
+        audio_pipeline_remove_listener(s_radio_pipe);
+        audio_pipeline_deinit(s_radio_pipe);
+        s_radio_pipe = NULL;
+    }
+    if (s_http) {
+        audio_element_deinit(s_http);
+        s_http = NULL;
+    }
+    if (s_aac) {
+        audio_element_deinit(s_aac);
+        s_aac = NULL;
+    }
+    if (s_radio_m2s) {
+        audio_element_deinit(s_radio_m2s);
+        s_radio_m2s = NULL;
+    }
+    if (s_radio_raw) {
+        audio_element_deinit(s_radio_raw);
+        s_radio_raw = NULL;
+    }
+    if (s_radio_evt) {
+        audio_event_iface_destroy(s_radio_evt);
+        s_radio_evt = NULL;
+    }
+    s_running = false;
+    s_prefetching = false;
+    s_got_music_info = false;
+}
+
+static void teardown_mix(void)
+{
+    teardown_radio();
+    if (s_mix_pipe) {
+        audio_pipeline_stop(s_mix_pipe);
+        audio_pipeline_wait_for_stop(s_mix_pipe);
+        audio_pipeline_terminate(s_mix_pipe);
+        if (s_downmix) {
+            audio_pipeline_unregister(s_mix_pipe, s_downmix);
+        }
+        if (s_tap) {
+            audio_pipeline_unregister(s_mix_pipe, s_tap);
+        }
+        if (s_i2s) {
+            audio_pipeline_unregister(s_mix_pipe, s_i2s);
+        }
+        audio_pipeline_remove_listener(s_mix_pipe);
+        audio_pipeline_deinit(s_mix_pipe);
+        s_mix_pipe = NULL;
+    }
+    if (s_downmix) {
+        audio_element_deinit(s_downmix);
+        s_downmix = NULL;
+    }
+    if (s_tap) {
+        audio_element_deinit(s_tap);
+        s_tap = NULL;
+    }
+    if (s_i2s) {
+        audio_element_deinit(s_i2s);
+        s_i2s = NULL;
+    }
+    if (s_mix_evt) {
+        audio_event_iface_destroy(s_mix_evt);
+        s_mix_evt = NULL;
+    }
+    if (s_mute_radio) {
+        rb_destroy(s_mute_radio);
+        s_mute_radio = NULL;
+    }
+    if (s_mute_clip) {
+        rb_destroy(s_mute_clip);
+        s_mute_clip = NULL;
+    }
+    s_have_out = false;
+    s_clip_active = false;
+}
+
+static esp_err_t ensure_mix(int volume)
+{
+    if (s_have_out) {
+        radio_player_set_volume(volume);
+        return ESP_OK;
+    }
+    board_codec_start();
+    if (!s_mix_evt) {
+        s_mix_evt = make_evt();
+    }
+
+    downmix_cfg_t mix_cfg = DEFAULT_DOWNMIX_CONFIG();
+    mix_cfg.downmix_info.source_num = 2;
+    mix_cfg.downmix_info.mode = ESP_DOWNMIX_WORK_MODE_BYPASS;
+    mix_cfg.downmix_info.output_type = ESP_DOWNMIX_OUTPUT_TYPE_TWO_CHANNEL;
+    mix_cfg.downmix_info.out_ctx = ESP_DOWNMIX_OUT_CTX_NORMAL;
+    mix_cfg.task_stack = 4 * 1024;
+    mix_cfg.task_prio = 6;
+    mix_cfg.stack_in_ext = false;
+    mix_cfg.out_rb_size = 8 * 1024;
+    s_downmix = downmix_init(&mix_cfg);
+    esp_downmix_input_info_t src[2] = {
+        {.samplerate = SB_MIX_SR, .channel = 2, .bits_num = 16, .gain = {0, -12}, .transit_time = 150},
+        {.samplerate = SB_MIX_SR, .channel = 2, .bits_num = 16, .gain = {-60, 0}, .transit_time = 150},
+    };
+    source_info_init(s_downmix, src);
+    s_mute_radio = rb_create(256, 4);
+    s_mute_clip = rb_create(256, 4);
+    mix_mute_slot(SB_SLOT_RADIO);
+    mix_mute_slot(SB_SLOT_CLIP);
+
+    s_tap = tap_init();
+
+    i2s_stream_cfg_t i2s_cfg = I2S_STREAM_CFG_DEFAULT();
+    i2s_cfg.type = AUDIO_STREAM_WRITER;
+    i2s_cfg.use_alc = true;
+    i2s_cfg.volume = volume_to_alc(volume);
+    i2s_cfg.uninstall_drv = true;
+    i2s_cfg.std_cfg.clk_cfg.sample_rate_hz = SB_MIX_SR;
+    i2s_stream_set_channel_type(&i2s_cfg, I2S_CHANNEL_TYPE_RIGHT_LEFT);
+    s_i2s = i2s_stream_init(&i2s_cfg);
+
+    audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
+    s_mix_pipe = audio_pipeline_init(&pipeline_cfg);
+    if (!s_mix_pipe || !s_downmix || !s_tap || !s_i2s) {
+        ESP_LOGE(TAG, "mix init failed");
+        teardown_mix();
+        return ESP_FAIL;
+    }
+    audio_pipeline_register(s_mix_pipe, s_downmix, "mix");
+    audio_pipeline_register(s_mix_pipe, s_tap, "tap");
+    audio_pipeline_register(s_mix_pipe, s_i2s, "i2s");
+    const char *link[3] = {"mix", "tap", "i2s"};
+    audio_pipeline_link(s_mix_pipe, &link[0], 3);
+    audio_pipeline_set_listener(s_mix_pipe, s_mix_evt);
+    if (audio_pipeline_run(s_mix_pipe) != ESP_OK) {
+        ESP_LOGE(TAG, "mix pipeline_run failed");
+        teardown_mix();
+        return ESP_FAIL;
+    }
+    i2s_stream_set_clk(s_i2s, SB_MIX_SR, 16, 2);
+    s_amp_gated = true;
+    s_have_out = true;
+    s_volume = volume;
+    if (s_i2s) {
+        i2s_alc_volume_set(s_i2s, SB_ALC_MIN_DB);
+    }
+    radio_player_pcm_arm();
+    ESP_LOGI(TAG, "mix+I2S up (44100 stereo)");
+    return ESP_OK;
+}
+
+static esp_err_t ensure_radio(const char *url, int volume, bool hold)
+{
+    if (s_radio_pipe) {
+        return ESP_OK;
+    }
+    if (ensure_mix(volume) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    mix_restart_if_needed();
+    store_url_volume(url, volume);
+
+    http_stream_cfg_t http_cfg = HTTP_STREAM_CFG_DEFAULT();
+    http_cfg.type = AUDIO_STREAM_READER;
+    http_cfg.enable_playlist_parser = false;
+    http_cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    http_cfg.event_handle = http_stream_event;
+    http_cfg.user_agent = "SearaBoom/1.0";
+    http_cfg.out_rb_size = 256 * 1024;
+    http_cfg.task_stack = 5 * 1024;
+    http_cfg.task_core = 1;
+    http_cfg.stack_in_ext = false;
+    s_http = http_stream_init(&http_cfg);
+
+    aac_decoder_cfg_t aac_cfg = DEFAULT_AAC_DECODER_CONFIG();
+    aac_cfg.plus_enable = true;
+    aac_cfg.out_rb_size = 16 * 1024;
+    aac_cfg.task_stack = 8 * 1024;
+    aac_cfg.task_core = 1;
+    aac_cfg.stack_in_ext = false;
+    s_aac = aac_decoder_init(&aac_cfg);
+
+    s_radio_m2s = pcm_upmix_init_core("rm2s", 1);
+    raw_stream_cfg_t raw_cfg = RAW_STREAM_CFG_DEFAULT();
+    raw_cfg.type = AUDIO_STREAM_WRITER;
+    raw_cfg.out_rb_size = 16 * 1024;
+    s_radio_raw = raw_stream_init(&raw_cfg);
+
+    audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
+    s_radio_pipe = audio_pipeline_init(&pipeline_cfg);
+    if (!s_radio_pipe || !s_http || !s_aac || !s_radio_m2s || !s_radio_raw) {
+        ESP_LOGE(TAG, "radio init failed");
+        teardown_radio();
+        return ESP_FAIL;
+    }
+    audio_pipeline_register(s_radio_pipe, s_http, "http");
+    audio_pipeline_register(s_radio_pipe, s_aac, "aac");
+    audio_pipeline_register(s_radio_pipe, s_radio_m2s, "rm2s");
+    audio_pipeline_register(s_radio_pipe, s_radio_raw, "rraw");
+    const char *link[4] = {"http", "aac", "rm2s", "rraw"};
+    audio_pipeline_link(s_radio_pipe, &link[0], 4);
+    audio_element_set_uri(s_http, url);
+    /* channels=0: upmix holds until decoder music_info (do not assume mono). */
+    audio_element_set_music_info(s_radio_m2s, SB_MIX_SR, 0, 16);
+    s_got_music_info = false;
+    s_radio_pcm = audio_element_get_input_ringbuf(s_radio_raw);
+    if (!s_radio_evt) {
+        s_radio_evt = make_evt();
+    }
+    audio_pipeline_set_listener(s_radio_pipe, s_radio_evt);
+    if (audio_pipeline_run(s_radio_pipe) != ESP_OK) {
+        ESP_LOGE(TAG, "radio pipeline_run failed");
+        teardown_radio();
+        return ESP_FAIL;
+    }
+    if (hold) {
+        s_prefetching = true;
+        s_running = false;
+        ESP_LOGI(TAG, "radio prefetch (mixer not reading yet)");
+    } else {
+        radio_mark_started();
+        ESP_LOGI(TAG, "radio live");
+    }
+    mix_route_clip_and_radio();
+    return ESP_OK;
+}
+
+static void mix_route_clip_and_radio(void)
+{
+    if (!s_downmix) {
+        return;
+    }
+    /* Prefetch fills the radio pipe but must not feed the mixer — otherwise
+     * go_live finds an empty PCM rb and the station underruns. */
+    bool radio = s_running && s_radio_pcm && s_got_music_info;
+    bool clip = s_clip_active && s_clip_pcm;
+    if (clip && radio) {
+        mix_use_rb(SB_SLOT_RADIO, s_radio_pcm, SB_MIX_MUTE_TIMEOUT);
+        mix_use_rb(SB_SLOT_CLIP, s_clip_pcm, SB_MIX_CLIP_TIMEOUT);
+        downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_SWITCH_ON);
+        return;
+    }
+    if (clip) {
+        /* BYPASS dies on any non-TIMEOUT on slot 0. Clip EOS/ABORT would
+         * finish mix+I2S, so clip-only always uses SWITCH_ON: mute slot 0
+         * (timeout 0 → silence) plus clip on slot 1. */
+        mix_mute_slot(SB_SLOT_RADIO);
+        mix_use_rb(SB_SLOT_CLIP, s_clip_pcm, SB_MIX_CLIP_TIMEOUT);
+        downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_SWITCH_ON);
+        return;
+    }
+    mix_mute_slot(SB_SLOT_CLIP);
+    if (radio) {
+        mix_use_rb(SB_SLOT_RADIO, s_radio_pcm, SB_MIX_RADIO_TIMEOUT);
+        downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_BYPASS);
+    } else {
+        mix_mute_slot(SB_SLOT_RADIO);
+        downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_BYPASS);
+    }
+}
+
+esp_err_t radio_player_attach_clip_pcm(ringbuf_handle_t rb)
+{
+    if (ensure_mix(s_volume) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    mix_restart_if_needed();
+    s_clip_pcm = rb;
+    mix_route_clip_and_radio();
+    return ESP_OK;
+}
+
+void radio_player_set_clip_active(bool on)
+{
+    s_clip_active = on;
+    mix_route_clip_and_radio();
+}
+
+esp_err_t radio_player_start_idle(int volume)
+{
+    ESP_LOGI(TAG, "Start idle audio out (clips)");
+    if (ensure_mix(volume) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    mix_restart_if_needed();
+    return ESP_OK;
+}
+
 esp_err_t radio_player_prefetch(const char *url, int volume)
 {
     if (s_running || s_prefetching) {
         return ESP_OK;
     }
-    radio_store_url_volume(url, volume);
-    radio_board_codec_start();
-
-    ESP_LOGI(TAG, "Prefetch stream %s (HTTP filling, no decoder)", url);
-    audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
-    s_pipeline = audio_pipeline_init(&pipeline_cfg);
-    radio_init_http();
-    radio_init_inject();
-    aac_inject_hold();
-
-    audio_pipeline_register(s_pipeline, s_http, "http");
-    audio_pipeline_register(s_pipeline, s_inject, "inj");
-    const char *link_tag[2] = {"http", "inj"};
-    audio_pipeline_link(s_pipeline, &link_tag[0], 2);
-    audio_element_set_uri(s_http, url);
-    audio_pipeline_run(s_pipeline);
-    s_prefetching = true;
-    return ESP_OK;
+    ESP_LOGI(TAG, "Prefetch stream %s", url);
+    return ensure_radio(url, volume, true);
 }
 
 bool radio_player_is_prefetching(void)
@@ -402,65 +835,46 @@ bool radio_player_is_prefetching(void)
     return s_prefetching;
 }
 
-static esp_err_t radio_attach_decoder_from_prefetch(int volume)
+esp_err_t radio_player_go_live(void)
 {
-    ESP_LOGI(TAG, "Attach HE-AAC decoder to prefetched HTTP");
-    radio_init_decoder_i2s(volume);
-    audio_pipeline_register(s_pipeline, s_aac, "aac");
-    audio_pipeline_register(s_pipeline, s_m2s, "m2s");
-    audio_pipeline_register(s_pipeline, s_i2s, "i2s");
-
-    audio_pipeline_pause(s_pipeline);
-    audio_pipeline_breakup_elements(s_pipeline, s_inject);
-    const char *link_tag[5] = {"http", "inj", "aac", "m2s", "i2s"};
-    if (audio_pipeline_relink(s_pipeline, &link_tag[0], 5) != ESP_OK) {
-        ESP_LOGE(TAG, "relink after prefetch failed");
-        return ESP_FAIL;
+    if (!s_have_out) {
+        return ESP_ERR_INVALID_STATE;
     }
-    radio_start_listener();
-    aac_inject_set_passthrough(true);
-    audio_pipeline_run(s_pipeline);
-    audio_pipeline_resume(s_pipeline);
-    radio_player_set_volume(volume);
-    radio_mark_started();
+    if (!s_radio_pipe) {
+        if (!s_url[0]) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        return ensure_radio(s_url, s_volume, false);
+    }
+    ESP_LOGI(TAG, "Go live — mixer reads radio");
+    if (s_amp_gated && s_i2s) {
+        s_amp_gated = false;
+        i2s_alc_volume_set(s_i2s, volume_to_alc(s_volume));
+    }
+    if (!s_running) {
+        radio_mark_started();
+    }
+    s_prefetching = false;
+    mix_route_clip_and_radio();
     return ESP_OK;
 }
 
 esp_err_t radio_player_start(const char *url, int volume)
 {
+    if (s_prefetching && s_radio_pipe) {
+        store_url_volume(url, volume);
+        return radio_player_go_live();
+    }
     if (s_running) {
-        radio_player_stop();
+        teardown_radio();
     }
-    clip_player_release_pipe();
-    radio_store_url_volume(url, volume);
-
-    if (s_prefetching && s_http && s_pipeline) {
-        return radio_attach_decoder_from_prefetch(volume);
-    }
-
     ESP_LOGI(TAG, "Start stream %s", url);
-    radio_board_codec_start();
+    return ensure_radio(url, volume, false);
+}
 
-    audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
-    s_pipeline = audio_pipeline_init(&pipeline_cfg);
-    radio_init_http();
-    radio_init_inject();
-    radio_init_decoder_i2s(volume);
-
-    audio_pipeline_register(s_pipeline, s_http, "http");
-    audio_pipeline_register(s_pipeline, s_inject, "inj");
-    audio_pipeline_register(s_pipeline, s_aac, "aac");
-    audio_pipeline_register(s_pipeline, s_m2s, "m2s");
-    audio_pipeline_register(s_pipeline, s_i2s, "i2s");
-
-    const char *link_tag[5] = {"http", "inj", "aac", "m2s", "i2s"};
-    audio_pipeline_link(s_pipeline, &link_tag[0], 5);
-    audio_element_set_uri(s_http, url);
-    radio_start_listener();
-    audio_pipeline_run(s_pipeline);
-    radio_player_set_volume(volume);
-    radio_mark_started();
-    return ESP_OK;
+bool radio_player_has_output(void)
+{
+    return s_have_out;
 }
 
 bool radio_player_is_running(void)
@@ -487,90 +901,40 @@ void radio_player_resume(void)
 
 void radio_player_stop(void)
 {
-    if (!s_running && !s_prefetching) {
-        s_want_stop = false;
-        return;
-    }
-    if (s_pipeline) {
-        audio_pipeline_stop(s_pipeline);
-        audio_pipeline_wait_for_stop(s_pipeline);
-        audio_pipeline_terminate(s_pipeline);
-        if (s_http) {
-            audio_pipeline_unregister(s_pipeline, s_http);
-        }
-        if (s_inject) {
-            audio_pipeline_unregister(s_pipeline, s_inject);
-        }
-        if (s_aac) {
-            audio_pipeline_unregister(s_pipeline, s_aac);
-        }
-        if (s_m2s) {
-            audio_pipeline_unregister(s_pipeline, s_m2s);
-        }
-        if (s_i2s) {
-            audio_pipeline_unregister(s_pipeline, s_i2s);
-        }
-        audio_pipeline_remove_listener(s_pipeline);
-        audio_pipeline_deinit(s_pipeline);
-        s_pipeline = NULL;
-    }
-    if (s_evt) {
-        audio_event_iface_destroy(s_evt);
-        s_evt = NULL;
-    }
-    if (s_http) {
-        audio_element_deinit(s_http);
-        s_http = NULL;
-    }
-    if (s_aac) {
-        audio_element_deinit(s_aac);
-        s_aac = NULL;
-    }
-    if (s_m2s) {
-        audio_element_deinit(s_m2s);
-        s_m2s = NULL;
-    }
-    if (s_i2s) {
-        audio_element_deinit(s_i2s);
-        s_i2s = NULL;
-    }
-    aac_inject_set_hooks(NULL);
-    aac_inject_deinit();
-    aac_inject_set_passthrough(false);
-    s_inject = NULL;
-    s_running = false;
-    s_prefetching = false;
-    s_got_music_info = false;
     s_want_stop = false;
+    teardown_radio();
 }
 
-static void pipeline_soft_restart(const char *reason)
+static void radio_soft_restart(const char *reason)
 {
+    if (!s_radio_pipe) {
+        return;
+    }
     ESP_LOGW(TAG, "%s — soft restart in %d ms (strike %d)", reason, s_restart_backoff_ms,
              s_stall_strikes + 1);
-    audio_pipeline_stop(s_pipeline);
-    audio_pipeline_wait_for_stop(s_pipeline);
+    audio_pipeline_stop(s_radio_pipe);
+    audio_pipeline_wait_for_stop(s_radio_pipe);
     vTaskDelay(pdMS_TO_TICKS(s_restart_backoff_ms));
     if (s_restart_backoff_ms < 8000) {
         s_restart_backoff_ms *= 2;
     }
-    audio_element_reset_state(s_http);
-    audio_element_reset_state(s_inject);
-    audio_element_reset_state(s_aac);
-    audio_element_reset_state(s_m2s);
-    audio_element_reset_state(s_i2s);
-    audio_pipeline_reset_ringbuffer(s_pipeline);
-    audio_pipeline_reset_items_state(s_pipeline);
-    audio_pipeline_run(s_pipeline);
+    audio_pipeline_reset_ringbuffer(s_radio_pipe);
+    audio_pipeline_reset_elements(s_radio_pipe);
+    audio_pipeline_reset_items_state(s_radio_pipe);
+    if (s_radio_m2s) {
+        audio_element_set_music_info(s_radio_m2s, SB_MIX_SR, 0, 16);
+    }
+    audio_pipeline_run(s_radio_pipe);
     int64_t now = esp_timer_get_time() / 1000;
     s_last_pcm_ms = now;
     s_stall_grace_until_ms = now + SB_STREAM_STALL_GRACE_MS;
     s_got_music_info = false;
+    mix_route_clip_and_radio();
 }
 
 static void check_stream_stall(void)
 {
-    if (!s_running || !s_got_music_info) {
+    if (!s_running || !s_got_music_info || s_clip_active) {
         return;
     }
     int64_t now = esp_timer_get_time() / 1000;
@@ -581,21 +945,38 @@ static void check_stream_stall(void)
     if (idle < SB_STREAM_STALL_MS) {
         return;
     }
-
     s_stall_strikes++;
     ESP_LOGW(TAG, "stream stall: no PCM for %lld ms", (long long)idle);
-
     if (s_stall_strikes >= SB_STREAM_HARD_RESTART_AFTER && s_url[0]) {
-        ESP_LOGW(TAG, "stream stall: hard restart of pipeline");
+        ESP_LOGW(TAG, "stream stall: hard restart of radio");
         int vol = s_volume;
         char url[sizeof(s_url)];
         memcpy(url, s_url, sizeof(url));
-        radio_player_stop();
+        teardown_radio();
         vTaskDelay(pdMS_TO_TICKS(500));
         radio_player_start(url, vol);
         return;
     }
-    pipeline_soft_restart("stream stall");
+    radio_soft_restart("stream stall");
+}
+
+static void drain_mix_evt(void)
+{
+    if (!s_mix_evt) {
+        return;
+    }
+    audio_event_iface_msg_t msg;
+    while (audio_event_iface_listen(s_mix_evt, &msg, 0) == ESP_OK) {
+        if (msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT
+            && msg.cmd == AEL_MSG_CMD_REPORT_STATUS
+            && msg.source == (void *)s_downmix) {
+            int st = (int)msg.data;
+            if (st == AEL_STATUS_STATE_FINISHED || st == AEL_STATUS_STATE_STOPPED
+                || st == AEL_STATUS_ERROR_PROCESS || st == AEL_STATUS_ERROR_INPUT) {
+                ESP_LOGW(TAG, "mix status=%d", st);
+            }
+        }
+    }
 }
 
 void radio_player_loop(void)
@@ -604,67 +985,63 @@ void radio_player_loop(void)
         radio_player_stop();
         return;
     }
-    if (!s_running) {
+    if (!s_have_out) {
         return;
     }
-
-    bool clip = aac_inject_is_playing();
-    if (!clip) {
+    drain_mix_evt();
+    mix_restart_if_needed();
+    if (s_running && !s_clip_active) {
         check_stream_stall();
     }
-
-    if (!s_evt) {
+    if (!s_radio_evt) {
         return;
     }
     audio_event_iface_msg_t msg;
-    esp_err_t ret = audio_event_iface_listen(s_evt, &msg, 0);
+    esp_err_t ret = audio_event_iface_listen(s_radio_evt, &msg, 0);
     if (ret != ESP_OK) {
         return;
     }
-
+    /* Fall through to handle this event (loop may be called often). */
     if (msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT && msg.source == (void *)s_aac
         && msg.cmd == AEL_MSG_CMD_REPORT_MUSIC_INFO) {
         audio_element_info_t music_info = {0};
         audio_element_getinfo(s_aac, &music_info);
-        if (clip || (music_info.sample_rates > 0 && music_info.sample_rates < 32000)) {
-            ESP_LOGI(TAG, "clip music info rate=%d bits=%d ch=%d (I2S stays 22050 until stream)",
-                     music_info.sample_rates, music_info.bits, music_info.channels);
-            return;
-        }
-        ESP_LOGI(TAG, "music info rate=%d bits=%d ch=%d -> stereo I2S",
+        ESP_LOGI(TAG, "stream music info rate=%d bits=%d ch=%d (mix locked 44100 stereo)",
                  music_info.sample_rates, music_info.bits, music_info.channels);
-        if (music_info.sample_rates > 0) {
-            s_sample_rate = music_info.sample_rates;
+        int ch = music_info.channels > 0 ? music_info.channels : 2;
+        int rate = music_info.sample_rates > 0 ? music_info.sample_rates : SB_MIX_SR;
+        if (s_radio_m2s) {
+            audio_element_set_music_info(s_radio_m2s, rate, ch, 16);
         }
-        audio_element_setinfo(s_m2s, &music_info);
-        i2s_stream_set_clk(s_i2s, music_info.sample_rates, music_info.bits, 2);
-        s_got_music_info = true;
+        radio_flush_pcm();
+        if (rate >= 16000) {
+            s_got_music_info = true;
+        }
         s_restart_backoff_ms = 500;
         s_stall_strikes = 0;
         s_last_pcm_ms = esp_timer_get_time() / 1000;
+        mix_route_clip_and_radio();
         ESP_LOGI(TAG, "heap after music: free=%u spiram=%u internal=%u",
                  (unsigned)esp_get_free_heap_size(),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         return;
     }
-
     bool bad = msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT
         && msg.cmd == AEL_MSG_CMD_REPORT_STATUS
         && ((int)msg.data == AEL_STATUS_ERROR_OPEN || (int)msg.data == AEL_STATUS_ERROR_INPUT
             || (int)msg.data == AEL_STATUS_ERROR_PROCESS)
         && (msg.source == (void *)s_http || msg.source == (void *)s_aac);
-    if (!bad || clip) {
+    if (!bad || s_clip_active) {
         return;
     }
-
     s_stall_strikes++;
     if (s_stall_strikes >= SB_STREAM_HARD_RESTART_AFTER && s_url[0]) {
         ESP_LOGW(TAG, "stream/decoder error — hard restart");
         int vol = s_volume;
         char url[sizeof(s_url)];
         memcpy(url, s_url, sizeof(url));
-        radio_player_stop();
+        teardown_radio();
         vTaskDelay(pdMS_TO_TICKS(s_restart_backoff_ms));
         if (s_restart_backoff_ms < 8000) {
             s_restart_backoff_ms *= 2;
@@ -672,5 +1049,5 @@ void radio_player_loop(void)
         radio_player_start(url, vol);
         return;
     }
-    pipeline_soft_restart("stream/decoder error");
+    radio_soft_restart("stream/decoder error");
 }

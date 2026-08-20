@@ -110,16 +110,21 @@ static bool wifi_connect_or_setup(void)
 
 static void ota_task_fn(void *arg)
 {
-    TaskHandle_t waiter = (TaskHandle_t)arg;
+    (void)arg;
     ota_update_check_on_boot();
-    if (waiter) {
-        xTaskNotifyGive(waiter);
-    }
     vTaskDelete(NULL);
 }
 
 void app_main(void)
 {
+    /* sdkconfig on this host has DEBUG; mix/nvs/wifi spam starves I2S and HTTP. */
+    esp_log_level_set("*", ESP_LOG_INFO);
+    esp_log_level_set("DOWNMIX", ESP_LOG_WARN);
+    esp_log_level_set("AUDIO_ELEMENT", ESP_LOG_INFO);
+    esp_log_level_set("AUDIO_PIPELINE", ESP_LOG_INFO);
+    esp_log_level_set("nvs", ESP_LOG_WARN);
+    esp_log_level_set("wifi", ESP_LOG_INFO);
+
     const esp_app_desc_t *app = esp_app_get_description();
     ESP_LOGI(TAG, "SearaBoom ADF starting (fw %s)", app->version);
     ESP_ERROR_CHECK(config_store_init());
@@ -134,43 +139,47 @@ void app_main(void)
     play_updated = config_store_consume_fw_change(app->version) || play_updated;
     if (play_updated && !config_store_has_wifi(&s_cfg)) {
         ESP_LOGI(TAG, "First boot after update, no Wi-Fi — atualizado then setup AP");
+        radio_player_start_idle(s_cfg.volume);
         clip_player_play_wait(SB_CLIP_OTA_DONE, 20000);
-        /* Drop I2S/AAC before WiFi AP — leftover HOLD + decoder reset brownouts the 5V rail. */
-        clip_player_release_pipe();
     }
 
     if (!wifi_connect_or_setup()) {
         ESP_LOGW(TAG, "Starting captive portal");
-        captive_portal_run(); /* never returns */
+        captive_portal_run(); /* never returns; first clip opens idle I2S */
     }
 
     log_shipper_init();
 
     const char *url = config_store_stream_url(&s_cfg);
+    sb_clip_id_t tune = (strncmp(s_cfg.url_key, "URL2", 4) == 0)
+        ? SB_CLIP_TUNE_104 : SB_CLIP_TUNE_102;
+    ESP_LOGI(TAG, "Prefetch stream %s (%s) vol=%d", s_cfg.url_key, url, s_cfg.volume);
+    if (radio_player_prefetch(url, s_cfg.volume) != ESP_OK) {
+        ESP_LOGE(TAG, "Radio prefetch failed");
+    }
     if (play_updated) {
-        /* Prefetch HTTP while atualizado plays on the LC clip-only pipe. */
-        ESP_LOGI(TAG, "Prefetch stream %s (%s) vol=%d while playing atualizado",
-                 s_cfg.url_key, url, s_cfg.volume);
-        radio_player_prefetch(url, s_cfg.volume);
-        ESP_LOGI(TAG, "First boot after update — playing atualizado (LC clip pipe)");
+        ESP_LOGI(TAG, "First boot after update — playing atualizado");
         clip_player_play_wait(SB_CLIP_OTA_DONE, 20000);
-        clip_player_release_pipe();
-        if (radio_player_start(url, s_cfg.volume) != ESP_OK) {
-            ESP_LOGE(TAG, "Radio start failed");
-        }
     } else {
-        ESP_LOGI(TAG, "WiFi OK, checking OTA (stable policy: major.minor only)");
-        if (xTaskCreatePinnedToCore(ota_task_fn, "ota", 12288, xTaskGetCurrentTaskHandle(), 5, NULL, 0) == pdPASS) {
-            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(120000));
-        } else {
-            ota_update_check_on_boot();
-        }
-        ESP_LOGI(TAG, "Connecting to stream %s (%s) vol=%d", s_cfg.url_key, url, s_cfg.volume);
-        if (radio_player_start(url, s_cfg.volume) != ESP_OK) {
-            ESP_LOGE(TAG, "Radio start failed");
-        }
+        clip_player_play_wait(tune, 15000);
+    }
+    if (radio_player_go_live() != ESP_OK) {
+        ESP_LOGE(TAG, "Radio go_live failed");
     }
     led_status_set(SB_LED_GREEN, 500);
+
+    /* Hear the station first, then check OTA (AAC+TLS on one core trips the WDT). */
+    int64_t wait_music = esp_timer_get_time() + 12000 * 1000LL;
+    while (!radio_player_has_music_info() && esp_timer_get_time() < wait_music) {
+        clip_player_tick();
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    ESP_LOGI(TAG, "WiFi OK, checking OTA after stream (stable policy: major.minor only)");
+    /* Core 1 so the TLS GET does not stall I2S/AAC on core 0. Do not block
+     * the main loop — that used to freeze mix event drain during the check. */
+    if (xTaskCreatePinnedToCore(ota_task_fn, "ota", 12288, NULL, 5, NULL, 1) != pdPASS) {
+        ESP_LOGW(TAG, "OTA task create failed — skipping boot check");
+    }
 
     /* Touch pads need RAM; wait until AAC has initialized. */
     bool touch_ready = false;
@@ -178,7 +187,7 @@ void app_main(void)
 
     while (true) {
         led_status_tick();
-        radio_player_loop();
+        clip_player_tick();
         if (!touch_ready) {
             int64_t now = esp_timer_get_time() / 1000;
             if (radio_player_has_music_info() || (now - started_ms) > 20000) {

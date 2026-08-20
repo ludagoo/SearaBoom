@@ -21,7 +21,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PORT = os.environ.get("SEARABOOM_PORT", "/dev/ttyACM0")
-AP_SSID = "SearBoomSetup"
+AP_SSID = "SearaBoom"
 PORTAL = "http://4.3.2.1/"
 OTA_DONE_MIN_MS = 4000
 WELCOME_AFTER_DONE_MAX_MS = 20000
@@ -121,7 +121,7 @@ def assert_boot_sequence(log: str) -> None:
         raise Fail("did not start ap_welcome / new-box clip")
     if "No WiFi SSID saved -> setup AP" not in log:
         raise Fail("did not skip STA wait on empty SSID")
-    if "AP SearBoomSetup up" not in log:
+    if "AP SearaBoom up" not in log:
         raise Fail("setup AP did not come up")
 
     t_done = line_esp_ms(log, "CLIP play name=ota_done")
@@ -219,8 +219,8 @@ def main() -> int:
             raise Fail(f"could not open {PORT} after reset: {last_err}")
         if not slog.wait_for("CLIP play name=ap_welcome", 30):
             raise Fail("timed out waiting for ap_welcome\n" + slog.text()[-2000:])
-        if not slog.wait_for("bytes loop=1", 4):
-            raise Fail("welcome inject did not start\n" + slog.text()[-1500:])
+        if not slog.wait_for("clip music info", 8):
+            raise Fail("welcome clip decoder did not report music info\n" + slog.text()[-1500:])
         time.sleep(2.5)
         tail = slog.text()[-4000:]
         if "Brownout" in tail or "Guru Meditation" in tail:

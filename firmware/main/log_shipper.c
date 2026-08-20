@@ -208,7 +208,7 @@ esp_err_t log_shipper_init(void)
     s_ready = true;
     s_paused = false;
 
-    if (xTaskCreatePinnedToCore(shipper_task, "log_ship", 12288, NULL, 3, NULL, 0) != pdPASS) {
+    if (xTaskCreatePinnedToCore(shipper_task, "log_ship", 12288, NULL, 3, NULL, 1) != pdPASS) {
         ESP_LOGW(TAG, "log shipper task failed");
         return ESP_FAIL;
     }

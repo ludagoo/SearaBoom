@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Host tests for ADTS duration and clip-wait policy.
+"""Host tests for ADTS clip durations.
 
-Catches the regression where play_wait returned when AAC bytes were queued
-instead of when the speaker finished (~4.5s for ota_done).
+play_wait on device now ends on clip-pipeline FINISHED (decoder EOS),
+not on ADTS queue time. This file only checks the embedded blobs.
 """
 from __future__ import annotations
 
@@ -16,15 +16,20 @@ ADTS_C = ROOT / "firmware" / "main" / "adts_util.c"
 ADTS_H = ROOT / "firmware" / "main" / "adts_util.h"
 
 EXPECTED_MS = {
-    "ota_done.aac": 4551,
-    "ota_updating.aac": 6083,
-    "ap_welcome.aac": 21640,
-    "ap_connected.aac": 18483,
-    "ap_saved.aac": 7105,
+    "ap_welcome.aac": 18088,
+    "ap_connected.aac": 9450,
+    "ap_page.aac": 9032,
+    "ap_form_station.aac": 8730,
+    "ap_form_wifi.aac": 2786,
+    "ap_form_password.aac": 2554,
+    "ap_form_save.aac": 3761,
+    "ap_saved.aac": 4643,
+    "tune_102.aac": 4342,
+    "tune_104.aac": 4504,
+    "ota_available.aac": 6733,
+    "ota_rebooting.aac": 2554,
+    "ota_done.aac": 4806,
 }
-
-CLIP_TAIL_MS = 800
-WIFI_TIMEOUT_MS = 25000
 
 
 def adts_duration_ms(data: bytes) -> int:
@@ -51,13 +56,6 @@ def adts_duration_ms(data: bytes) -> int:
     return (frames * 1024 * 1000) // sr
 
 
-def play_wait_ms(dur: int, timeout_ms: int = 20000) -> int:
-    wait_ms = dur + CLIP_TAIL_MS
-    if timeout_ms > 0 and timeout_ms < wait_ms:
-        wait_ms = timeout_ms
-    return wait_ms
-
-
 def test_clip_files_match_expected_duration() -> None:
     for name, expected in EXPECTED_MS.items():
         path = CLIPS / name
@@ -66,22 +64,13 @@ def test_clip_files_match_expected_duration() -> None:
         assert abs(got - expected) <= 50, f"{name}: duration {got}ms != {expected}ms"
 
 
-def test_play_wait_covers_speaker_time_not_byte_queue() -> None:
-    dur = adts_duration_ms((CLIPS / "ota_done.aac").read_bytes())
-    wait = play_wait_ms(dur)
-    # Injecting 17KB takes well under 500ms. Returning then cuts the clip.
-    assert wait >= 4000, f"play_wait too short: {wait}ms"
-    assert wait <= dur + CLIP_TAIL_MS + 1
-    assert wait < WIFI_TIMEOUT_MS, "empty-SSID path must not wait the STA timeout"
-
-
 def test_welcome_is_longer_than_ota_done() -> None:
     done = adts_duration_ms((CLIPS / "ota_done.aac").read_bytes())
     welcome = adts_duration_ms((CLIPS / "ap_welcome.aac").read_bytes())
     assert welcome > done * 2
 
 
-def test_c_parser_matches_python(tmp_path: Path | None = None) -> None:
+def test_c_parser_matches_python() -> None:
     import tempfile
 
     harness = r"""
@@ -125,7 +114,6 @@ int main(int argc, char **argv) {
 
 def main() -> int:
     test_clip_files_match_expected_duration()
-    test_play_wait_covers_speaker_time_not_byte_queue()
     test_welcome_is_longer_than_ota_done()
     test_c_parser_matches_python()
     print("test_adts: ok")

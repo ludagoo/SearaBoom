@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Generate SearaBoom UI AAC clips with Grok Carina (pt-BR)."""
+"""Generate SearaBoom UI AAC clips with Grok Carina (pt-BR, Ceará).
+
+Output matches the radio decoder: AAC-LC ADTS, 44100 Hz, mono.
+"""
 from __future__ import annotations
 
 import json
@@ -14,43 +17,80 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT_DIR = ROOT / "firmware" / "clips"
 AUTH = Path.home() / ".grok" / "auth.json"
 
+# Spoken as a person from Ceará: warm, direct, not a caricature.
+# One idea per clip. Welcome does not mention the portal or the IP.
 CLIPS = [
-    {
-        "id": "ota_updating",
-        "text": (
-            "SearaBoom atualizando. [pause] Em poucos instantes, voltaremos à programação normal."
-        ),
-    },
-    {
-        "id": "ota_done",
-        "text": (
-            "SearaBoom atualizado. [pause] "
-            "<excited>Obrigada pela sintonia!</excited>"
-        ),
-    },
     {
         "id": "ap_welcome",
         "text": (
-            "Olá! Eu sou o SearaBoom, e ainda não consegui conectar no Wi-Fi. [pause] "
-            "No seu celular, abra as configurações de Wi-Fi e conecte na rede SearBoomSetup. "
-            "Não precisa de senha. [pause] Depois, abra o navegador e acesse o endereço "
-            "4 ponto 3 ponto 2 ponto 1. Lá você escolhe a rede da sua casa e a rádio."
+            "Bem-vindo a Seara Boom. [pause] "
+            "Para configurar, no celular, conecte no Wi-Fi Seara Boom. "
+            "Não precisa de senha."
         ),
     },
     {
         "id": "ap_connected",
         "text": (
-            "Muito bem, você já está conectado! [pause] "
-            "Abra o navegador no celular. Se a página não aparecer sozinha, "
-            "digite 4 ponto 3 ponto 2 ponto 1. [pause] "
-            "Escolha o Wi-Fi da sua casa, digite a senha, selecione a rádio "
-            "e toque em Salvar. Eu reinicio sozinho e começo a tocar."
+            "Pronto, você já tá conectado. [pause] "
+            "Abra o navegador. Se a página não aparecer, "
+            "acesse quatro ponto três ponto dois ponto um."
         ),
     },
     {
-        "id": "ap_saved",
+        "id": "ap_page",
         "text": (
-            "Pronto! Configuração salva. [pause] Estou reiniciando para conectar na sua rede. Até já!"
+            "Esta é a página de configuração. [pause] "
+            "Primeiro escolha a rádio. Depois a rede Wi-Fi da sua casa, "
+            "a senha, e toque em Salvar."
+        ),
+    },
+    {
+        "id": "ap_form_station",
+        "text": (
+            "Escolha a rádio. Nova Russas, FM cento e dois ponto sete, "
+            "ou Ibiapina, FM cento e quatro ponto sete."
+        ),
+    },
+    {
+        "id": "ap_form_wifi",
+        "text": "Agora escolha a rede Wi-Fi da sua casa.",
+    },
+    {
+        "id": "ap_form_password",
+        "text": "Digite a senha do Wi-Fi da sua casa.",
+    },
+    {
+        "id": "ap_form_save",
+        "text": "Toque em Salvar. Eu reinicio sozinho e começo a tocar.",
+    },
+    {
+        "id": "ap_saved",
+        "text": "Pronto! Configuração salva. [pause] Tô reiniciando. Até já!",
+    },
+    {
+        "id": "tune_102",
+        "text": "Sintonizando Rádio Seara, FM cento e dois ponto sete.",
+    },
+    {
+        "id": "tune_104",
+        "text": "Sintonizando Rádio Seara, FM cento e quatro ponto sete.",
+    },
+    {
+        "id": "ota_available",
+        "text": (
+            "Atualização disponível. [pause] Tô baixando agora. "
+            "Daqui a pouco a gente volta."
+        ),
+    },
+    {
+        "id": "ota_rebooting",
+        "text": "Download concluído. Reiniciando.",
+    },
+    {
+        "id": "ota_done",
+        "text": (
+            "Atualização concluída. [pause] "
+            "<excited>Obrigada pela sintonia!</excited>"
         ),
     },
 ]
@@ -98,6 +138,8 @@ def synthesize(session: requests.Session, key: str, text: str, dest_mp3: Path) -
             "text": text,
             "voice_id": "carina",
             "language": "pt-BR",
+            "speed": 0.95,
+            "text_normalization": True,
             "output_format": {
                 "codec": "mp3",
                 "sample_rate": 24000,
@@ -105,7 +147,7 @@ def synthesize(session: requests.Session, key: str, text: str, dest_mp3: Path) -
             },
             "replace": {
                 "SearaBoom": "Seara Boom",
-                "SearBoomSetup": "Sear Boom Setup",
+                "Seara Boom": "Seara Boom",
             },
         },
         timeout=60,
@@ -128,11 +170,13 @@ def to_aac(src: Path, dest: Path) -> None:
             "-ac",
             "1",
             "-ar",
-            "22050",
+            "44100",
             "-c:a",
             "aac",
             "-b:a",
             "32k",
+            "-profile:a",
+            "aac_low",
             "-f",
             "adts",
             str(dest),
@@ -146,7 +190,9 @@ def probe(path: Path) -> str:
             "ffprobe",
             "-hide_banner",
             "-show_entries",
-            "format=duration,size,bit_rate",
+            "stream=codec_name,sample_rate,channels,profile",
+            "-show_entries",
+            "format=duration,size",
             "-of",
             "default=noprint_wrappers=1",
             str(path),
@@ -161,6 +207,7 @@ def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     key = grok_key()
     session = requests.Session()
+    keep = {f"{c['id']}.aac" for c in CLIPS}
     for clip in CLIPS:
         mp3 = OUT_DIR / f"{clip['id']}.mp3"
         aac = OUT_DIR / f"{clip['id']}.aac"
@@ -170,7 +217,10 @@ def main() -> int:
         print(f"  {aac.name} {aac.stat().st_size} bytes")
         print("  " + probe(aac).replace("\n", " | "))
         mp3.unlink(missing_ok=True)
-    (OUT_DIR / "SOURCE.txt").write_text("xAI Grok Carina pt-BR\n")
+    for stale in OUT_DIR.glob("*.aac"):
+        if stale.name not in keep:
+            print(f"remove stale {stale.name}")
+            stale.unlink()
     print("done", OUT_DIR)
     return 0
 

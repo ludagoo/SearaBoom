@@ -22,28 +22,101 @@ static httpd_handle_t s_server;
 static char s_ssid_options[2048];
 static volatile sb_clip_id_t s_want_clip = SB_CLIP_COUNT;
 static volatile int64_t s_clip_at;
+static volatile bool s_want_loop;
+static bool s_page_said;
+static bool s_need_page;
+static volatile bool s_saving;
+static int64_t s_sta_empty_at;
+static sb_clip_id_t s_last_clip = SB_CLIP_COUNT;
+static int64_t s_last_clip_at;
+static sb_clip_id_t s_want_field = SB_CLIP_COUNT;
 
-static void request_ap_clip(sb_clip_id_t id, int delay_ms)
+static bool ap_clip_is_field(sb_clip_id_t id)
 {
+    return id == SB_CLIP_AP_STATION || id == SB_CLIP_AP_WIFI
+        || id == SB_CLIP_AP_PASSWORD || id == SB_CLIP_AP_SAVEBTN;
+}
+
+/* HTTP/Wi-Fi callbacks only set these. Playback runs on the portal loop. */
+static void request_ap_clip(sb_clip_id_t id, int delay_ms, bool loop)
+{
+    int64_t now = esp_timer_get_time();
+    if (s_saving && id != SB_CLIP_AP_SAVED) {
+        return;
+    }
+    if (id == SB_CLIP_AP_WELCOME && (s_page_said || s_need_page)) {
+        return;
+    }
+    if (id == SB_CLIP_AP_PAGE) {
+        s_need_page = true;
+        ESP_LOGI(TAG, "need page clip");
+        return;
+    }
+    if (ap_clip_is_field(id)) {
+        s_want_field = id;
+        ESP_LOGI(TAG, "need field clip %s", clip_player_name(id));
+        return;
+    }
+    if (id != SB_CLIP_AP_SAVED && id == s_last_clip
+        && (now - s_last_clip_at) < 1500 * 1000LL) {
+        return;
+    }
+    s_last_clip = id;
+    s_last_clip_at = now;
     s_want_clip = id;
-    s_clip_at = esp_timer_get_time() + (int64_t)delay_ms * 1000;
+    s_want_loop = loop;
+    s_clip_at = now + (int64_t)delay_ms * 1000;
 }
 
 static void ap_clip_tick(void)
 {
-    if (s_want_clip >= SB_CLIP_COUNT || esp_timer_get_time() < s_clip_at) {
+    sb_clip_id_t cur = clip_player_playing();
+    if (cur == SB_CLIP_AP_PAGE) {
+        s_need_page = false;
+        s_page_said = true;
+    }
+
+    if (s_saving) {
         return;
     }
-    sb_clip_id_t id = s_want_clip;
-    s_want_clip = SB_CLIP_COUNT;
-    if (id == SB_CLIP_AP_CONNECTED) {
-        wifi_sta_list_t list = {0};
-        esp_wifi_ap_get_sta_list(&list);
-        if (list.num == 0) {
-            id = SB_CLIP_AP_WELCOME;
+
+    if (s_want_clip < SB_CLIP_COUNT && esp_timer_get_time() >= s_clip_at) {
+        sb_clip_id_t id = s_want_clip;
+        bool loop = s_want_loop;
+        s_want_clip = SB_CLIP_COUNT;
+        if (id == SB_CLIP_AP_CONNECTED) {
+            wifi_sta_list_t list = {0};
+            esp_wifi_ap_get_sta_list(&list);
+            if (list.num == 0) {
+                id = SB_CLIP_AP_WELCOME;
+                loop = true;
+            }
         }
+        ESP_LOGI(TAG, "play queued %s", clip_player_name(id));
+        clip_player_play(id, loop);
+        return;
     }
-    clip_player_loop(id);
+
+    cur = clip_player_playing();
+    /* Only block while that clip is actually outputting. Finished clips
+     * must not keep the form silent. */
+    if (cur == SB_CLIP_AP_CONNECTED || cur == SB_CLIP_AP_WELCOME) {
+        return;
+    }
+    if (s_need_page && cur != SB_CLIP_AP_PAGE) {
+        ESP_LOGI(TAG, "play page clip");
+        clip_player_play(SB_CLIP_AP_PAGE, false);
+        return;
+    }
+    if (cur == SB_CLIP_AP_PAGE) {
+        return;
+    }
+    if (s_want_field < SB_CLIP_COUNT) {
+        sb_clip_id_t id = s_want_field;
+        s_want_field = SB_CLIP_COUNT;
+        ESP_LOGI(TAG, "play field clip %s", clip_player_name(id));
+        clip_player_play(id, false);
+    }
 }
 
 static void ap_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -53,14 +126,16 @@ static void ap_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     if (id == WIFI_EVENT_AP_STACONNECTED) {
         wifi_event_ap_staconnected_t *e = (wifi_event_ap_staconnected_t *)data;
         ESP_LOGI(TAG, "STA joined " MACSTR, MAC2STR(e->mac));
+        s_sta_empty_at = 0;
         /* Swap only — do not pause I2S. Short delay so DHCP can start. */
-        request_ap_clip(SB_CLIP_AP_CONNECTED, 300);
+        request_ap_clip(SB_CLIP_AP_CONNECTED, 50, false);
+        /* Page clip waits for GET / so it speaks on the form, not in Wi-Fi settings. */
     } else if (id == WIFI_EVENT_AP_STADISCONNECTED) {
         wifi_sta_list_t list = {0};
         esp_wifi_ap_get_sta_list(&list);
         ESP_LOGI(TAG, "STA left, remaining=%d", list.num);
-        if (list.num == 0) {
-            request_ap_clip(SB_CLIP_AP_WELCOME, 2500);
+        if (list.num == 0 && !s_saving) {
+            s_sta_empty_at = esp_timer_get_time();
         }
     }
 }
@@ -162,24 +237,68 @@ static esp_err_t root_get(httpd_req_t *req)
         "<link rel=\"stylesheet\" href=\"styles.css\"></head><body><article>"
         "<form action=\"/\" method=\"POST\"><h1>"
         "<img src=\"background.png\" width=\"240\" height=\"132\" alt=\"SearaBoom\"></h1>"
-        "<fieldset><fieldset><legend>Estação</legend>"
-        "<select name=\"url\" id=\"URL\">"
+        "<iframe name=\"sbclip\" style=\"position:absolute;width:0;height:0;border:0\"></iframe>"
+        "<img src=\"/clip/page\" width=\"1\" height=\"1\" alt=\"\">"
+        "<fieldset><fieldset><legend><a href=\"/clip/station\" target=\"sbclip\">Estação</a></legend>"
+        "<select name=\"url\" id=\"URL\" onclick=\"new Image().src='/clip/station?t='+Date.now()\" "
+        "onchange=\"new Image().src='/clip/station?t='+Date.now()\">"
         "<option value=\"URL1\">Nova Russas (FM 102.7)</option>"
         "<option value=\"URL2\">Ibiapina (FM 104.7)</option>"
         "</select></fieldset>"
         "<fieldset><legend>Configurações do WiFi</legend>"
-        "<label for=\"SSID\">Nome:</label>"
-        "<select name=\"ssid\" id=\"SSID\">";
+        "<label for=\"SSID\"><a href=\"/clip/wifi\" target=\"sbclip\">Nome:</a></label>"
+        "<select name=\"ssid\" id=\"SSID\" onclick=\"new Image().src='/clip/wifi?t='+Date.now()\" "
+        "onchange=\"new Image().src='/clip/wifi?t='+Date.now()\">";
     const char *html2 =
-        "</select><label for=\"PASS\">Senha:</label>"
-        "<input name=\"pass\" id=\"PASS\" type=\"Text\" placeholder=\"Senha Do WiFi\">"
-        "</fieldset><button type=\"submit\">Salvar</button></form></article></body></html>";
+        "</select><label for=\"PASS\"><a href=\"/clip/pass\" target=\"sbclip\">Senha:</a></label>"
+        "<input name=\"pass\" id=\"PASS\" type=\"text\" placeholder=\"Senha Do WiFi\""
+        " autocomplete=\"off\" autocorrect=\"off\" autocapitalize=\"off\" spellcheck=\"false\""
+        " onclick=\"new Image().src='/clip/pass?t='+Date.now()\">"
+        "</fieldset><button type=\"submit\" id=\"SAVE\""
+        " onclick=\"new Image().src='/clip/save?t='+Date.now()\">Salvar</button></form>"
+        "<script>"
+        "setTimeout(function(){var a=document.activeElement; if(a&&a.blur) a.blur();},0);"
+        "</script></article></body></html>";
 
+    ESP_LOGI(TAG, "HTTP GET %s", req->uri);
     httpd_resp_set_type(req, "text/html");
     httpd_resp_sendstr_chunk(req, html1);
     httpd_resp_sendstr_chunk(req, s_ssid_options);
     httpd_resp_sendstr_chunk(req, html2);
     httpd_resp_sendstr_chunk(req, NULL);
+    if (!s_saving && !s_page_said) {
+        request_ap_clip(SB_CLIP_AP_PAGE, 0, false);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t clip_get(httpd_req_t *req)
+{
+    ESP_LOGI(TAG, "HTTP GET %s", req->uri);
+    sb_clip_id_t id = SB_CLIP_COUNT;
+    if (strstr(req->uri, "station")) {
+        id = SB_CLIP_AP_STATION;
+    } else if (strstr(req->uri, "wifi")) {
+        id = SB_CLIP_AP_WIFI;
+    } else if (strstr(req->uri, "pass")) {
+        id = SB_CLIP_AP_PASSWORD;
+    } else if (strstr(req->uri, "save")) {
+        /* Salvar audio is the POST saved clip, not this tap. */
+        id = SB_CLIP_COUNT;
+    } else if (strstr(req->uri, "page")) {
+        if (s_page_said) {
+            id = SB_CLIP_COUNT;
+        } else {
+            id = SB_CLIP_AP_PAGE;
+        }
+    }
+    if (id < SB_CLIP_COUNT) {
+        ESP_LOGI(TAG, "portal clip %s", clip_player_name(id));
+        request_ap_clip(id, 0, false);
+    }
+    httpd_resp_set_status(req, "204 No Content");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, NULL, 0);
     return ESP_OK;
 }
 
@@ -235,12 +354,12 @@ static esp_err_t root_post(httpd_req_t *req)
         }
     }
 
+    s_saving = true;
+    s_need_page = false;
+    s_want_clip = SB_CLIP_COUNT;
+    s_want_field = SB_CLIP_COUNT;
     config_store_save(&cfg);
     httpd_resp_send(req, "Done. Will restart", HTTPD_RESP_USE_STRLEN);
-    s_want_clip = SB_CLIP_COUNT;
-    clip_player_play_wait(SB_CLIP_AP_SAVED, 12000);
-    vTaskDelay(pdMS_TO_TICKS(300));
-    esp_restart();
     return ESP_OK;
 }
 
@@ -369,6 +488,8 @@ void captive_portal_run(void)
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 16;
+    config.stack_size = 8192;
+    config.task_priority = 7;
     config.uri_match_fn = httpd_uri_match_wildcard;
     ESP_ERROR_CHECK(httpd_start(&s_server, &config));
 
@@ -377,18 +498,43 @@ void captive_portal_run(void)
         {.uri = "/", .method = HTTP_POST, .handler = root_post},
         {.uri = "/styles.css", .method = HTTP_GET, .handler = styles_get},
         {.uri = "/background.png", .method = HTTP_GET, .handler = bg_get},
+        {.uri = "/clip/page", .method = HTTP_GET, .handler = clip_get},
+        {.uri = "/clip/station", .method = HTTP_GET, .handler = clip_get},
+        {.uri = "/clip/wifi", .method = HTTP_GET, .handler = clip_get},
+        {.uri = "/clip/pass", .method = HTTP_GET, .handler = clip_get},
+        {.uri = "/clip/save", .method = HTTP_GET, .handler = clip_get},
+        {.uri = "/clip/*", .method = HTTP_GET, .handler = clip_get},
         {.uri = "/*", .method = HTTP_GET, .handler = captive_redirect},
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
         httpd_register_uri_handler(s_server, &routes[i]);
     }
 
-    xTaskCreate(dns_server_task, "dns", 4096, NULL, 5, NULL);
+    xTaskCreatePinnedToCore(dns_server_task, "dns", 4096, NULL, 3, NULL, 1);
 
+    led_status_set(SB_LED_BLUE, 500);
     while (true) {
-        ap_clip_tick();
+        if (s_saving) {
+            clip_player_stop();
+            clip_player_play_wait(SB_CLIP_AP_SAVED, 15000);
+            vTaskDelay(pdMS_TO_TICKS(300));
+            esp_restart();
+        }
+        if (s_sta_empty_at && !s_saving
+            && (esp_timer_get_time() - s_sta_empty_at) >= 3000 * 1000LL) {
+            wifi_sta_list_t list = {0};
+            esp_wifi_ap_get_sta_list(&list);
+            s_sta_empty_at = 0;
+            if (list.num == 0) {
+                s_page_said = false;
+                s_need_page = false;
+                s_want_field = SB_CLIP_COUNT;
+                s_last_clip = SB_CLIP_COUNT;
+                request_ap_clip(SB_CLIP_AP_WELCOME, 0, true);
+            }
+        }
         clip_player_tick();
-        led_status_set(SB_LED_BLUE, 500);
+        ap_clip_tick();
         led_status_tick();
         vTaskDelay(pdMS_TO_TICKS(50));
     }

@@ -6,7 +6,7 @@
 
 #define SB_URL1 "https://searaboom.goossen.dev/stream/102"
 #define SB_URL2 "https://searaboom.goossen.dev/stream/104"
-#define SB_AP_SSID "SearBoomSetup"
+#define SB_AP_SSID "SearaBoom"
 #define SB_VOLUME_MIN 1
 #define SB_VOLUME_MAX 21
 #define SB_DEFAULT_VOLUME SB_VOLUME_MAX

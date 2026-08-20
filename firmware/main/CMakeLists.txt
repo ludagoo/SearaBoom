@@ -7,8 +7,9 @@ idf_component_register(
         "captive_portal.c"
         "radio_player.c"
         "clip_player.c"
+        "blob_stream.c"
+        "pcm_upmix.c"
         "adts_util.c"
-        "aac_inject.c"
         "ota_update.c"
         "log_shipper.c"
         "serial_cmd.c"
@@ -34,11 +35,19 @@ idf_component_register(
         esp_peripherals
         audio_board
     EMBED_FILES
-        "../clips/ota_updating.aac"
-        "../clips/ota_done.aac"
         "../clips/ap_welcome.aac"
         "../clips/ap_connected.aac"
+        "../clips/ap_page.aac"
+        "../clips/ap_form_station.aac"
+        "../clips/ap_form_wifi.aac"
+        "../clips/ap_form_password.aac"
+        "../clips/ap_form_save.aac"
         "../clips/ap_saved.aac"
+        "../clips/tune_102.aac"
+        "../clips/tune_104.aac"
+        "../clips/ota_available.aac"
+        "../clips/ota_rebooting.aac"
+        "../clips/ota_done.aac"
 )
 
 spiffs_create_partition_image(storage ../spiffs_image FLASH_IN_PROJECT)
