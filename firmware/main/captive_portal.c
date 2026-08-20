@@ -441,6 +441,7 @@ static esp_err_t root_post(httpd_req_t *req)
     s_need_page = false;
     s_want_clip = SB_CLIP_COUNT;
     s_want_field = SB_CLIP_COUNT;
+    config_store_absorb_deferred_volume(&cfg);
     config_store_save(&cfg);
     return send_success_page(req);
 }

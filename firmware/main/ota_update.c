@@ -188,6 +188,7 @@ esp_err_t ota_update_check(ota_policy_t policy)
     esp_err_t ota_err = esp_https_ota(&ota_config);
     if (ota_err == ESP_OK) {
         ESP_LOGI(TAG, "OTA success, announcing reboot into %s", new_ver);
+        config_store_flush_deferred_now();
         config_store_set_play_updated(true);
         led_status_set(SB_LED_GREEN, 0);
         clip_player_play_wait(SB_CLIP_OTA_REBOOTING, 10000);

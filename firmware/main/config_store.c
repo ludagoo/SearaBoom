@@ -2,11 +2,17 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "config_store.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "config_store";
 static const char *NVS_NS = "searaboom";
+#define VOL_DEFER_MS 1000
+
+static int s_def_vol;
+static bool s_def_dirty;
+static int64_t s_def_at_ms;
 
 esp_err_t config_store_init(void)
 {
@@ -106,8 +112,77 @@ esp_err_t config_store_load(sb_config_t *cfg)
     return ESP_OK;
 }
 
+static int clamp_volume(int volume)
+{
+    if (volume < SB_VOLUME_MIN) {
+        return SB_VOLUME_MIN;
+    }
+    if (volume > SB_VOLUME_MAX) {
+        return SB_VOLUME_MAX;
+    }
+    return volume;
+}
+
+static esp_err_t write_volume_now(int volume)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "volume nvs_open failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = nvs_set_i32(h, "volume", volume);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Saved volume=%d", volume);
+    } else {
+        ESP_LOGE(TAG, "volume save failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+esp_err_t config_store_save_volume_deferred(int volume)
+{
+    s_def_vol = clamp_volume(volume);
+    s_def_dirty = true;
+    s_def_at_ms = esp_timer_get_time() / 1000 + VOL_DEFER_MS;
+    return ESP_OK;
+}
+
+void config_store_flush_deferred(void)
+{
+    if (!s_def_dirty) {
+        return;
+    }
+    if ((esp_timer_get_time() / 1000) < s_def_at_ms) {
+        return;
+    }
+    config_store_flush_deferred_now();
+}
+
+void config_store_flush_deferred_now(void)
+{
+    if (!s_def_dirty) {
+        return;
+    }
+    s_def_dirty = false;
+    write_volume_now(s_def_vol);
+}
+
+void config_store_absorb_deferred_volume(sb_config_t *cfg)
+{
+    if (!cfg || !s_def_dirty) {
+        return;
+    }
+    cfg->volume = s_def_vol;
+}
+
 esp_err_t config_store_save(const sb_config_t *cfg)
 {
+    s_def_dirty = false;
     nvs_handle_t h;
     ESP_ERROR_CHECK(nvs_open(NVS_NS, NVS_READWRITE, &h));
     ESP_ERROR_CHECK(nvs_set_str(h, "ssid", cfg->ssid));

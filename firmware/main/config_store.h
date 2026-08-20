@@ -7,6 +7,12 @@
 esp_err_t config_store_init(void);
 esp_err_t config_store_load(sb_config_t *cfg);
 esp_err_t config_store_save(const sb_config_t *cfg);
+/* Apply ALC now; NVS volume is written ~1s after the last change. */
+esp_err_t config_store_save_volume_deferred(int volume);
+void config_store_flush_deferred(void);
+void config_store_flush_deferred_now(void);
+/* Copy a pending pad volume into cfg so a full save does not revert it. */
+void config_store_absorb_deferred_volume(sb_config_t *cfg);
 const char *config_store_stream_url(const sb_config_t *cfg);
 esp_err_t config_store_set_play_updated(bool on);
 bool config_store_take_play_updated(void);

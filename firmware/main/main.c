@@ -45,7 +45,7 @@ static void volume_cb(int delta, void *ctx)
     }
     clip_player_set_volume(v);
     s_cfg.volume = v;
-    config_store_save(&s_cfg);
+    config_store_save_volume_deferred(v);
     radio_player_beep();
 }
 
