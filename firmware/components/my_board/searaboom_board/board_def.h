@@ -1,8 +1,8 @@
 #ifndef _AUDIO_BOARD_DEFINITION_H_
 #define _AUDIO_BOARD_DEFINITION_H_
 
-#define BUTTON_VOLUP_ID           7
-#define BUTTON_VOLDOWN_ID         6
+#define BUTTON_VOLUP_ID           7  /* TOUCH_PAD_NUM7 */
+#define BUTTON_VOLDOWN_ID         6  /* TOUCH_PAD_NUM6 */
 #define BUTTON_MUTE_ID            -1
 #define BUTTON_SET_ID             -1
 #define BUTTON_MODE_ID            -1
@@ -43,19 +43,10 @@
         },                                              \
 }
 
-#define INPUT_KEY_NUM     2
-
-#define INPUT_KEY_DEFAULT_INFO() {                      \
-    {                                                   \
-        .type = PERIPH_ID_BUTTON,                       \
-        .user_id = INPUT_KEY_USER_ID_VOLUP,             \
-        .act_id = BUTTON_VOLUP_ID,                      \
-    },                                                  \
-    {                                                   \
-        .type = PERIPH_ID_BUTTON,                       \
-        .user_id = INPUT_KEY_USER_ID_VOLDOWN,           \
-        .act_id = BUTTON_VOLDOWN_ID,                    \
-    },                                                  \
-}
+/* Volume is IDF touch_element on T6/T7 (volume_buttons.c). ADF
+ * input_key_service is not used: PERIPH_ID_BUTTON is GPIO, and
+ * periph_touch does not read S3 pads. */
+#define INPUT_KEY_NUM 0
+#define INPUT_KEY_DEFAULT_INFO() {}
 
 #endif

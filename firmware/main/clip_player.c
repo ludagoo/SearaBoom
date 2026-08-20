@@ -7,6 +7,7 @@
 #include "esp_timer.h"
 #include "clip_player.h"
 #include "radio_player.h"
+#include "volume_buttons.h"
 #include "blob_stream.h"
 #include "pcm_upmix.h"
 #include "adts_util.h"
@@ -477,6 +478,7 @@ static void halt_playback(void);
 
 void clip_player_tick(void)
 {
+    volume_buttons_poll();
     radio_player_loop();
     lock();
     handle_clip_events();
@@ -644,6 +646,7 @@ static esp_err_t wait_finished(int timeout_ms)
         if (s_finished && !s_loop) {
             int64_t pad_until = esp_timer_get_time() + 250 * 1000;
             while (esp_timer_get_time() < pad_until) {
+                volume_buttons_poll();
                 radio_player_loop();
                 if (radio_player_pcm_finished(40)) {
                     break;

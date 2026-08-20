@@ -38,7 +38,7 @@ static void volume_cb(int delta, void *ctx)
     if (v > SB_VOLUME_MAX) {
         v = SB_VOLUME_MAX;
     }
-    radio_player_set_volume(v);
+    clip_player_set_volume(v);
     s_cfg.volume = v;
     config_store_save(&s_cfg);
     radio_player_beep();
@@ -175,6 +175,8 @@ void app_main(void)
     config_store_load(&s_cfg);
     serial_cmd_init();
     clip_player_init(s_cfg.volume);
+    /* Touch element FSM before I2S/AAC. Starting pads at go-live used to buzz. */
+    volume_buttons_init(volume_cb, NULL);
 
     bool play_updated = config_store_take_play_updated();
     play_updated = config_store_consume_fw_change(app->version) || play_updated;
@@ -212,15 +214,15 @@ void app_main(void)
     }
     led_status_set(SB_LED_GREEN, 500);
 
-    /* OTA TLS and touch init used to start the instant music_info arrived —
-     * same core as radio AAC. Prefetched PCM sounded clean, then a buzz. */
+    /* OTA TLS used to start the instant music_info arrived — same core as
+     * radio AAC. Prefetched PCM sounded clean, then a buzz. */
     int64_t live_at_ms = esp_timer_get_time() / 1000;
     bool ota_started = false;
-    bool touch_ready = false;
 
     while (true) {
         led_status_tick();
         clip_player_tick();
+        volume_buttons_poll();
         if (radio_player_wifi_weak_resume_ready()) {
             clip_player_stop();
             radio_player_hold_stream(false);
@@ -241,13 +243,6 @@ void app_main(void)
                 ESP_LOGW(TAG, "OTA task create failed — skipping boot check");
             }
             ota_started = true;
-        }
-        if (!touch_ready && (now - live_at_ms) > 8000) {
-            volume_buttons_init(volume_cb, NULL);
-            touch_ready = true;
-            ESP_LOGI(TAG, "Touch volume controls ready");
-        } else if (touch_ready) {
-            volume_buttons_poll();
         }
         vTaskDelay(pdMS_TO_TICKS(20));
     }

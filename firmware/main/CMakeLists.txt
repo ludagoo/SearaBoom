@@ -28,6 +28,7 @@ idf_component_register(
         mbedtls
         driver
         esp_timer
+        touch_element
         led_strip
         audio_pipeline
         audio_stream
