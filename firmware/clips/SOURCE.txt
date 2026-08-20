@@ -1,1 +1,0 @@
-PLACEHOLDER edge-tts pt-BR-FranciscaNeural — replace with Grok Carina via scripts/gen_ui_clips.py when XAI credits are available
