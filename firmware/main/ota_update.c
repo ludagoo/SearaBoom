@@ -80,18 +80,12 @@ static bool is_newer_full(const char *latest, const char *current)
     return l3 > c3;
 }
 
-/* Boot policy: only major.minor (ignore patch / 3rd digit) */
+/* Boot policy used to ignore patch. USB factory is one publish behind OTA,
+ * so first Wi-Fi after a flash must install that update — including 0.0.63 -> 0.1.0
+ * (minor) and later patch bumps once factory firmware includes this check. */
 static bool is_newer_stable(const char *latest, const char *current)
 {
-    int l1, l2, l3, c1, c2, c3;
-    parse_version(latest, &l1, &l2, &l3);
-    parse_version(current, &c1, &c2, &c3);
-    (void)l3;
-    (void)c3;
-    if (l1 != c1) {
-        return l1 > c1;
-    }
-    return l2 > c2;
+    return is_newer_full(latest, current);
 }
 
 esp_err_t ota_update_check(ota_policy_t policy)
@@ -157,12 +151,7 @@ esp_err_t ota_update_check(ota_policy_t policy)
     }
 
     if (!need) {
-        if (latest && is_newer_full(latest, app->version) && policy == OTA_POLICY_STABLE) {
-            ESP_LOGI(TAG, "Patch-only update %s -> %s ignored on boot (use serial 'ota')",
-                     app->version, latest);
-        } else {
-            ESP_LOGI(TAG, "Firmware up to date (%s)", app->version);
-        }
+        ESP_LOGI(TAG, "Firmware up to date (%s)", app->version);
         cJSON_Delete(root);
         led_status_set(SB_LED_GREEN, 500);
         log_shipper_set_paused(false);

@@ -4,9 +4,9 @@
 #include "esp_err.h"
 
 typedef enum {
-    /* Boot / periodic: only if major or minor increased (ignore patch). */
+    /* Boot / periodic: any newer X.Y.Z. USB factory stays one publish behind. */
     OTA_POLICY_STABLE = 0,
-    /* Serial / dev: apply any newer X.Y.Z immediately. */
+    /* Serial `ota`: same rule, any newer X.Y.Z. */
     OTA_POLICY_DEV = 1,
 } ota_policy_t;
 

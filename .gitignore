@@ -10,6 +10,8 @@ firmware/dependencies.lock
 tunnel/*.json
 server/firmware/*.bin
 server/firmware/latest.json
+server/firmware/factory/
+server/firmware/factory-next/
 .env
 *.log
 docs/dev-cam-*.jpg

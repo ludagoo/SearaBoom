@@ -14,15 +14,23 @@ source "$IDF_PATH/export.sh"
 
 User units `searaboom-server` and `searaboom-tunnel` live in `~/.config/systemd/user/` (not in this repo). Same processes: `./scripts/run_server.sh` and `./scripts/run_tunnel.sh`.
 
+Agent / automation notes for this pipeline: [`AGENTS.md`](AGENTS.md).
+
 ## Flash vs OTA
+
+USB factory flash is **one publish behind** OTA. A newly flashed box picks up the current OTA the first time it joins Wi‑Fi.
 
 | Situation | What to do |
 |-----------|------------|
-| New or bricked unit | USB: `idf.py -p /dev/ttyACM0 build flash` |
-| Day-to-day firmware | `./scripts/dev_ota.sh` (keeps OTA tested) |
+| New or bricked unit | https://searaboom.goossen.dev/ in Chrome/Edge with the box on **that computer’s** USB, or `idf.py -p /dev/ttyACM0 flash` |
+| Day-to-day firmware | `./scripts/dev_ota.sh` (publishes OTA; USB factory stays behind) |
+| Freeze a new USB image | `./scripts/snapshot_factory.sh` (only when you mean to change what USB writes) |
 
-`dev_ota.sh` bumps the **patch** digit. Boot OTA ignores patch — bump **minor** when field units should pick up an update on reboot without serial `ota`.
+`dev_ota.sh` bumps the **patch** digit and publishes OTA. It promotes the previous OTA full image to USB factory, then stages this build as the next USB image.
 
-Management UI: https://searaboom.goossen.dev/
+The frozen USB image is **0.0.63**. Working tree / next OTA is **0.1.0** so the first publish is a minor bump — 0.0.63 factory firmware only auto-OTAs when major.minor increases. Later factory images apply any newer X.Y.Z on boot.
+
+Factory flash (new boxes): https://searaboom.goossen.dev/  
+OTA + logs: https://searaboom.goossen.dev/admin
 
 Backlog: [`docs/IMPROVEMENTS.md`](docs/IMPROVEMENTS.md)

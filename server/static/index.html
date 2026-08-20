@@ -3,173 +3,173 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>SearaBoom OTA</title>
+  <meta name="theme-color" content="#052C31" />
+  <title>SearaBoom — flash a box</title>
+  <script>
+    if (navigator.serial && navigator.serial.requestPort) {
+      const orig = navigator.serial.requestPort.bind(navigator.serial);
+      navigator.serial.requestPort = (opts = {}) =>
+        orig({
+          ...opts,
+          filters: opts.filters && opts.filters.length
+            ? opts.filters
+            : [{ usbVendorId: 0x303A }],
+        });
+    }
+    const _alert = window.alert.bind(window);
+    window.alert = (msg) => {
+      const text = String(msg || "");
+      if (/Failed to open serial port|Failed to execute ['']open['']/i.test(text)) {
+        const linux = /Linux/i.test(navigator.userAgent) && !/Android/i.test(navigator.userAgent);
+        const box = document.getElementById("serial-help");
+        if (box) {
+          box.hidden = false;
+          const lx = box.querySelectorAll("[data-linux]");
+          const other = box.querySelector("[data-other]");
+          lx.forEach((n) => { n.hidden = !linux; });
+          if (other) other.hidden = linux;
+          box.scrollIntoView({ behavior: "smooth", block: "nearest" });
+          return;
+        }
+      }
+      _alert(msg);
+    };
+  </script>
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
   <style>
     :root {
-      --bg: #0f1a14;
-      --panel: rgba(20, 40, 28, 0.92);
-      --text: #f2f7f3;
-      --muted: #a7b9ad;
-      --accent: #1ccc33;
-      --warn: #e6b422;
+      --bg: #052C31;
+      --panel: #007985;
+      --ink: #f4fbfb;
+      --muted: #9ec8ce;
+      --gold: #EC9F17;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       min-height: 100vh;
       font-family: "Segoe UI", Helvetica, Arial, sans-serif;
-      color: var(--text);
-      background:
-        radial-gradient(circle at 20% 10%, #1b3a28, transparent 40%),
-        radial-gradient(circle at 80% 0%, #243d2d, transparent 35%),
-        linear-gradient(160deg, #0b1210, #142018 55%, #0f1a14);
-      padding: 2rem 1rem;
+      color: var(--ink);
+      background: var(--bg);
+      padding: 2rem 1rem 3rem;
     }
-    main {
-      max-width: 960px;
-      margin: 0 auto;
+    main { max-width: 640px; margin: 0 auto; }
+    h1 { margin: 0 0 .25rem; font-weight: 700; }
+    p.lead { color: var(--muted); margin: 0 0 1.5rem; }
+    .card {
       background: var(--panel);
-      border: 1px solid rgba(255,255,255,0.08);
-      border-radius: 16px;
-      padding: 1.5rem;
+      border-radius: 12px;
+      padding: 1.1rem 1.2rem;
+      margin-bottom: 1.2rem;
     }
-    h1 { margin: 0 0 .25rem; font-weight: 650; }
-    h2 { margin: 1.5rem 0 .5rem; font-size: 1.1rem; }
-    p.lead { color: var(--muted); margin-top: 0; }
-    .row { display: grid; gap: .75rem; margin: 1rem 0; }
-    label { display: block; font-size: .9rem; color: var(--muted); margin-bottom: .35rem; }
-    input[type=text], input[type=password], input[type=file], select {
-      width: 100%;
-      padding: .7rem .8rem;
-      border-radius: 10px;
-      border: 1px solid rgba(255,255,255,0.12);
-      background: rgba(0,0,0,0.25);
-      color: var(--text);
-    }
-    button {
-      background: var(--accent);
-      color: #05310c;
+    .meta { color: var(--muted); font-size: .92rem; }
+    .meta strong { color: var(--ink); }
+    ol { margin: .4rem 0 0; padding-left: 1.2rem; line-height: 1.55; }
+    button.flash {
       border: 0;
       border-radius: 10px;
-      padding: .85rem 1.1rem;
+      padding: .9rem 1.25rem;
+      font-size: 1.05rem;
       font-weight: 700;
       cursor: pointer;
+      background: var(--gold);
+      color: var(--bg);
     }
-    .card {
-      background: rgba(0,0,0,0.22);
-      border-radius: 12px;
-      padding: 1rem;
-      margin-top: 1rem;
+    button.flash:disabled { opacity: .45; cursor: not-allowed; }
+    a { color: var(--gold); }
+    footer { margin-top: 1.25rem; color: var(--muted); font-size: .88rem; }
+    .unsupported { color: #ffd6a8; display: block; margin-top: .8rem; }
+    esp-web-install-button { display: inline-block; }
+    #serial-help p { color: var(--muted); line-height: 1.5; margin: .6rem 0; }
+    #serial-help pre {
+      margin: .4rem 0;
+      padding: .7rem .8rem;
+      border-radius: 8px;
+      background: rgba(0,0,0,.28);
+      overflow-x: auto;
+      font-size: .9rem;
     }
-    code { color: var(--warn); }
-    #msg { margin-top: 1rem; white-space: pre-wrap; }
-    #logView {
-      height: 360px;
-      overflow: auto;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 12px;
-      line-height: 1.4;
-      white-space: pre-wrap;
-      background: rgba(0,0,0,0.35);
-      border-radius: 10px;
-      padding: .75rem;
+    #serial-help .copy {
+      border: 0;
+      border-radius: 8px;
+      padding: .55rem 1rem;
+      font-weight: 700;
+      cursor: pointer;
+      background: var(--gold);
+      color: var(--bg);
     }
-    .log-meta { color: var(--muted); }
   </style>
 </head>
 <body>
   <main>
-    <h1>SearaBoom</h1>
-    <p class="lead">OTA + device logs. Boot updates need major/minor bump; serial <code>ota</code> applies patch bumps too.</p>
-
-    <div class="card" id="status">Loading status…</div>
-
-    <form id="uploadForm" class="row">
-      <div>
-        <label for="version">Firmware version (X.Y.Z)</label>
-        <input id="version" name="version" type="text" placeholder="0.0.2" required />
-      </div>
-      <div>
-        <label for="token">Admin token</label>
-        <input id="token" name="token" type="password" value="searaboom-dev" required />
-      </div>
-      <div>
-        <label for="firmware">Firmware binary (.bin)</label>
-        <input id="firmware" name="firmware" type="file" accept=".bin" required />
-      </div>
-      <button type="submit">Publish update</button>
-    </form>
-    <div id="msg"></div>
-
-    <h2>Live device logs</h2>
-    <div class="row">
-      <div>
-        <label for="deviceFilter">Device</label>
-        <select id="deviceFilter"><option value="">All devices</option></select>
-      </div>
+    <h1>Flash a SearaBoom</h1>
+    <div class="card">
+      <div class="meta" id="status">Loading image…</div>
+      <ol>
+        <li>Plug the box into this computer over USB.</li>
+        <li>Click flash and pick <strong>USB JTAG/serial debug unit</strong>.</li>
+      </ol>
     </div>
-    <div id="logView"></div>
+    <div class="card" id="need-chrome" hidden>
+      <div class="meta"><strong>Open this page in Chrome.</strong></div>
+      <p class="lead" style="margin: .5rem 0 0">USB flashing only works in Google Chrome (or Chromium / Edge). Copy the address and paste it there.</p>
+    </div>
+    <esp-web-install-button id="installer" manifest="/api/factory/web-tools.json">
+      <button class="flash" slot="activate" type="button">Flash a box</button>
+      <span class="unsupported" slot="unsupported">Use Chrome or Edge on a computer. This browser cannot talk to USB serial.</span>
+      <span class="unsupported" slot="not-allowed">USB flashing needs HTTPS (or localhost).</span>
+    </esp-web-install-button>
+    <div class="card" id="serial-help" hidden>
+      <div class="meta"><strong>Could not open the USB port</strong></div>
+      <p data-linux>
+        Chromium saw the box, but Linux blocked <code>/dev/ttyACM0</code>.
+        Plug the box in, run this, then click Flash again:
+      </p>
+      <pre data-linux id="serial-cmd">sudo chmod a+rw /dev/ttyACM0</pre>
+      <button type="button" class="copy" data-linux id="copy-cmd">Copy command</button>
+      <p class="meta" data-linux>
+        Permanent (once), then log out and back in:
+        <code>sudo usermod -aG uucp "$USER"</code>
+      </p>
+      <p data-other hidden>
+        Close other programs using the box, unplug it, plug it back in, then try again.
+      </p>
+    </div>
   </main>
   <script>
-    const logView = document.getElementById('logView');
-    const deviceFilter = document.getElementById('deviceFilter');
-    let es;
-
-    function appendLog(ev) {
-      const want = deviceFilter.value;
-      if (want && ev.device_id !== want) return;
-      const div = document.createElement('div');
-      div.innerHTML = `<span class="log-meta">[${ev.device_id}]</span> ${ev.line.replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))}`;
-      logView.appendChild(div);
-      while (logView.childNodes.length > 800) logView.removeChild(logView.firstChild);
-      logView.scrollTop = logView.scrollHeight;
-    }
-
-    function connectStream() {
-      if (es) es.close();
-      const q = deviceFilter.value ? `?device=${encodeURIComponent(deviceFilter.value)}` : '';
-      es = new EventSource('/api/logs/stream' + q);
-      es.onmessage = (m) => {
-        try { appendLog(JSON.parse(m.data)); } catch (_) {}
-      };
-    }
-
-    async function refresh() {
-      const r = await fetch('/api/status');
-      const j = await r.json();
-      const f = j.firmware || {};
-      document.getElementById('status').innerHTML =
-        `<strong>Latest:</strong> <code>${f.version || 'none'}</code><br/>` +
-        `<strong>File:</strong> ${f.filename || '—'}<br/>` +
-        `<strong>Size:</strong> ${f.size || 0} bytes<br/>` +
-        `<strong>SHA256:</strong> <code>${f.sha256 || '—'}</code><br/>` +
-        `<strong>Uploaded:</strong> ${f.uploaded_at || '—'}<br/>` +
-        `<strong>Devices seen:</strong> ${(j.devices || []).map(d => d.device_id).join(', ') || '—'}`;
-      const cur = deviceFilter.value;
-      deviceFilter.innerHTML = '<option value="">All devices</option>';
-      for (const d of (j.devices || [])) {
-        const opt = document.createElement('option');
-        opt.value = d.device_id;
-        opt.textContent = `${d.device_id} (${d.lines} lines)`;
-        deviceFilter.appendChild(opt);
+    (function () {
+      const ua = navigator.userAgent || "";
+      const chromeLike = (/Chrome\//.test(ua) || /CriOS\//.test(ua) || /Edg\//.test(ua))
+        && !/OPR\//.test(ua);
+      if (chromeLike) return;
+      const help = document.getElementById("need-chrome");
+      const inst = document.getElementById("installer");
+      if (help) help.hidden = false;
+      if (inst) inst.hidden = true;
+    })();
+    document.getElementById("copy-cmd")?.addEventListener("click", async () => {
+      const cmd = document.getElementById("serial-cmd")?.textContent || "";
+      try {
+        await navigator.clipboard.writeText(cmd);
+        document.getElementById("copy-cmd").textContent = "Copied";
+      } catch {
+        document.getElementById("copy-cmd").textContent = "Copy failed";
       }
-      deviceFilter.value = cur;
-    }
-
-    deviceFilter.addEventListener('change', connectStream);
-    document.getElementById('uploadForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const fd = new FormData(e.target);
-      const msg = document.getElementById('msg');
-      msg.textContent = 'Uploading…';
-      const r = await fetch('/api/firmware/upload', { method: 'POST', body: fd, headers: { 'X-Admin-Token': fd.get('token') } });
-      const j = await r.json();
-      msg.textContent = r.ok ? JSON.stringify(j, null, 2) : ('Error: ' + JSON.stringify(j));
-      await refresh();
     });
-    refresh();
-    connectStream();
-    setInterval(refresh, 10000);
+    fetch("/api/factory")
+      .then((r) => r.json())
+      .then((d) => {
+        const el = document.getElementById("status");
+        if (!d.ready) {
+          el.textContent = "No factory image on the server yet.";
+          return;
+        }
+        const ota = d.ota_version ? ` · OTA <strong>${d.ota_version}</strong>` : "";
+        el.innerHTML = `USB image <strong>${d.version}</strong>${ota} · ESP32-S3 · 4MB`;
+      })
+      .catch((e) => {
+        document.getElementById("status").textContent = e.message;
+      });
   </script>
 </body>
 </html>

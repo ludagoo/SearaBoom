@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Bump firmware patch version (0.0.X), rebuild, publish OTA, optionally force-update device via serial.
+# Bump firmware patch version (X.Y.Z), rebuild, publish OTA (not USB factory).
+# USB factory stays one publish behind: after OTA upload, the previous staged
+# full image is promoted to USB factory, then this build is staged as factory-next.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PORT="${SEARABOOM_PORT:-/dev/ttyACM0}"
@@ -15,7 +17,8 @@ while [[ $# -gt 0 ]]; do
     --port) PORT="$2"; shift 2 ;;
     -h|--help)
       echo "Usage: $0 [--flash] [--no-trigger] [--port /dev/ttyACM0]"
-      echo "  Bumps patch in firmware/VERSION, builds, publishes, sends serial 'ota'."
+      echo "  Bumps patch in firmware/VERSION, builds, publishes OTA."
+      echo "  USB factory is not updated to this version; it stays one publish behind."
       exit 0
       ;;
     *) echo "unknown arg: $1"; exit 1 ;;
@@ -35,7 +38,7 @@ if [[ -f "$ROOT/firmware/sdkconfig" ]]; then
   sed -i "s/^CONFIG_SEARABOOM_FW_VERSION=.*/CONFIG_SEARABOOM_FW_VERSION=\"$NEW\"/" \
     "$ROOT/firmware/sdkconfig"
 fi
-echo "Version -> $NEW"
+echo "Version -> $NEW (OTA). USB factory stays behind."
 
 export IDF_PATH="${IDF_PATH:-$HOME/esp/esp-idf}"
 export ADF_PATH="${ADF_PATH:-$HOME/esp/esp-adf}"
@@ -53,7 +56,32 @@ curl -fsS -X POST "$URL/api/firmware/upload" \
   -F "token=$TOKEN" \
   -F "firmware=@$BIN"
 echo
-echo "Published $NEW"
+echo "Published OTA $NEW"
+
+echo "Promoting staged factory-next to USB factory (no-op if none)"
+curl -fsS -X POST "$URL/api/factory/promote" \
+  -H "X-Admin-Token: $TOKEN" \
+  -F "token=$TOKEN"
+echo
+
+BOOT="$ROOT/firmware/build/bootloader/bootloader.bin"
+PART="$ROOT/firmware/build/partition_table/partition-table.bin"
+OTAD="$ROOT/firmware/build/ota_data_initial.bin"
+STOR="$ROOT/firmware/build/storage.bin"
+if [[ -f "$BOOT" && -f "$PART" && -f "$OTAD" && -f "$STOR" ]]; then
+  curl -fsS -X POST "$URL/api/factory/upload" \
+    -H "X-Admin-Token: $TOKEN" \
+    -F "token=$TOKEN" \
+    -F "slot=next" \
+    -F "version=$NEW" \
+    -F "bootloader=@$BOOT" \
+    -F "partitions=@$PART" \
+    -F "otadata=@$OTAD" \
+    -F "app=@$BIN" \
+    -F "storage=@$STOR"
+  echo
+  echo "Staged factory-next $NEW (becomes USB flash on the following OTA publish)"
+fi
 
 if [[ "$FLASH_FIRST" -eq 1 ]]; then
   idf.py -p "$PORT" flash
