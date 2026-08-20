@@ -7,7 +7,8 @@ CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 
-CONFIG_ESP_DEFAULT_CPU_FREQ_240=y
+# 160 MHz: USB 5 V / 500 mA headroom (Wi-Fi TX is the hog, not the CPU).
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_QUAD=y
 CONFIG_SPIRAM_SPEED_80M=y
@@ -49,9 +50,9 @@ CONFIG_SEARABOOM_OTA_URL="https://searaboom.goossen.dev"
 # Prefer public HTTPS so AP client-isolation / dual-NIC LAN routing cannot block logs.
 # TLS runs after stream is up; mbedtls uses PSRAM (EXTERNAL_MEM_ALLOC).
 CONFIG_SEARABOOM_LOG_URL="https://searaboom.goossen.dev"
-CONFIG_SEARABOOM_FW_VERSION="0.0.58"
+CONFIG_SEARABOOM_FW_VERSION="0.0.63"
 
-# Default INFO; app tags raised to DEBUG in log_shipper_init()
+# Default INFO; audio path stays INFO so USB-serial does not starve I2S.
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
 

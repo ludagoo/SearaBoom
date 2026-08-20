@@ -113,6 +113,8 @@ static bool wifi_connect_or_setup(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi));
     ESP_ERROR_CHECK(esp_wifi_start());
+    /* 20 dBm + 240 MHz + I2S amp sags USB 5V. 17 dBm is enough for STA. */
+    esp_wifi_set_max_tx_power(68);
 
     led_status_set(SB_LED_RED, 500);
     EventBits_t bits = xEventGroupWaitBits(s_wifi_events, WIFI_OK_BIT, pdFALSE, pdTRUE,
@@ -180,22 +182,11 @@ void app_main(void)
     }
     led_status_set(SB_LED_GREEN, 500);
 
-    /* Hear the station first, then check OTA (AAC+TLS on one core trips the WDT). */
-    int64_t wait_music = esp_timer_get_time() + 12000 * 1000LL;
-    while (!radio_player_has_music_info() && esp_timer_get_time() < wait_music) {
-        clip_player_tick();
-        vTaskDelay(pdMS_TO_TICKS(50));
-    }
-    ESP_LOGI(TAG, "WiFi OK, checking OTA after stream (stable policy: major.minor only)");
-    /* Core 1 so the TLS GET does not stall I2S/AAC on core 0. Do not block
-     * the main loop — that used to freeze mix event drain during the check. */
-    if (xTaskCreatePinnedToCore(ota_task_fn, "ota", 12288, NULL, 5, NULL, 1) != pdPASS) {
-        ESP_LOGW(TAG, "OTA task create failed — skipping boot check");
-    }
-
-    /* Touch pads need RAM; wait until AAC has initialized. */
+    /* OTA TLS and touch init used to start the instant music_info arrived —
+     * same core as radio AAC. Prefetched PCM sounded clean, then a buzz. */
+    int64_t live_at_ms = esp_timer_get_time() / 1000;
+    bool ota_started = false;
     bool touch_ready = false;
-    int64_t started_ms = esp_timer_get_time() / 1000;
 
     while (true) {
         led_status_tick();
@@ -213,14 +204,19 @@ void app_main(void)
                    && !radio_player_is_running()) {
             clip_player_stop();
         }
-        if (!touch_ready) {
-            int64_t now = esp_timer_get_time() / 1000;
-            if (radio_player_has_music_info() || (now - started_ms) > 20000) {
-                volume_buttons_init(volume_cb, NULL);
-                touch_ready = true;
-                ESP_LOGI(TAG, "Touch volume controls ready");
+        int64_t now = esp_timer_get_time() / 1000;
+        if (!ota_started && (now - live_at_ms) > 15000 && radio_player_has_music_info()) {
+            ESP_LOGI(TAG, "WiFi OK, checking OTA after stream (stable policy: major.minor only)");
+            if (xTaskCreatePinnedToCore(ota_task_fn, "ota", 12288, NULL, 4, NULL, 1) != pdPASS) {
+                ESP_LOGW(TAG, "OTA task create failed — skipping boot check");
             }
-        } else {
+            ota_started = true;
+        }
+        if (!touch_ready && (now - live_at_ms) > 8000) {
+            volume_buttons_init(volume_cb, NULL);
+            touch_ready = true;
+            ESP_LOGI(TAG, "Touch volume controls ready");
+        } else if (touch_ready) {
             volume_buttons_poll();
         }
         vTaskDelay(pdMS_TO_TICKS(20));

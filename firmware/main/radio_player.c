@@ -45,7 +45,8 @@ static const char *TAG = "radio_player";
  * 1 kHz) on an empty rb adds 20 ms to every 256-sample block (~6 ms) and
  * I2S underruns — choppy welcome. Unused slots must be timeout 0: ADF
  * treats TIMEOUT as silence and continues. Mix then blocks on I2S/clip. */
-#define SB_MIX_MUTE_TIMEOUT 0
+/* 0 busy-spins mix (current + rb-swap races at 240 MHz). 1 tick yields. */
+#define SB_MIX_MUTE_TIMEOUT 1
 #define SB_MIX_CLIP_TIMEOUT 40
 #define SB_MIX_RADIO_TIMEOUT 50
 
@@ -720,13 +721,14 @@ static esp_err_t ensure_radio(const char *url, int volume, bool hold)
     aac_cfg.out_rb_size = 16 * 1024;
     aac_cfg.task_stack = 8 * 1024;
     aac_cfg.task_core = 1;
+    aac_cfg.task_prio = 6;
     aac_cfg.stack_in_ext = false;
     s_aac = aac_decoder_init(&aac_cfg);
 
     s_radio_m2s = pcm_upmix_init_core("rm2s", 1);
     raw_stream_cfg_t raw_cfg = RAW_STREAM_CFG_DEFAULT();
     raw_cfg.type = AUDIO_STREAM_WRITER;
-    raw_cfg.out_rb_size = 16 * 1024;
+    raw_cfg.out_rb_size = 32 * 1024;
     s_radio_raw = raw_stream_init(&raw_cfg);
 
     audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
@@ -1135,7 +1137,11 @@ void radio_player_loop(void)
         if (s_radio_m2s) {
             audio_element_set_music_info(s_radio_m2s, rate, ch, 16);
         }
-        radio_flush_pcm();
+        /* Flush only while prefetching. Doing it after go-live dumps the
+         * PCM that was already playing (clean first slice, then underrun). */
+        if (!s_running) {
+            radio_flush_pcm();
+        }
         if (rate >= 16000) {
             s_got_music_info = true;
         }

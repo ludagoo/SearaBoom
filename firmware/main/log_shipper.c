@@ -194,15 +194,11 @@ esp_err_t log_shipper_init(void)
     snprintf(s_device_id, sizeof(s_device_id), "%02x:%02x:%02x:%02x:%02x:%02x",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
+    /* Keep audio path at INFO. DEBUG UART on USB-Serial starves I2S. */
     esp_log_level_set("*", ESP_LOG_INFO);
-    esp_log_level_set("searaboom", ESP_LOG_DEBUG);
-    esp_log_level_set("ota_update", ESP_LOG_DEBUG);
-    esp_log_level_set("radio_player", ESP_LOG_DEBUG);
-    esp_log_level_set("serial_cmd", ESP_LOG_DEBUG);
-    esp_log_level_set("log_shipper", ESP_LOG_INFO);
-    esp_log_level_set("volume_buttons", ESP_LOG_DEBUG);
-    esp_log_level_set("config_store", ESP_LOG_DEBUG);
-    esp_log_level_set("captive_portal", ESP_LOG_DEBUG);
+    esp_log_level_set("DOWNMIX", ESP_LOG_WARN);
+    esp_log_level_set("AUDIO_ELEMENT", ESP_LOG_WARN);
+    esp_log_level_set("AUDIO_PIPELINE", ESP_LOG_WARN);
 
     s_prev_vprintf = esp_log_set_vprintf(shipper_vprintf);
     s_ready = true;
