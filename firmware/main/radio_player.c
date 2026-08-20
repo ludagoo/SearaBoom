@@ -21,6 +21,7 @@
 #include "esp_http_client.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
+#include "esp_wifi.h"
 #include "ringbuf.h"
 
 static const char *TAG = "radio_player";
@@ -28,6 +29,10 @@ static const char *TAG = "radio_player";
 #define SB_STREAM_STALL_MS 15000
 #define SB_STREAM_STALL_GRACE_MS 35000
 #define SB_STREAM_HARD_RESTART_AFTER 3
+#define SB_HTTP_RB_SIZE (256 * 1024)
+#define SB_WIFI_RSSI_WEAK_DBM (-78)
+#define SB_WIFI_HTTP_LOW_BYTES (128 * 1024)
+#define SB_WIFI_HTTP_RESUME_BYTES (200 * 1024)
 #define SB_MIX_SR 44100
 #define SB_SLOT_RADIO 0
 #define SB_SLOT_CLIP 1
@@ -89,6 +94,8 @@ static int s_restart_backoff_ms = 500;
 static int s_stall_strikes;
 static char s_url[256];
 static volatile bool s_want_stop;
+static volatile bool s_wifi_weak_latched;
+static bool s_hold_radio;
 
 static volatile int s_beep_frames;
 static uint32_t s_beep_phase;
@@ -511,6 +518,7 @@ static void teardown_radio(void)
     s_radio_pcm = NULL;
     s_running = false;
     s_prefetching = false;
+    s_hold_radio = false;
     mix_route_clip_and_radio();
     vTaskDelay(pdMS_TO_TICKS(30));
     if (s_radio_raw) {
@@ -701,7 +709,7 @@ static esp_err_t ensure_radio(const char *url, int volume, bool hold)
     http_cfg.crt_bundle_attach = esp_crt_bundle_attach;
     http_cfg.event_handle = http_stream_event;
     http_cfg.user_agent = "SearaBoom/1.0";
-    http_cfg.out_rb_size = 256 * 1024;
+    http_cfg.out_rb_size = SB_HTTP_RB_SIZE;
     http_cfg.task_stack = 5 * 1024;
     http_cfg.task_core = 1;
     http_cfg.stack_in_ext = false;
@@ -767,7 +775,9 @@ static void mix_route_clip_and_radio(void)
     }
     /* Prefetch fills the radio pipe but must not feed the mixer — otherwise
      * go_live finds an empty PCM rb and the station underruns. */
-    bool radio = s_running && s_radio_pcm && s_got_music_info;
+    /* Hold keeps HTTP/AAC running but mix must not eat radio PCM, so the
+     * 256 KB HTTP rb can refill while the weak-Wi-Fi clip speaks. */
+    bool radio = s_running && s_radio_pcm && s_got_music_info && !s_hold_radio;
     bool clip = s_clip_active && s_clip_pcm;
     if (clip && radio) {
         mix_use_rb(SB_SLOT_RADIO, s_radio_pcm, SB_MIX_MUTE_TIMEOUT);
@@ -979,6 +989,118 @@ static void drain_mix_evt(void)
     }
 }
 
+void radio_player_arm_rssi_threshold(void)
+{
+    esp_err_t err = esp_wifi_set_rssi_threshold(SB_WIFI_RSSI_WEAK_DBM);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "rssi threshold %d dBm: %s", SB_WIFI_RSSI_WEAK_DBM,
+                 esp_err_to_name(err));
+        return;
+    }
+    ESP_LOGI(TAG, "rssi threshold %d dBm", SB_WIFI_RSSI_WEAK_DBM);
+}
+
+static int http_rb_filled(void)
+{
+    if (!s_http) {
+        return -1;
+    }
+    ringbuf_handle_t rb = audio_element_get_output_ringbuf(s_http);
+    return rb ? rb_bytes_filled(rb) : -1;
+}
+
+static bool sta_rssi_is_weak(void)
+{
+    wifi_ap_record_t ap = {0};
+    if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) {
+        return false;
+    }
+    return ap.rssi <= SB_WIFI_RSSI_WEAK_DBM;
+}
+
+static bool http_buf_hungry(void)
+{
+    int filled = http_rb_filled();
+    return filled < SB_WIFI_HTTP_LOW_BYTES;
+}
+
+void radio_player_on_rssi_low(int rssi_dbm)
+{
+    s_wifi_weak_latched = true;
+    ESP_LOGW(TAG, "RSSI low (%d dBm) HTTP rb=%d/%d", rssi_dbm, http_rb_filled(),
+             SB_HTTP_RB_SIZE);
+}
+
+void radio_player_on_sta_lost(void)
+{
+    s_wifi_weak_latched = false;
+    if (s_hold_radio) {
+        s_hold_radio = false;
+        mix_route_clip_and_radio();
+    }
+}
+
+void radio_player_hold_stream(bool on)
+{
+    if (s_hold_radio == on) {
+        return;
+    }
+    s_hold_radio = on;
+    if (on) {
+        ESP_LOGW(TAG, "hold radio (HTTP refill) rb=%d", http_rb_filled());
+    } else {
+        radio_flush_pcm();
+        s_last_pcm_ms = esp_timer_get_time() / 1000;
+        s_wifi_weak_latched = false;
+        radio_player_arm_rssi_threshold();
+        ESP_LOGI(TAG, "resume radio HTTP rb=%d", http_rb_filled());
+    }
+    mix_route_clip_and_radio();
+}
+
+bool radio_player_wifi_weak_holding(void)
+{
+    return s_hold_radio;
+}
+
+bool radio_player_wifi_weak_resume_ready(void)
+{
+    if (!s_hold_radio) {
+        return false;
+    }
+    int filled = http_rb_filled();
+    if (filled >= SB_WIFI_HTTP_RESUME_BYTES) {
+        ESP_LOGI(TAG, "HTTP refill ready rb=%d/%d", filled, SB_HTTP_RB_SIZE);
+        return true;
+    }
+    return false;
+}
+
+bool radio_player_wifi_weak_should_speak(void)
+{
+    if (s_hold_radio || s_clip_active || s_prefetching) {
+        return false;
+    }
+    int64_t now = esp_timer_get_time() / 1000;
+    if (now < s_stall_grace_until_ms) {
+        return false;
+    }
+    if (!http_buf_hungry()) {
+        return false;
+    }
+    if (!s_wifi_weak_latched) {
+        /* Event can miss if RSSI was already below the threshold. Confirm
+         * only when the HTTP rb is actually hurting. */
+        if (!sta_rssi_is_weak()) {
+            return false;
+        }
+        s_wifi_weak_latched = true;
+    }
+    ESP_LOGW(TAG, "wifi weak and HTTP rb=%d/%d — prompt then hold",
+             http_rb_filled(), SB_HTTP_RB_SIZE);
+    return true;
+}
+
 void radio_player_loop(void)
 {
     if (s_want_stop) {
@@ -990,7 +1112,7 @@ void radio_player_loop(void)
     }
     drain_mix_evt();
     mix_restart_if_needed();
-    if (s_running && !s_clip_active) {
+    if (s_running && !s_clip_active && !s_hold_radio && !s_wifi_weak_latched) {
         check_stream_stall();
     }
     if (!s_radio_evt) {
@@ -1032,7 +1154,7 @@ void radio_player_loop(void)
         && ((int)msg.data == AEL_STATUS_ERROR_OPEN || (int)msg.data == AEL_STATUS_ERROR_INPUT
             || (int)msg.data == AEL_STATUS_ERROR_PROCESS)
         && (msg.source == (void *)s_http || msg.source == (void *)s_aac);
-    if (!bad || s_clip_active) {
+    if (!bad || s_clip_active || s_hold_radio || s_wifi_weak_latched) {
         return;
     }
     s_stall_strikes++;

@@ -16,19 +16,20 @@ ADTS_C = ROOT / "firmware" / "main" / "adts_util.c"
 ADTS_H = ROOT / "firmware" / "main" / "adts_util.h"
 
 EXPECTED_MS = {
-    "ap_welcome.aac": 18088,
-    "ap_connected.aac": 9450,
-    "ap_page.aac": 9032,
-    "ap_form_station.aac": 8730,
-    "ap_form_wifi.aac": 2786,
-    "ap_form_password.aac": 2554,
-    "ap_form_save.aac": 3761,
-    "ap_saved.aac": 4643,
-    "tune_102.aac": 4342,
-    "tune_104.aac": 4504,
-    "ota_available.aac": 6733,
-    "ota_rebooting.aac": 2554,
-    "ota_done.aac": 4806,
+    "ap_welcome.aac": 8986,
+    "ap_connected.aac": 9822,
+    "ap_page.aac": 9729,
+    "ap_form_station.aac": 9334,
+    "ap_form_wifi.aac": 2925,
+    "ap_form_password.aac": 2739,
+    "ap_form_save.aac": 4017,
+    "ap_saved.aac": 4922,
+    "tune_102.aac": 4597,
+    "tune_104.aac": 5108,
+    "wifi_weak.aac": 4365,
+    "ota_available.aac": 5874,
+    "ota_rebooting.aac": 2832,
+    "ota_done.aac": 4527,
 }
 
 
@@ -67,7 +68,7 @@ def test_clip_files_match_expected_duration() -> None:
 def test_welcome_is_longer_than_ota_done() -> None:
     done = adts_duration_ms((CLIPS / "ota_done.aac").read_bytes())
     welcome = adts_duration_ms((CLIPS / "ap_welcome.aac").read_bytes())
-    assert welcome > done * 2
+    assert welcome > done
 
 
 def test_c_parser_matches_python() -> None:

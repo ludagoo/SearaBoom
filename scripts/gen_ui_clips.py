@@ -93,6 +93,13 @@ CLIPS = [
             "<excited>Obrigada pela sintonia!</excited>"
         ),
     },
+    {
+        "id": "wifi_weak",
+        "text": (
+            "O sinal do Wi-Fi tá fraco. [pause] "
+            "Chega mais perto do roteador."
+        ),
+    },
 ]
 
 
@@ -205,10 +212,16 @@ def probe(path: Path) -> str:
 
 def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    wanted = set(sys.argv[1:])
+    clips = [c for c in CLIPS if not wanted or c["id"] in wanted]
+    if wanted:
+        missing = wanted - {c["id"] for c in clips}
+        if missing:
+            raise SystemExit("unknown clip ids: " + ", ".join(sorted(missing)))
     key = grok_key()
     session = requests.Session()
     keep = {f"{c['id']}.aac" for c in CLIPS}
-    for clip in CLIPS:
+    for clip in clips:
         mp3 = OUT_DIR / f"{clip['id']}.mp3"
         aac = OUT_DIR / f"{clip['id']}.aac"
         print(f"TTS {clip['id']} ...")
@@ -217,10 +230,11 @@ def main() -> int:
         print(f"  {aac.name} {aac.stat().st_size} bytes")
         print("  " + probe(aac).replace("\n", " | "))
         mp3.unlink(missing_ok=True)
-    for stale in OUT_DIR.glob("*.aac"):
-        if stale.name not in keep:
-            print(f"remove stale {stale.name}")
-            stale.unlink()
+    if not wanted:
+        for stale in OUT_DIR.glob("*.aac"):
+            if stale.name not in keep:
+                print(f"remove stale {stale.name}")
+                stale.unlink()
     print("done", OUT_DIR)
     return 0
 

@@ -49,6 +49,8 @@ extern const uint8_t tune_102_aac_start[] asm("_binary_tune_102_aac_start");
 extern const uint8_t tune_102_aac_end[] asm("_binary_tune_102_aac_end");
 extern const uint8_t tune_104_aac_start[] asm("_binary_tune_104_aac_start");
 extern const uint8_t tune_104_aac_end[] asm("_binary_tune_104_aac_end");
+extern const uint8_t wifi_weak_aac_start[] asm("_binary_wifi_weak_aac_start");
+extern const uint8_t wifi_weak_aac_end[] asm("_binary_wifi_weak_aac_end");
 extern const uint8_t ota_available_aac_start[] asm("_binary_ota_available_aac_start");
 extern const uint8_t ota_available_aac_end[] asm("_binary_ota_available_aac_end");
 extern const uint8_t ota_rebooting_aac_start[] asm("_binary_ota_rebooting_aac_start");
@@ -67,6 +69,7 @@ static const char *clip_name[SB_CLIP_COUNT] = {
     [SB_CLIP_AP_SAVED] = "ap_saved",
     [SB_CLIP_TUNE_102] = "tune_102",
     [SB_CLIP_TUNE_104] = "tune_104",
+    [SB_CLIP_WIFI_WEAK] = "wifi_weak",
     [SB_CLIP_OTA_AVAILABLE] = "ota_available",
     [SB_CLIP_OTA_REBOOTING] = "ota_rebooting",
     [SB_CLIP_OTA_DONE] = "ota_done",
@@ -83,6 +86,7 @@ static const uint8_t *clip_start[SB_CLIP_COUNT] = {
     [SB_CLIP_AP_SAVED] = ap_saved_aac_start,
     [SB_CLIP_TUNE_102] = tune_102_aac_start,
     [SB_CLIP_TUNE_104] = tune_104_aac_start,
+    [SB_CLIP_WIFI_WEAK] = wifi_weak_aac_start,
     [SB_CLIP_OTA_AVAILABLE] = ota_available_aac_start,
     [SB_CLIP_OTA_REBOOTING] = ota_rebooting_aac_start,
     [SB_CLIP_OTA_DONE] = ota_done_aac_start,
@@ -98,6 +102,7 @@ static const uint8_t *clip_end[SB_CLIP_COUNT] = {
     [SB_CLIP_AP_SAVED] = ap_saved_aac_end,
     [SB_CLIP_TUNE_102] = tune_102_aac_end,
     [SB_CLIP_TUNE_104] = tune_104_aac_end,
+    [SB_CLIP_WIFI_WEAK] = wifi_weak_aac_end,
     [SB_CLIP_OTA_AVAILABLE] = ota_available_aac_end,
     [SB_CLIP_OTA_REBOOTING] = ota_rebooting_aac_end,
     [SB_CLIP_OTA_DONE] = ota_done_aac_end,

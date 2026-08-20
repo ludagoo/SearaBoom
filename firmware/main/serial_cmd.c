@@ -88,7 +88,7 @@ static void handle_line(char *line)
         return;
     }
     if (strcasecmp(line, "help") == 0 || strcmp(line, "?") == 0) {
-        printf("commands: help | ver | ota | heap | logtest | reboot | wifi wipe | vol [n] | clip <name>|stop | audiotest\n");
+        printf("commands: help | ver | ota | heap | logtest | reboot | wifi wipe | wifi weak | vol [n] | clip <name>|stop | audiotest\n");
         printf("  ota        - force OTA now (applies any newer X.Y.Z including patch)\n");
         printf("  heap       - free internal / PSRAM (buffer headroom)\n");
         printf("  logtest    - probe log URL + OTA host connectivity\n");
@@ -116,6 +116,11 @@ static void handle_line(char *line)
         config_store_clear_wifi();
         vTaskDelay(pdMS_TO_TICKS(150));
         esp_restart();
+        return;
+    }
+    if (strcasecmp(line, "wifi weak") == 0) {
+        radio_player_on_rssi_low(-90);
+        printf("wifi weak latched (holds stream + prompt until HTTP rb >= 200k)\n");
         return;
     }
     if (strncasecmp(line, "vol", 3) == 0 && (line[3] == 0 || line[3] == ' ')) {
@@ -161,6 +166,10 @@ static void handle_line(char *line)
                 break;
             }
             if (strncmp(nm, "ap_", 3) == 0 && strcasecmp(arg, nm + 3) == 0) {
+                id = (sb_clip_id_t)i;
+                break;
+            }
+            if (strcmp(nm, "wifi_weak") == 0 && strcasecmp(arg, "weak") == 0) {
                 id = (sb_clip_id_t)i;
                 break;
             }

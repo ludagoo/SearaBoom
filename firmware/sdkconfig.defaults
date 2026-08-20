@@ -49,7 +49,7 @@ CONFIG_SEARABOOM_OTA_URL="https://searaboom.goossen.dev"
 # Prefer public HTTPS so AP client-isolation / dual-NIC LAN routing cannot block logs.
 # TLS runs after stream is up; mbedtls uses PSRAM (EXTERNAL_MEM_ALLOC).
 CONFIG_SEARABOOM_LOG_URL="https://searaboom.goossen.dev"
-CONFIG_SEARABOOM_FW_VERSION="0.0.55"
+CONFIG_SEARABOOM_FW_VERSION="0.0.58"
 
 # Default INFO; app tags raised to DEBUG in log_shipper_init()
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y

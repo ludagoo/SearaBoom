@@ -46,14 +46,26 @@ static void volume_cb(int delta, void *ctx)
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
-    (void)data;
     if (!s_sta_retry) {
         return;
     }
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
+        radio_player_arm_rssi_threshold();
+        wifi_ap_record_t ap = {0};
+        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK && ap.rssi <= -78) {
+            radio_player_on_rssi_low(ap.rssi);
+        }
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_BSS_RSSI_LOW) {
+        int rssi = 0;
+        if (data) {
+            rssi = ((wifi_event_bss_rssi_low_t *)data)->rssi;
+        }
+        radio_player_on_rssi_low(rssi);
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         ESP_LOGW(TAG, "WiFi disconnected, retrying");
+        radio_player_on_sta_lost();
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)data;
@@ -188,6 +200,19 @@ void app_main(void)
     while (true) {
         led_status_tick();
         clip_player_tick();
+        if (radio_player_wifi_weak_resume_ready()) {
+            clip_player_stop();
+            radio_player_hold_stream(false);
+        } else if (radio_player_wifi_weak_should_speak() && !clip_player_is_active()) {
+            /* Speak first so the warning is not lost in a mute gap, then
+             * stop consuming radio PCM so HTTP can refill. */
+            clip_player_loop(SB_CLIP_WIFI_WEAK);
+            radio_player_hold_stream(true);
+        } else if (!radio_player_wifi_weak_holding()
+                   && clip_player_playing() == SB_CLIP_WIFI_WEAK
+                   && !radio_player_is_running()) {
+            clip_player_stop();
+        }
         if (!touch_ready) {
             int64_t now = esp_timer_get_time() / 1000;
             if (radio_player_has_music_info() || (now - started_ms) > 20000) {

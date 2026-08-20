@@ -44,4 +44,13 @@ typedef struct {
 void radio_player_probe_arm(void);
 void radio_player_probe_result(radio_probe_result_t *out);
 
+/* WIFI_EVENT_STA_BSS_RSSI_LOW handler: latch only. Play from the app loop. */
+void radio_player_on_rssi_low(int rssi_dbm);
+void radio_player_on_sta_lost(void);
+void radio_player_arm_rssi_threshold(void);
+void radio_player_hold_stream(bool on);
+bool radio_player_wifi_weak_holding(void);
+bool radio_player_wifi_weak_should_speak(void);
+bool radio_player_wifi_weak_resume_ready(void);
+
 #endif
