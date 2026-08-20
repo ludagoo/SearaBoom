@@ -31,12 +31,17 @@ static volatile bool s_sta_got_ip;
 static void volume_cb(int delta, void *ctx)
 {
     (void)ctx;
-    int v = radio_player_get_volume() + delta;
+    int cur = radio_player_get_volume();
+    int v = cur + delta;
     if (v < SB_VOLUME_MIN) {
         v = SB_VOLUME_MIN;
     }
     if (v > SB_VOLUME_MAX) {
         v = SB_VOLUME_MAX;
+    }
+    if (v == cur) {
+        radio_player_beep_limit();
+        return;
     }
     clip_player_set_volume(v);
     s_cfg.volume = v;

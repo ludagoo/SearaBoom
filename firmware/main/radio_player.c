@@ -1,5 +1,6 @@
 #include <string.h>
 #include <stdint.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -53,6 +54,11 @@ static const char *TAG = "radio_player";
 #define SB_BEEP_HZ 2000
 #define SB_BEEP_MS 55
 #define SB_BEEP_AMP 4200
+#define SB_BEEP_FRAMES ((SB_MIX_SR * SB_BEEP_MS) / 1000)
+#define SB_LIMIT_HZ 880
+#define SB_LIMIT_MS 120
+#define SB_LIMIT_AMP 5200
+#define SB_LIMIT_FRAMES ((SB_MIX_SR * SB_LIMIT_MS) / 1000)
 
 #define SB_PROBE_WIN 512
 #define SB_PROBE_START_LO 5500
@@ -82,7 +88,6 @@ static bool s_prefetching;
 static bool s_got_music_info;
 static bool s_have_out;
 static bool s_clip_active;
-static int s_sample_rate = SB_MIX_SR;
 
 static volatile bool s_pcm_heard;
 static volatile bool s_pcm_flowing;
@@ -98,9 +103,12 @@ static volatile bool s_want_stop;
 static volatile bool s_wifi_weak_latched;
 static bool s_hold_radio;
 
-static volatile int s_beep_frames;
-static uint32_t s_beep_phase;
-static int s_beep_total_frames;
+static int16_t s_beep_pcm[SB_BEEP_FRAMES];
+static int16_t s_limit_pcm[SB_LIMIT_FRAMES];
+static const int16_t *s_beep_src;
+static int s_beep_len;
+static volatile int s_beep_pos = -1;
+static bool s_beep_ready;
 
 static volatile bool s_probe_on;
 static int s_probe_prev;
@@ -111,29 +119,6 @@ static int s_probe_first_hz;
 static int s_probe_last_hz;
 static int64_t s_probe_first_us;
 static int64_t s_probe_last_us;
-
-static const int16_t s_sin_q[64] = {
-    0, 804, 1608, 2410, 3212, 4011, 4808, 5600, 6389, 7173, 7952, 8724, 9490, 10249, 11000, 11743,
-    12476, 13200, 13914, 14617, 15308, 15988, 16655, 17309, 17949, 18575, 19186, 19782, 20362, 20926, 21473, 22003,
-    22516, 23011, 23488, 23946, 24385, 24805, 25205, 25585, 25945, 26284, 26602, 26900, 27176, 27431, 27665, 27876,
-    28066, 28234, 28379, 28502, 28603, 28681, 28736, 28769, 28779, 28766, 28731, 28673, 28593, 28490, 28365, 28217,
-};
-
-static int16_t soft_sine(uint32_t phase)
-{
-    unsigned idx = (phase >> 10) & 0xFFu;
-    unsigned quad = idx >> 6;
-    unsigned i = idx & 63;
-    int16_t v = s_sin_q[i];
-    if (quad == 1) {
-        v = s_sin_q[63 - i];
-    } else if (quad == 2) {
-        v = (int16_t)(-s_sin_q[i]);
-    } else if (quad == 3) {
-        v = (int16_t)(-s_sin_q[63 - i]);
-    }
-    return v;
-}
 
 static int volume_to_alc(int volume)
 {
@@ -174,43 +159,68 @@ bool radio_player_has_music_info(void)
     return s_got_music_info;
 }
 
-void radio_player_beep(void)
+static void fill_tone(int16_t *dst, int frames, int hz, int amp)
+{
+    int edge = frames / 3;
+    if (edge < 1) {
+        edge = 1;
+    }
+    const float w = 6.28318530718f * (float)hz / (float)SB_MIX_SR;
+    for (int i = 0; i < frames; i++) {
+        int a = amp;
+        if (i < edge) {
+            a = (a * i) / edge;
+        } else if (i > frames - 1 - edge) {
+            a = (a * (frames - 1 - i)) / edge;
+        }
+        dst[i] = (int16_t)((float)a * sinf(w * (float)i));
+    }
+}
+
+static void beep_prepare(void)
+{
+    if (s_beep_ready) {
+        return;
+    }
+    fill_tone(s_beep_pcm, SB_BEEP_FRAMES, SB_BEEP_HZ, SB_BEEP_AMP);
+    fill_tone(s_limit_pcm, SB_LIMIT_FRAMES, SB_LIMIT_HZ, SB_LIMIT_AMP);
+    s_beep_ready = true;
+}
+
+static void beep_play(const int16_t *src, int frames)
 {
     if (!s_have_out) {
         return;
     }
-    int rate = s_sample_rate > 0 ? s_sample_rate : SB_MIX_SR;
-    s_beep_total_frames = (rate * SB_BEEP_MS) / 1000;
-    if (s_beep_total_frames < 16) {
-        s_beep_total_frames = 16;
-    }
-    s_beep_phase = 0;
-    s_beep_frames = s_beep_total_frames;
+    beep_prepare();
+    s_beep_src = src;
+    s_beep_len = frames;
+    s_beep_pos = 0;
 }
 
+void radio_player_beep(void)
+{
+    beep_play(s_beep_pcm, SB_BEEP_FRAMES);
+}
+
+void radio_player_beep_limit(void)
+{
+    beep_play(s_limit_pcm, SB_LIMIT_FRAMES);
+}
+
+/* Overlay mix output. ADF tone_stream is a flash-MP3 reader and needs a mix
+ * slot; radio-only BYPASS ignores extra slots, so a pipeline tone would duck
+ * the station or stay silent. */
 static void mix_beep_s16le(int16_t *samples, int frames, int channels)
 {
-    if (s_beep_frames <= 0 || channels < 1) {
+    int pos = s_beep_pos;
+    const int16_t *src = s_beep_src;
+    int len = s_beep_len;
+    if (pos < 0 || !src || len <= 0 || pos >= len || channels < 1) {
         return;
     }
-    int rate = s_sample_rate > 0 ? s_sample_rate : SB_MIX_SR;
-    uint32_t incr = (uint32_t)((SB_BEEP_HZ * 65536u) / (unsigned)rate);
-    int total = s_beep_total_frames > 0 ? s_beep_total_frames : 1;
-    int edge = total / 3;
-    if (edge < 1) {
-        edge = 1;
-    }
-    for (int i = 0; i < frames && s_beep_frames > 0; i++) {
-        int left = s_beep_frames;
-        int elapsed = total - left;
-        int amp = SB_BEEP_AMP;
-        if (elapsed < edge) {
-            amp = (amp * elapsed) / edge;
-        } else if (left < edge) {
-            amp = (amp * left) / edge;
-        }
-        int16_t tone = (int16_t)(((int32_t)soft_sine(s_beep_phase) * amp) / 32767);
-        s_beep_phase += incr;
+    for (int i = 0; i < frames && pos < len; i++, pos++) {
+        int16_t tone = src[pos];
         for (int ch = 0; ch < channels; ch++) {
             int idx = i * channels + ch;
             int32_t mixed = (int32_t)samples[idx] + tone;
@@ -221,8 +231,8 @@ static void mix_beep_s16le(int16_t *samples, int frames, int channels)
             }
             samples[idx] = (int16_t)mixed;
         }
-        s_beep_frames--;
     }
+    s_beep_pos = (pos >= len) ? -1 : pos;
 }
 
 static void probe_window_done(int zc, int n, int peak, int64_t now)
@@ -379,7 +389,7 @@ static int tap_process(audio_element_handle_t self, char *in_buffer, int in_len)
     s_pcm_flowing = true;
     if ((r & 1) == 0) {
         pcm_note_s16((int16_t *)in_buffer, r / 2, 2);
-        if (s_beep_frames > 0) {
+        if (s_beep_pos >= 0) {
             mix_beep_s16le((int16_t *)in_buffer, r / 4, 2);
         }
     }
@@ -682,6 +692,7 @@ static esp_err_t ensure_mix(int volume)
         return ESP_FAIL;
     }
     i2s_stream_set_clk(s_i2s, SB_MIX_SR, 16, 2);
+    beep_prepare();
     s_amp_gated = true;
     s_have_out = true;
     s_volume = volume;

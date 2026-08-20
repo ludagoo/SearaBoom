@@ -21,6 +21,7 @@ esp_err_t radio_player_set_volume(int volume);
 int radio_player_get_volume(void);
 bool radio_player_has_music_info(void);
 void radio_player_beep(void);
+void radio_player_beep_limit(void);
 
 void radio_player_pcm_arm(void);
 bool radio_player_pcm_heard(void);
