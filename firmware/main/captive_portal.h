@@ -3,7 +3,7 @@
 
 #include "searaboom.h"
 
-/* Blocks forever in setup AP mode until device restarts after save */
+/* Setup AP. Returns after save once the phone leaves, with STA on home Wi-Fi. */
 void captive_portal_run(void);
 
 #endif

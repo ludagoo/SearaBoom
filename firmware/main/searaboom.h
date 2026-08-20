@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "esp_err.h"
 
 #define SB_URL1 "https://searaboom.goossen.dev/stream/102"
 #define SB_URL2 "https://searaboom.goossen.dev/stream/104"
@@ -30,5 +31,8 @@ typedef struct {
     char url_key[8]; /* "URL1" or "URL2" */
     int volume;
 } sb_config_t;
+
+bool wifi_sta_got_ip(void);
+esp_err_t wifi_sta_join(const sb_config_t *cfg);
 
 #endif

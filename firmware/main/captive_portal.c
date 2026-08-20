@@ -1,6 +1,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/param.h>
+#include <sys/time.h>
+#include <unistd.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -15,6 +17,7 @@
 #include "config_store.h"
 #include "led_status.h"
 #include "clip_player.h"
+#include "radio_player.h"
 #include "esp_mac.h"
 
 static const char *TAG = "captive_portal";
@@ -26,10 +29,91 @@ static volatile bool s_want_loop;
 static bool s_page_said;
 static bool s_need_page;
 static volatile bool s_saving;
+static bool s_saved_said;
+static bool s_radio_live;
+static volatile bool s_dns_run = true;
 static int64_t s_sta_empty_at;
 static sb_clip_id_t s_last_clip = SB_CLIP_COUNT;
 static int64_t s_last_clip_at;
 static sb_clip_id_t s_want_field = SB_CLIP_COUNT;
+static int64_t s_fields_at;
+static int64_t s_connected_at;
+
+/* Palette from radioseara.fm: #052C31 bg, #007985 banners, #EC9F17 gold, #009035 WhatsApp. */
+static const char *s_css =
+    "*{margin:0;padding:0;box-sizing:border-box;font-family:\"Segoe UI\",Arial,Helvetica,sans-serif;"
+    "-webkit-text-size-adjust:100%;text-size-adjust:100%}"
+    "html,body{width:100%;max-width:100%;overflow-x:hidden;background:#fff;color:#052C31;min-height:100%}"
+    "body{padding:12px 10px 28px}"
+    "a{color:inherit;text-decoration:none}"
+    "article{width:100%;max-width:380px;margin:0 auto}"
+    "h1{margin:0 0 12px;text-align:center}"
+    "h1 img{display:block;width:100%;max-width:220px;height:auto;margin:0 auto}"
+    ".tag{display:block;text-align:center;color:#00B7C8;font-size:.78em;letter-spacing:.08em;"
+    "text-transform:uppercase;margin:0 0 12px}"
+    ".box{margin:0 0 12px;padding:14px 12px 12px;border-radius:10px;background:#007985}"
+    ".ttl{display:block;width:100%;color:#fff;padding:0 0 10px;font-weight:700;text-align:center;"
+    "font-size:1.05em;line-height:1.2}"
+    ".ttl a,.box a{color:#fff;text-decoration:none}"
+    "label{display:block;color:#fff;margin:.55em 0 .3em;font-weight:600;font-size:.92em}"
+    "select,input,button,.btn{display:block;width:100%;font-size:16px;border:0;border-radius:8px;"
+    "-webkit-appearance:none;appearance:none}"
+    "select,input{height:2.6em;padding:.4em .7em;background:#004d54;color:#fff}"
+    "select{padding-right:2.1em;background:#004d54 url(\"data:image/svg+xml;charset=utf-8,"
+    "%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2012%208'%3E%3Cpath%20fill='none'"
+    "%20stroke='%23ffffff'%20stroke-width='1.6'%20stroke-linecap='round'%20stroke-linejoin='round'"
+    "%20d='M1.5%201.5L6%206l4.5-4.5'/%3E%3C/svg%3E\") no-repeat right .8em center;background-size:12px 8px}"
+    "select option{background:#052C31;color:#fff}"
+    "button,.save{margin-top:4px;padding:1em;background:#EC9F17;color:#052C31;font-size:1.08em;font-weight:700}"
+    ".foot{text-align:center;margin-top:16px;font-size:.92em;line-height:1.4}"
+    ".foot a{color:#00B7C8;font-weight:700}"
+    ".ok h2{text-align:center;font-size:1.65em;margin:0 0 .35em;color:#EC9F17;line-height:1.15}"
+    ".ok .lead{text-align:center;line-height:1.45;margin:0 0 14px;color:#052C31;font-size:.98em}"
+    ".hint{display:block;text-align:center;color:#006c7a;font-size:.8em;margin:0 0 6px}"
+    ".num{display:block;width:100%;height:auto;text-align:center;font-size:1.55em;font-weight:700;"
+    "letter-spacing:.03em;background:#009035;color:#fff;padding:.75em .4em;border-radius:10px;border:0;"
+    "margin:0 0 14px;line-height:1.2;-webkit-user-select:all;user-select:all}"
+    ".bubble{background:#004d54;border-radius:14px 14px 14px 4px;padding:12px 14px;margin:0 0 14px;"
+    "font-size:.95em;line-height:1.45;-webkit-user-select:all;user-select:all}"
+    ".note{text-align:center;color:#006c7a;font-size:.85em;margin-top:6px;line-height:1.4}";
+
+static void send_html_open(httpd_req_t *req, const char *body_class)
+{
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_sendstr_chunk(req,
+        "<!DOCTYPE html><html lang=\"pt-BR\"><head><meta charset=\"UTF-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,maximum-scale=1,"
+        "minimum-scale=1,user-scalable=no,viewport-fit=cover\">"
+        "<meta name=\"theme-color\" content=\"#052C31\">"
+        "<title>SearaBoom</title><style>");
+    httpd_resp_sendstr_chunk(req, s_css);
+    httpd_resp_sendstr_chunk(req, "</style><link rel=\"stylesheet\" href=\"styles.css\"></head><body");
+    if (body_class && body_class[0]) {
+        httpd_resp_sendstr_chunk(req, " class=\"");
+        httpd_resp_sendstr_chunk(req, body_class);
+        httpd_resp_sendstr_chunk(req, "\">");
+    } else {
+        httpd_resp_sendstr_chunk(req, ">");
+    }
+}
+
+static esp_err_t send_success_page(httpd_req_t *req)
+{
+    send_html_open(req, "ok");
+    httpd_resp_sendstr_chunk(req,
+        "<article><h1>"
+        "<img src=\"background.png\" width=\"220\" height=\"121\" alt=\"SearaBoom\"></h1>"
+        "<h2>Tá no ar!</h2>"
+        "<p class=\"lead\">Abre o WhatsApp e manda uma mensagem pra Rádio Seara: "
+        "diz que você acabou de ligar seu SearaBoom novo e quer um alô no ar. "
+        "O locutor fala seu nome.</p>"
+        "<span class=\"hint\">Toque no número pra copiar:</span>"
+        "<input class=\"num\" type=\"text\" readonly value=\"(88) 3672-1221\""
+        " onclick=\"this.focus();this.select()\" onfocus=\"this.select()\">"
+        "</article></body></html>");
+    httpd_resp_sendstr_chunk(req, NULL);
+    return ESP_OK;
+}
 
 static bool ap_clip_is_field(sb_clip_id_t id)
 {
@@ -49,10 +133,15 @@ static void request_ap_clip(sb_clip_id_t id, int delay_ms, bool loop)
     }
     if (id == SB_CLIP_AP_PAGE) {
         s_need_page = true;
+        s_fields_at = esp_timer_get_time() + 800 * 1000LL;
         ESP_LOGI(TAG, "need page clip");
         return;
     }
     if (ap_clip_is_field(id)) {
+        if (esp_timer_get_time() < s_fields_at) {
+            ESP_LOGI(TAG, "ignore field clip during load %s", clip_player_name(id));
+            return;
+        }
         s_want_field = id;
         ESP_LOGI(TAG, "need field clip %s", clip_player_name(id));
         return;
@@ -80,6 +169,18 @@ static void ap_clip_tick(void)
         return;
     }
 
+    cur = clip_player_playing();
+    if (s_want_field < SB_CLIP_COUNT) {
+        sb_clip_id_t id = s_want_field;
+        s_want_field = SB_CLIP_COUNT;
+        s_need_page = false;
+        s_page_said = true;
+        s_want_clip = SB_CLIP_COUNT;
+        ESP_LOGI(TAG, "play field clip %s (interrupt)", clip_player_name(id));
+        clip_player_play(id, false);
+        return;
+    }
+    /* Join-WiFi prompt first: "you're connected, open the browser". */
     if (s_want_clip < SB_CLIP_COUNT && esp_timer_get_time() >= s_clip_at) {
         sb_clip_id_t id = s_want_clip;
         bool loop = s_want_loop;
@@ -94,28 +195,17 @@ static void ap_clip_tick(void)
         }
         ESP_LOGI(TAG, "play queued %s", clip_player_name(id));
         clip_player_play(id, loop);
+        if (id == SB_CLIP_AP_CONNECTED) {
+            s_connected_at = esp_timer_get_time();
+        }
         return;
     }
-
-    cur = clip_player_playing();
-    /* Only block while that clip is actually outputting. Finished clips
-     * must not keep the form silent. */
-    if (cur == SB_CLIP_AP_CONNECTED || cur == SB_CLIP_AP_WELCOME) {
+    if (s_want_clip == SB_CLIP_AP_CONNECTED) {
         return;
     }
     if (s_need_page && cur != SB_CLIP_AP_PAGE) {
-        ESP_LOGI(TAG, "play page clip");
+        ESP_LOGI(TAG, "play page clip (interrupt)");
         clip_player_play(SB_CLIP_AP_PAGE, false);
-        return;
-    }
-    if (cur == SB_CLIP_AP_PAGE) {
-        return;
-    }
-    if (s_want_field < SB_CLIP_COUNT) {
-        sb_clip_id_t id = s_want_field;
-        s_want_field = SB_CLIP_COUNT;
-        ESP_LOGI(TAG, "play field clip %s", clip_player_name(id));
-        clip_player_play(id, false);
     }
 }
 
@@ -134,7 +224,7 @@ static void ap_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         wifi_sta_list_t list = {0};
         esp_wifi_ap_get_sta_list(&list);
         ESP_LOGI(TAG, "STA left, remaining=%d", list.num);
-        if (list.num == 0 && !s_saving) {
+        if (list.num == 0) {
             s_sta_empty_at = esp_timer_get_time();
         }
     }
@@ -212,63 +302,55 @@ static esp_err_t send_file(httpd_req_t *req, const char *path, const char *type)
 
 static esp_err_t root_get(httpd_req_t *req)
 {
+    if (s_saving) {
+        return send_success_page(req);
+    }
     const char *html1 =
-        "<!DOCTYPE html><html lang=\"pt-BR\"><head><meta charset=\"UTF-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,maximum-scale=1,"
-        "minimum-scale=1,user-scalable=no,viewport-fit=cover\">"
-        "<meta name=\"HandheldFriendly\" content=\"true\">"
-        "<title>SearaBoom Configuração</title>"
-        "<style>"
-        "*{margin:0;padding:0;box-sizing:border-box;font-family:Arial,Helvetica,sans-serif;"
-        "-webkit-text-size-adjust:100%;text-size-adjust:100%}"
-        "html,body{width:100%;max-width:100%;overflow-x:hidden;background:#fff}"
-        "article{width:100%;padding:8px}"
-        "form{width:100%;max-width:360px;margin:0 auto;padding:8px;border-radius:.5em;"
-        "background:rgba(0,0,0,.25)}"
-        "h1{margin:0;text-align:center}"
-        "h1 img{display:block;width:100%;max-width:240px;height:auto;margin:0 auto}"
-        "fieldset{border:0;margin:8px 0;padding:10px;border-radius:.4em;background:rgba(0,0,0,.5)}"
-        "legend{display:block;width:100%;color:#fff;padding:0 0 .4em;font-weight:600;text-align:center}"
-        "label{display:block;color:#fff;margin:.5em 0 .3em}"
-        "select,input,button{display:block;width:100%;font-size:16px;border:0;border-radius:.4em}"
-        "select,input{height:2.4em;padding:.4em;background:rgba(0,0,0,.5);color:#fff}"
-        "button{margin-top:8px;padding:.9em;background:#1ccc33;color:#fff;font-size:1.05em}"
-        "</style>"
-        "<link rel=\"stylesheet\" href=\"styles.css\"></head><body><article>"
-        "<form action=\"/\" method=\"POST\"><h1>"
-        "<img src=\"background.png\" width=\"240\" height=\"132\" alt=\"SearaBoom\"></h1>"
+        "<article>"
+        "<form action=\"/\" method=\"POST\" autocomplete=\"off\"><h1>"
+        "<img src=\"background.png\" width=\"220\" height=\"121\" alt=\"SearaBoom\"></h1>"
         "<iframe name=\"sbclip\" style=\"position:absolute;width:0;height:0;border:0\"></iframe>"
-        "<img src=\"/clip/page\" width=\"1\" height=\"1\" alt=\"\">"
-        "<fieldset><fieldset><legend><a href=\"/clip/station\" target=\"sbclip\">Estação</a></legend>"
-        "<select name=\"url\" id=\"URL\" onclick=\"new Image().src='/clip/station?t='+Date.now()\" "
+        "<div class=\"box\"><p class=\"ttl\"><a href=\"/clip/station\" target=\"sbclip\" tabindex=\"-1\">Escolha a sintonia</a></p>"
+        "<select name=\"url\" id=\"URL\" tabindex=\"-1\" "
+        "onclick=\"new Image().src='/clip/station?t='+Date.now()\" "
         "onchange=\"new Image().src='/clip/station?t='+Date.now()\">"
         "<option value=\"URL1\">Nova Russas (FM 102.7)</option>"
         "<option value=\"URL2\">Ibiapina (FM 104.7)</option>"
-        "</select></fieldset>"
-        "<fieldset><legend>Configurações do WiFi</legend>"
-        "<label for=\"SSID\"><a href=\"/clip/wifi\" target=\"sbclip\">Nome:</a></label>"
-        "<select name=\"ssid\" id=\"SSID\" onclick=\"new Image().src='/clip/wifi?t='+Date.now()\" "
+        "</select></div>"
+        "<div class=\"box\"><p class=\"ttl\">Configurações do WiFi</p>"
+        "<label for=\"SSID\"><a href=\"/clip/wifi\" target=\"sbclip\" tabindex=\"-1\">Nome:</a></label>"
+        "<select name=\"ssid\" id=\"SSID\" tabindex=\"-1\" "
+        "onclick=\"new Image().src='/clip/wifi?t='+Date.now()\" "
         "onchange=\"new Image().src='/clip/wifi?t='+Date.now()\">";
     const char *html2 =
-        "</select><label for=\"PASS\"><a href=\"/clip/pass\" target=\"sbclip\">Senha:</a></label>"
-        "<input name=\"pass\" id=\"PASS\" type=\"text\" placeholder=\"Senha Do WiFi\""
-        " autocomplete=\"off\" autocorrect=\"off\" autocapitalize=\"off\" spellcheck=\"false\""
+        "</select><label for=\"PASS\"><a href=\"/clip/pass\" target=\"sbclip\" tabindex=\"-1\">Senha:</a></label>"
+        "<input name=\"pass\" id=\"PASS\" type=\"text\" placeholder=\"Senha do Wi-Fi\""
+        " tabindex=\"-1\" autocomplete=\"off\" autocorrect=\"off\" autocapitalize=\"off\" spellcheck=\"false\""
         " onclick=\"new Image().src='/clip/pass?t='+Date.now()\">"
-        "</fieldset><button type=\"submit\" id=\"SAVE\""
+        "</div><button type=\"submit\" id=\"SAVE\" tabindex=\"-1\""
         " onclick=\"new Image().src='/clip/save?t='+Date.now()\">Salvar</button></form>"
         "<script>"
-        "setTimeout(function(){var a=document.activeElement; if(a&&a.blur) a.blur();},0);"
+        "(function(){"
+        "function u(){var a=document.activeElement;if(a&&a.blur)a.blur();"
+        "if(window.scrollTo)window.scrollTo(0,0);}"
+        "u();setTimeout(u,0);setTimeout(u,120);setTimeout(u,400);"
+        "function page(){if(window.__sbpage)return;window.__sbpage=1;"
+        "new Image().src='/clip/page?t='+Date.now();}"
+        "function tryPage(){if(document.hidden)return;setTimeout(page,300);}"
+        "if(document.addEventListener){"
+        "document.addEventListener('visibilitychange',tryPage);"
+        "window.addEventListener('pageshow',tryPage);"
+        "window.addEventListener('load',tryPage);"
+        "}setTimeout(tryPage,400);"
+        "})();"
         "</script></article></body></html>";
 
     ESP_LOGI(TAG, "HTTP GET %s", req->uri);
-    httpd_resp_set_type(req, "text/html");
+    send_html_open(req, NULL);
     httpd_resp_sendstr_chunk(req, html1);
     httpd_resp_sendstr_chunk(req, s_ssid_options);
     httpd_resp_sendstr_chunk(req, html2);
     httpd_resp_sendstr_chunk(req, NULL);
-    if (!s_saving && !s_page_said) {
-        request_ap_clip(SB_CLIP_AP_PAGE, 0, false);
-    }
     return ESP_OK;
 }
 
@@ -355,12 +437,12 @@ static esp_err_t root_post(httpd_req_t *req)
     }
 
     s_saving = true;
+    s_saved_said = false;
     s_need_page = false;
     s_want_clip = SB_CLIP_COUNT;
     s_want_field = SB_CLIP_COUNT;
     config_store_save(&cfg);
-    httpd_resp_send(req, "Done. Will restart", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
+    return send_success_page(req);
 }
 
 static esp_err_t styles_get(httpd_req_t *req) { return send_file(req, "/styles.css", "text/css"); }
@@ -374,6 +456,48 @@ static esp_err_t captive_redirect(httpd_req_t *req)
     return ESP_OK;
 }
 
+static void join_home_wifi(void)
+{
+    sb_config_t cfg;
+    config_store_load(&cfg);
+    esp_err_t err = wifi_sta_join(&cfg);
+    ESP_LOGI(TAG, "STA join %s: %s", cfg.ssid, esp_err_to_name(err));
+}
+
+static void start_radio_now(void)
+{
+    sb_config_t cfg;
+    config_store_load(&cfg);
+    const char *url = config_store_stream_url(&cfg);
+    sb_clip_id_t tune = (strncmp(cfg.url_key, "URL2", 4) == 0)
+        ? SB_CLIP_TUNE_104 : SB_CLIP_TUNE_102;
+    ESP_LOGI(TAG, "Portal prefetch %s vol=%d", url, cfg.volume);
+    if (radio_player_prefetch(url, cfg.volume) != ESP_OK) {
+        ESP_LOGE(TAG, "Radio prefetch failed");
+        return;
+    }
+    clip_player_play_wait(tune, 15000);
+    if (radio_player_go_live() != ESP_OK) {
+        ESP_LOGE(TAG, "Radio go_live failed");
+        return;
+    }
+    led_status_set(SB_LED_GREEN, 500);
+    s_radio_live = true;
+}
+
+static void portal_teardown(void)
+{
+    s_dns_run = false;
+    vTaskDelay(pdMS_TO_TICKS(700));
+    if (s_server) {
+        httpd_stop(s_server);
+        s_server = NULL;
+    }
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_set_max_tx_power(68);
+    ESP_LOGI(TAG, "Setup AP down, STA only");
+}
+
 static void dns_server_task(void *arg)
 {
     (void)arg;
@@ -384,8 +508,10 @@ static void dns_server_task(void *arg)
         .sin_addr.s_addr = htonl(INADDR_ANY),
     };
     bind(sock, (struct sockaddr *)&addr, sizeof(addr));
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 500000 };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     uint8_t packet[512];
-    while (true) {
+    while (s_dns_run) {
         struct sockaddr_in source;
         socklen_t socklen = sizeof(source);
         int len = recvfrom(sock, packet, sizeof(packet), 0, (struct sockaddr *)&source, &socklen);
@@ -413,6 +539,8 @@ static void dns_server_task(void *arg)
             sendto(sock, packet, i + sizeof(answer), 0, (struct sockaddr *)&source, socklen);
         }
     }
+    close(sock);
+    vTaskDelete(NULL);
 }
 
 void captive_portal_run(void)
@@ -514,22 +642,36 @@ void captive_portal_run(void)
 
     led_status_set(SB_LED_BLUE, 500);
     while (true) {
-        if (s_saving) {
+        if (s_saving && !s_saved_said) {
             clip_player_stop();
-            clip_player_play_wait(SB_CLIP_AP_SAVED, 15000);
-            vTaskDelay(pdMS_TO_TICKS(300));
-            esp_restart();
+            clip_player_play(SB_CLIP_AP_SAVED, false);
+            s_saved_said = true;
+            join_home_wifi();
         }
-        if (s_sta_empty_at && !s_saving
+        if (s_saving && s_saved_said && !s_radio_live && wifi_sta_got_ip()
+            && !clip_player_is_active()) {
+            start_radio_now();
+        }
+        if (s_sta_empty_at
             && (esp_timer_get_time() - s_sta_empty_at) >= 3000 * 1000LL) {
             wifi_sta_list_t list = {0};
             esp_wifi_ap_get_sta_list(&list);
             s_sta_empty_at = 0;
             if (list.num == 0) {
+                if (s_saving) {
+                    if (s_radio_live || wifi_sta_got_ip()) {
+                        ESP_LOGI(TAG, "STA gone after save, dropping AP");
+                        portal_teardown();
+                        return;
+                    }
+                    ESP_LOGW(TAG, "STA gone, no home Wi-Fi yet — restart into setup");
+                    esp_restart();
+                }
                 s_page_said = false;
                 s_need_page = false;
                 s_want_field = SB_CLIP_COUNT;
                 s_last_clip = SB_CLIP_COUNT;
+                s_connected_at = 0;
                 request_ap_clip(SB_CLIP_AP_WELCOME, 0, true);
             }
         }

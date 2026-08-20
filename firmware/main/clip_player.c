@@ -583,30 +583,10 @@ esp_err_t clip_player_play(sb_clip_id_t id, bool loop)
         return ESP_ERR_INVALID_ARG;
     }
     lock();
-    if (s_active && !s_finished && s_loop_at == 0) {
-        if (s_playing_id == id) {
-            ESP_LOGI(TAG, "CLIP already playing %s", clip_name[id]);
-            unlock();
-            return ESP_OK;
-        }
-        if (s_playing_id == SB_CLIP_AP_CONNECTED
-            && (id == SB_CLIP_AP_PAGE || id == SB_CLIP_AP_WELCOME)) {
-            s_pending_page = SB_CLIP_AP_PAGE;
-            ESP_LOGI(TAG, "queue page after connected");
-            unlock();
-            return ESP_OK;
-        }
-        if ((s_playing_id == SB_CLIP_AP_CONNECTED || s_playing_id == SB_CLIP_AP_PAGE)
-            && clip_is_field(id)) {
-            s_pending_field = id;
-            ESP_LOGI(TAG, "queue %s after %s", clip_name[id], clip_name[s_playing_id]);
-            unlock();
-            return ESP_OK;
-        }
-        if (id == SB_CLIP_AP_PAGE && clip_is_field(s_playing_id)) {
-            s_pending_field = s_playing_id;
-            ESP_LOGI(TAG, "page takes over, keep %s after", clip_name[s_playing_id]);
-        }
+    if (s_active && !s_finished && s_loop_at == 0 && s_playing_id == id) {
+        ESP_LOGI(TAG, "CLIP already playing %s", clip_name[id]);
+        unlock();
+        return ESP_OK;
     }
     if (radio_player_start_idle(s_volume) != ESP_OK) {
         unlock();

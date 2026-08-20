@@ -25,6 +25,7 @@ static const char *TAG = "searaboom";
 static sb_config_t s_cfg;
 static EventGroupHandle_t s_wifi_events;
 static volatile bool s_sta_retry = true;
+static volatile bool s_sta_got_ip;
 #define WIFI_OK_BIT BIT0
 
 static void volume_cb(int delta, void *ctx)
@@ -46,6 +47,16 @@ static void volume_cb(int delta, void *ctx)
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        s_sta_got_ip = false;
+        if (!s_sta_retry) {
+            return;
+        }
+        ESP_LOGW(TAG, "WiFi disconnected, retrying");
+        radio_player_on_sta_lost();
+        esp_wifi_connect();
+        return;
+    }
     if (!s_sta_retry) {
         return;
     }
@@ -63,15 +74,31 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             rssi = ((wifi_event_bss_rssi_low_t *)data)->rssi;
         }
         radio_player_on_rssi_low(rssi);
-    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        ESP_LOGW(TAG, "WiFi disconnected, retrying");
-        radio_player_on_sta_lost();
-        esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
-        xEventGroupSetBits(s_wifi_events, WIFI_OK_BIT);
+        s_sta_got_ip = true;
+        if (s_wifi_events) {
+            xEventGroupSetBits(s_wifi_events, WIFI_OK_BIT);
+        }
     }
+}
+
+bool wifi_sta_got_ip(void)
+{
+    return s_sta_got_ip;
+}
+
+esp_err_t wifi_sta_join(const sb_config_t *cfg)
+{
+    wifi_config_t wifi = {0};
+    strncpy((char *)wifi.sta.ssid, cfg->ssid, sizeof(wifi.sta.ssid));
+    strncpy((char *)wifi.sta.password, cfg->password, sizeof(wifi.sta.password));
+    wifi.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    s_sta_got_ip = false;
+    s_sta_retry = true;
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi));
+    return esp_wifi_connect();
 }
 
 void wifi_set_sta_retry(bool on)
@@ -159,26 +186,29 @@ void app_main(void)
 
     if (!wifi_connect_or_setup()) {
         ESP_LOGW(TAG, "Starting captive portal");
-        captive_portal_run(); /* never returns; first clip opens idle I2S */
+        captive_portal_run(); /* returns after save when the phone leaves the AP */
+        config_store_load(&s_cfg);
     }
 
     log_shipper_init();
 
-    const char *url = config_store_stream_url(&s_cfg);
-    sb_clip_id_t tune = (strncmp(s_cfg.url_key, "URL2", 4) == 0)
-        ? SB_CLIP_TUNE_104 : SB_CLIP_TUNE_102;
-    ESP_LOGI(TAG, "Prefetch stream %s (%s) vol=%d", s_cfg.url_key, url, s_cfg.volume);
-    if (radio_player_prefetch(url, s_cfg.volume) != ESP_OK) {
-        ESP_LOGE(TAG, "Radio prefetch failed");
-    }
-    if (play_updated) {
-        ESP_LOGI(TAG, "First boot after update — playing atualizado");
-        clip_player_play_wait(SB_CLIP_OTA_DONE, 20000);
-    } else {
-        clip_player_play_wait(tune, 15000);
-    }
-    if (radio_player_go_live() != ESP_OK) {
-        ESP_LOGE(TAG, "Radio go_live failed");
+    if (!radio_player_is_running()) {
+        const char *url = config_store_stream_url(&s_cfg);
+        sb_clip_id_t tune = (strncmp(s_cfg.url_key, "URL2", 4) == 0)
+            ? SB_CLIP_TUNE_104 : SB_CLIP_TUNE_102;
+        ESP_LOGI(TAG, "Prefetch stream %s (%s) vol=%d", s_cfg.url_key, url, s_cfg.volume);
+        if (radio_player_prefetch(url, s_cfg.volume) != ESP_OK) {
+            ESP_LOGE(TAG, "Radio prefetch failed");
+        }
+        if (play_updated) {
+            ESP_LOGI(TAG, "First boot after update — playing atualizado");
+            clip_player_play_wait(SB_CLIP_OTA_DONE, 20000);
+        } else {
+            clip_player_play_wait(tune, 15000);
+        }
+        if (radio_player_go_live() != ESP_OK) {
+            ESP_LOGE(TAG, "Radio go_live failed");
+        }
     }
     led_status_set(SB_LED_GREEN, 500);
 
