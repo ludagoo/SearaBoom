@@ -227,7 +227,7 @@ void app_main(void)
             ESP_LOGE(TAG, "Radio go_live failed");
         }
     }
-    led_status_set(SB_LED_GREEN, 500);
+    led_status_set(SB_LED_OFF, 0);
 
     /* Version check after the stream is up. If an update is found the OTA
      * task stops radio, speaks, then downloads with audio off. */

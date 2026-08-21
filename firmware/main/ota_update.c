@@ -171,6 +171,7 @@ esp_err_t ota_update_check(ota_policy_t policy)
         ESP_LOGW(TAG, "OTA check failed err=%s status=%d (continuing)", esp_err_to_name(err), status);
         led_status_set(SB_LED_MAGENTA, 200);
         vTaskDelay(pdMS_TO_TICKS(1500));
+        led_status_set(SB_LED_OFF, 0);
         log_shipper_set_paused(false);
         radio_player_resume();
         return err == ESP_OK ? ESP_FAIL : err;
@@ -179,6 +180,7 @@ esp_err_t ota_update_check(ota_policy_t policy)
     cJSON *root = cJSON_Parse(body);
     if (!root) {
         ESP_LOGW(TAG, "Bad OTA JSON");
+        led_status_set(SB_LED_OFF, 0);
         log_shipper_set_paused(false);
         radio_player_resume();
         return ESP_FAIL;
@@ -200,7 +202,7 @@ esp_err_t ota_update_check(ota_policy_t policy)
     if (!need) {
         ESP_LOGI(TAG, "Firmware up to date (%s)", app->version);
         cJSON_Delete(root);
-        led_status_set(SB_LED_GREEN, 500);
+        led_status_set(SB_LED_OFF, 0);
         log_shipper_set_paused(false);
         radio_player_resume();
         return ESP_OK;
@@ -227,6 +229,7 @@ esp_err_t ota_update_check(ota_policy_t policy)
     ESP_LOGE(TAG, "OTA failed: %s", esp_err_to_name(ota_err));
     led_status_set(SB_LED_MAGENTA, 150);
     vTaskDelay(pdMS_TO_TICKS(2000));
+    led_status_set(SB_LED_OFF, 0);
     log_shipper_set_paused(false);
     radio_player_resume();
     return ota_err;
