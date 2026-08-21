@@ -295,7 +295,7 @@ static esp_err_t ensure_clip_pipe(void)
     aac_cfg.out_rb_size = 8 * 1024;
     aac_cfg.task_stack = 6 * 1024;
     aac_cfg.task_core = 1;
-    aac_cfg.stack_in_ext = false;
+    aac_cfg.stack_in_ext = true;
     s_aac = aac_decoder_init(&aac_cfg);
     s_m2s = pcm_upmix_init_core("cm2s", 1);
     raw_stream_cfg_t raw_cfg = RAW_STREAM_CFG_DEFAULT();
@@ -383,7 +383,7 @@ static esp_err_t ensure_probe_pipe(void)
     cfg.task_stack = 3 * 1024;
     cfg.task_prio = 6;
     cfg.task_core = 0;
-    cfg.stack_in_ext = false;
+    cfg.stack_in_ext = true;
     cfg.buffer_len = 2048;
     s_probe = audio_element_init(&cfg);
     raw_stream_cfg_t raw_cfg = RAW_STREAM_CFG_DEFAULT();
@@ -685,10 +685,7 @@ static esp_err_t wait_finished(int timeout_ms)
                 vTaskDelay(pdMS_TO_TICKS(20));
             }
             lock();
-            s_active = false;
-            detach_clip_from_mix();
-            clip_pipe_halt();
-            probe_pipe_halt();
+            halt_playback();
             unlock();
             return ESP_OK;
         }

@@ -136,8 +136,8 @@ static volatile bool s_wifi_weak_latched;
 static bool s_hold_radio;
 static int64_t s_hold_started_ms;
 
-static int16_t s_beep_pcm[SB_BEEP_FRAMES];
-static int16_t s_limit_pcm[SB_LIMIT_FRAMES];
+static int16_t *s_beep_pcm;
+static int16_t *s_limit_pcm;
 static const int16_t *s_beep_src;
 static int s_beep_len;
 static volatile int s_beep_pos = -1;
@@ -215,6 +215,16 @@ static void beep_prepare(void)
     if (s_beep_ready) {
         return;
     }
+    if (!s_beep_pcm) {
+        s_beep_pcm = audio_calloc(SB_BEEP_FRAMES, sizeof(int16_t));
+    }
+    if (!s_limit_pcm) {
+        s_limit_pcm = audio_calloc(SB_LIMIT_FRAMES, sizeof(int16_t));
+    }
+    if (!s_beep_pcm || !s_limit_pcm) {
+        ESP_LOGW(TAG, "beep pcm alloc failed");
+        return;
+    }
     fill_tone(s_beep_pcm, SB_BEEP_FRAMES, SB_BEEP_HZ, SB_BEEP_AMP);
     fill_tone(s_limit_pcm, SB_LIMIT_FRAMES, SB_LIMIT_HZ, SB_LIMIT_AMP);
     s_beep_ready = true;
@@ -222,10 +232,13 @@ static void beep_prepare(void)
 
 static void beep_play(const int16_t *src, int frames)
 {
-    if (!s_have_out) {
+    if (!s_have_out || !src || frames <= 0) {
         return;
     }
     beep_prepare();
+    if (!s_beep_ready) {
+        return;
+    }
     s_beep_src = src;
     s_beep_len = frames;
     s_beep_pos = 0;
@@ -443,7 +456,7 @@ static audio_element_handle_t tap_init(void)
     cfg.task_stack = 3 * 1024;
     cfg.task_prio = 5;
     cfg.task_core = 0;
-    cfg.stack_in_ext = false;
+    cfg.stack_in_ext = false; /* mix path: keep next to I2S */
     cfg.buffer_len = 2048;
     return audio_element_init(&cfg);
 }
@@ -687,7 +700,7 @@ static esp_err_t ensure_mix(int volume)
     mix_cfg.downmix_info.out_ctx = ESP_DOWNMIX_OUT_CTX_NORMAL;
     mix_cfg.task_stack = 4 * 1024;
     mix_cfg.task_prio = 6;
-    mix_cfg.stack_in_ext = false;
+    mix_cfg.stack_in_ext = false; /* I2S feeder: internal stack */
     mix_cfg.out_rb_size = 8 * 1024;
     s_downmix = downmix_init(&mix_cfg);
     esp_downmix_input_info_t src[2] = {
@@ -707,6 +720,7 @@ static esp_err_t ensure_mix(int volume)
     i2s_cfg.use_alc = true;
     i2s_cfg.volume = volume_to_alc(volume);
     i2s_cfg.uninstall_drv = true;
+    i2s_cfg.stack_in_ext = false;
     i2s_cfg.std_cfg.clk_cfg.sample_rate_hz = SB_MIX_SR;
     i2s_stream_set_channel_type(&i2s_cfg, I2S_CHANNEL_TYPE_RIGHT_LEFT);
     s_i2s = i2s_stream_init(&i2s_cfg);
@@ -763,7 +777,8 @@ static esp_err_t ensure_radio(const char *url, int volume, bool hold)
     http_cfg.out_rb_size = SB_HTTP_RB_SIZE;
     http_cfg.task_stack = 5 * 1024;
     http_cfg.task_core = 1;
-    http_cfg.stack_in_ext = false;
+    /* Decode path: PSRAM stack. Mix/I2S/tap stay internal (cache-off DMA). */
+    http_cfg.stack_in_ext = true;
     s_http = http_stream_init(&http_cfg);
 
     aac_decoder_cfg_t aac_cfg = DEFAULT_AAC_DECODER_CONFIG();
@@ -772,7 +787,7 @@ static esp_err_t ensure_radio(const char *url, int volume, bool hold)
     aac_cfg.task_stack = 8 * 1024;
     aac_cfg.task_core = 1;
     aac_cfg.task_prio = 6;
-    aac_cfg.stack_in_ext = false;
+    aac_cfg.stack_in_ext = true;
     s_aac = aac_decoder_init(&aac_cfg);
 
     s_radio_m2s = pcm_upmix_init_core("rm2s", 1);

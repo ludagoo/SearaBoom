@@ -60,7 +60,7 @@ audio_element_handle_t blob_stream_init(void)
     cfg.task_stack = 3 * 1024;
     cfg.task_prio = 6;
     cfg.task_core = 1;
-    cfg.stack_in_ext = false;
+    cfg.stack_in_ext = true;
     cfg.buffer_len = 2048;
     audio_element_handle_t el = audio_element_init(&cfg);
     if (!el) {

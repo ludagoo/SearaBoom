@@ -215,7 +215,8 @@ static void ota_task_fn(void *arg)
 {
     (void)arg;
     /* Wait until the stream is settled. Stack is allocated at boot while
-     * internal heap still has a 12 KB hole — after radio is up it does not. */
+     * internal heap still has a 12 KB hole — after radio is up it does not.
+     * Must stay in internal RAM: OTA flash writes abort if the stack is PSRAM. */
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     ota_update_check_on_boot();
     s_ota_task = NULL;

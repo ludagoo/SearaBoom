@@ -10,6 +10,21 @@ if [[ ! -f "$RULE_SRC" ]]; then
   exit 1
 fi
 
+# ADF stack_in_ext needs xTaskCreateRestrictedPinnedToCore (not in stock IDF 5.3).
+IDF="${IDF_PATH:-$HOME/esp/esp-idf}"
+ADF="${ADF_PATH:-$HOME/esp/esp-adf}"
+PATCH="$ADF/idf_patches/idf_v5.3_freertos.patch"
+if [[ -f "$PATCH" && -d "$IDF" ]]; then
+  if ! grep -q 'xTaskCreateRestrictedPinnedToCore' \
+      "$IDF/components/freertos/esp_additions/include/freertos/idf_additions.h" \
+      2>/dev/null; then
+    echo "Applying ADF FreeRTOS PSRAM-stack patch to IDF..."
+    git -C "$IDF" apply "$PATCH"
+  else
+    echo "ADF FreeRTOS PSRAM-stack patch already present."
+  fi
+fi
+
 echo "Installing udev rule (needs sudo once)..."
 sudo cp "$RULE_SRC" "$RULE_DST"
 sudo udevadm control --reload-rules

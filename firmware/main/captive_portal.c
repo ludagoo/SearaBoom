@@ -31,6 +31,7 @@ static bool s_page_said;
 static bool s_need_page;
 static volatile bool s_saving;
 static bool s_saved_said;
+static int64_t s_save_at;
 static volatile bool s_dns_run = true;
 static int64_t s_sta_empty_at;
 static sb_clip_id_t s_last_clip = SB_CLIP_COUNT;
@@ -43,8 +44,7 @@ static int64_t s_connected_at;
 static const char *s_css =
     "*{margin:0;padding:0;box-sizing:border-box;font-family:\"Segoe UI\",Arial,Helvetica,sans-serif;"
     "-webkit-text-size-adjust:100%;text-size-adjust:100%}"
-    "html,body{width:100%;max-width:100%;overflow-x:hidden;overflow-y:auto;"
-    "-webkit-overflow-scrolling:touch;background:#fff;color:#052C31;min-height:100%}"
+    "html,body{width:100%;max-width:100%;overflow-x:hidden;background:#fff;color:#052C31;min-height:100%}"
     "body{padding:8px 10px 20px}"
     "a{color:inherit;text-decoration:none}"
     "article{width:100%;max-width:380px;margin:0 auto}"
@@ -83,30 +83,41 @@ static const char *s_css =
 
 static void html_escape(const char *in, char *out, size_t outsz);
 
+/* A zero-length chunk ends the HTTP body. Empty name/city used to cut the
+ * form off at value=" so phones only saw the logo and Nome. */
+static esp_err_t send_chunk(httpd_req_t *req, const char *s)
+{
+    if (!s || !s[0]) {
+        return ESP_OK;
+    }
+    return httpd_resp_sendstr_chunk(req, s);
+}
+
 static void send_html_open(httpd_req_t *req, const char *body_class)
 {
     httpd_resp_set_type(req, "text/html");
-    httpd_resp_sendstr_chunk(req,
+    httpd_resp_set_hdr(req, "Connection", "close");
+    send_chunk(req,
         "<!DOCTYPE html><html lang=\"pt-BR\"><head><meta charset=\"UTF-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,maximum-scale=1,"
         "minimum-scale=1,user-scalable=no,viewport-fit=cover\">"
         "<meta name=\"theme-color\" content=\"#052C31\">"
         "<title>SearaBoom</title><link rel=\"stylesheet\" href=\"styles.css\"><style>");
-    httpd_resp_sendstr_chunk(req, s_css);
-    httpd_resp_sendstr_chunk(req, "</style></head><body");
+    send_chunk(req, s_css);
+    send_chunk(req, "</style></head><body");
     if (body_class && body_class[0]) {
-        httpd_resp_sendstr_chunk(req, " class=\"");
-        httpd_resp_sendstr_chunk(req, body_class);
-        httpd_resp_sendstr_chunk(req, "\">");
+        send_chunk(req, " class=\"");
+        send_chunk(req, body_class);
+        send_chunk(req, "\">");
     } else {
-        httpd_resp_sendstr_chunk(req, ">");
+        send_chunk(req, ">");
     }
 }
 
 static esp_err_t send_success_page(httpd_req_t *req)
 {
     send_html_open(req, "ok");
-    httpd_resp_sendstr_chunk(req,
+    send_chunk(req,
         "<article><h1>"
         "<img src=\"background.png\" width=\"220\" height=\"121\" alt=\"SearaBoom\"></h1>"
         "<h2>Tá no ar!</h2>"
@@ -372,13 +383,13 @@ static esp_err_t root_get(httpd_req_t *req)
 
     ESP_LOGI(TAG, "HTTP GET %s", req->uri);
     send_html_open(req, NULL);
-    httpd_resp_sendstr_chunk(req, html1);
-    httpd_resp_sendstr_chunk(req, s_ssid_options);
-    httpd_resp_sendstr_chunk(req, html2);
-    httpd_resp_sendstr_chunk(req, name_esc);
-    httpd_resp_sendstr_chunk(req, html_city);
-    httpd_resp_sendstr_chunk(req, city_esc);
-    httpd_resp_sendstr_chunk(req, html3);
+    send_chunk(req, html1);
+    send_chunk(req, s_ssid_options);
+    send_chunk(req, html2);
+    send_chunk(req, name_esc);
+    send_chunk(req, html_city);
+    send_chunk(req, city_esc);
+    send_chunk(req, html3);
     httpd_resp_sendstr_chunk(req, NULL);
     return ESP_OK;
 }
@@ -515,6 +526,7 @@ static esp_err_t root_post(httpd_req_t *req)
 
     s_saving = true;
     s_saved_said = false;
+    s_save_at = 0;
     s_need_page = false;
     s_want_clip = SB_CLIP_COUNT;
     s_want_field = SB_CLIP_COUNT;
@@ -696,13 +708,25 @@ void captive_portal_run(void)
     led_status_set(SB_LED_BLUE, 500);
     while (true) {
         if (s_saving && !s_saved_said) {
+            /* Do not block this loop on play_wait: a hung clip would leave
+             * the AP up forever. Tick the clip here, reboot when it ends. */
             s_saved_said = true;
-            clip_player_stop();
+            s_save_at = esp_timer_get_time();
             ESP_LOGI(TAG, "Saved — confirmation clip then reboot");
-            clip_player_play_wait(SB_CLIP_AP_SAVED, 12000);
-            portal_teardown();
-            vTaskDelay(pdMS_TO_TICKS(300));
-            esp_restart();
+            if (clip_player_play(SB_CLIP_AP_SAVED, false) != ESP_OK) {
+                ESP_LOGW(TAG, "saved clip failed; will reboot anyway");
+            }
+        }
+        if (s_saving && s_saved_said && s_save_at) {
+            int64_t dt_ms = (esp_timer_get_time() - s_save_at) / 1000;
+            bool clip_idle = dt_ms >= 800 && !clip_player_is_active();
+            if (clip_idle || dt_ms >= 14000) {
+                ESP_LOGI(TAG, "save wrap dt_ms=%lld clip_idle=%d — reboot",
+                         (long long)dt_ms, (int)clip_idle);
+                portal_teardown();
+                vTaskDelay(pdMS_TO_TICKS(250));
+                esp_restart();
+            }
         }
         if (s_sta_empty_at
             && (esp_timer_get_time() - s_sta_empty_at) >= 3000 * 1000LL) {

@@ -104,7 +104,7 @@ audio_element_handle_t pcm_upmix_init_core(const char *tag, int core)
     cfg.task_stack = 3 * 1024;
     cfg.task_prio = 5;
     cfg.task_core = (core == 1) ? 1 : 0;
-    cfg.stack_in_ext = false;
+    cfg.stack_in_ext = true;
     cfg.buffer_len = 2048;
     audio_element_handle_t el = audio_element_init(&cfg);
     if (!el) {
