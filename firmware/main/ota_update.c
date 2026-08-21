@@ -22,6 +22,8 @@
 static const char *TAG = "ota_update";
 
 static volatile bool s_busy;
+static TaskHandle_t s_task;
+static volatile ota_policy_t s_kick_policy = OTA_POLICY_STABLE;
 
 bool ota_update_is_busy(void)
 {
@@ -246,4 +248,42 @@ esp_err_t ota_update_check(ota_policy_t policy)
 esp_err_t ota_update_check_on_boot(void)
 {
     return ota_update_check(OTA_POLICY_STABLE);
+}
+
+static void ota_task_fn(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        ota_policy_t pol = s_kick_policy;
+        if (pol == OTA_POLICY_DEV) {
+            ota_update_check(OTA_POLICY_DEV);
+        } else {
+            ota_update_check_on_boot();
+        }
+    }
+}
+
+esp_err_t ota_update_start_task(void)
+{
+    if (s_task) {
+        return ESP_OK;
+    }
+    /* Allocate at boot while internal heap still has a 12 KB hole. */
+    if (xTaskCreatePinnedToCore(ota_task_fn, "ota", 12288, NULL, 5, &s_task, 1) != pdPASS) {
+        ESP_LOGE(TAG, "OTA task create failed at boot");
+        s_task = NULL;
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+void ota_update_kick(ota_policy_t policy)
+{
+    s_kick_policy = policy;
+    if (!s_task) {
+        ESP_LOGW(TAG, "OTA task missing — cannot kick");
+        return;
+    }
+    xTaskNotifyGive(s_task);
 }

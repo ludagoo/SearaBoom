@@ -267,11 +267,9 @@ static void handle_line(char *line)
             printf("OTA already running\n");
             return;
         }
-        printf("OTA force check...\n");
+        printf("OTA force check queued\n");
         ESP_LOGW(TAG, "Serial-triggered OTA (dev policy)");
-        /* Run here — this task already has a 12 KB stack. Spawning another
-         * after the radio is up fails: no 12 KB internal block left. */
-        ota_update_check(OTA_POLICY_DEV);
+        ota_update_kick(OTA_POLICY_DEV);
         return;
     }
 
@@ -319,7 +317,8 @@ static void serial_task(void *arg)
 
 esp_err_t serial_cmd_init(void)
 {
-    if (xTaskCreatePinnedToCore(serial_task, "serial_cmd", 12288, NULL, 5, NULL, 0) != pdPASS) {
+    /* Internal: logtest TLS and NVS saves disable the flash cache. */
+    if (xTaskCreatePinnedToCore(serial_task, "serial_cmd", 8192, NULL, 5, NULL, 0) != pdPASS) {
         return ESP_FAIL;
     }
     return ESP_OK;

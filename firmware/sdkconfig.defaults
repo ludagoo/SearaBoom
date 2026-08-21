@@ -43,7 +43,8 @@ CONFIG_FREERTOS_HZ=1000
 CONFIG_I2S_ISR_IRAM_SAFE=y
 CONFIG_SPI_FLASH_ERASE_YIELD_DURATION_MS=5
 CONFIG_FREERTOS_ENABLE_BACKWARD_COMPATIBILITY=y
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+# Poll loop is tiny; 16 KB was leftover headroom that radio later needed.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
 # WS2812 / RMT
 CONFIG_SOC_RMT_SUPPORTED=y
@@ -56,7 +57,7 @@ CONFIG_SEARABOOM_OTA_URL="https://searaboom.goossen.dev"
 # Prefer public HTTPS so AP client-isolation / dual-NIC LAN routing cannot block logs.
 # TLS runs after stream is up; mbedtls uses PSRAM (EXTERNAL_MEM_ALLOC).
 CONFIG_SEARABOOM_LOG_URL="https://searaboom.goossen.dev"
-CONFIG_SEARABOOM_FW_VERSION="0.5.2"
+CONFIG_SEARABOOM_FW_VERSION="0.5.4"
 
 # Default INFO; audio path stays INFO so USB-serial does not starve I2S.
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y

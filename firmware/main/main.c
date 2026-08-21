@@ -209,20 +209,6 @@ static bool wifi_connect_or_setup(void)
     return (bits & WIFI_OK_BIT) != 0;
 }
 
-static TaskHandle_t s_ota_task;
-
-static void ota_task_fn(void *arg)
-{
-    (void)arg;
-    /* Wait until the stream is settled. Stack is allocated at boot while
-     * internal heap still has a 12 KB hole — after radio is up it does not.
-     * Must stay in internal RAM: OTA flash writes abort if the stack is PSRAM. */
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    ota_update_check_on_boot();
-    s_ota_task = NULL;
-    vTaskDelete(NULL);
-}
-
 void app_main(void)
 {
     /* sdkconfig on this host has DEBUG; mix/nvs/wifi spam starves I2S and HTTP. */
@@ -243,9 +229,8 @@ void app_main(void)
 
     config_store_load(&s_cfg);
     serial_cmd_init();
-    if (xTaskCreatePinnedToCore(ota_task_fn, "ota", 12288, NULL, 5, &s_ota_task, 1) != pdPASS) {
+    if (ota_update_start_task() != ESP_OK) {
         ESP_LOGE(TAG, "OTA task create failed at boot");
-        s_ota_task = NULL;
     }
     clip_player_init(s_cfg.volume);
     /* Touch element FSM before I2S/AAC. Starting pads at go-live used to buzz. */
@@ -330,11 +315,7 @@ void app_main(void)
         int64_t now = esp_timer_get_time() / 1000;
         if (!ota_started && (now - live_at_ms) > 15000 && radio_player_has_music_info()) {
             ESP_LOGI(TAG, "WiFi OK, checking OTA after stream");
-            if (s_ota_task) {
-                xTaskNotifyGive(s_ota_task);
-            } else {
-                ESP_LOGW(TAG, "OTA task missing — skipping boot check");
-            }
+            ota_update_kick(OTA_POLICY_STABLE);
             ota_started = true;
         }
         vTaskDelay(pdMS_TO_TICKS(20));

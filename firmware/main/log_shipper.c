@@ -818,6 +818,7 @@ esp_err_t log_shipper_init(void)
     mount_spiffs();
     flash_refresh_size();
 
+    /* Internal stack: HTTPS + SPIFFS disable the flash cache. */
     if (xTaskCreatePinnedToCore(shipper_task, "log_ship", 12288, NULL, 3, NULL, 1) != pdPASS) {
         ESP_LOGW(TAG, "log shipper task failed");
         return ESP_FAIL;
