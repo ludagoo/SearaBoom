@@ -31,6 +31,8 @@ typedef struct {
     char ssid[33];
     char password[65];
     char url_key[8]; /* "URL1" or "URL2" */
+    char name[41];   /* owner name from setup form */
+    char city[41];   /* owner city from setup form */
     int volume;
 } sb_config_t;
 

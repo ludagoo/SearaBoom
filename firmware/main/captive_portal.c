@@ -10,6 +10,7 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
+#include "esp_system.h"
 #include "esp_http_server.h"
 #include "esp_spiffs.h"
 #include "lwip/sockets.h"
@@ -30,7 +31,6 @@ static bool s_page_said;
 static bool s_need_page;
 static volatile bool s_saving;
 static bool s_saved_said;
-static bool s_radio_live;
 static volatile bool s_dns_run = true;
 static int64_t s_sta_empty_at;
 static sb_clip_id_t s_last_clip = SB_CLIP_COUNT;
@@ -76,6 +76,8 @@ static const char *s_css =
     ".bubble{background:#004d54;border-radius:14px 14px 14px 4px;padding:12px 14px;margin:0 0 14px;"
     "font-size:.95em;line-height:1.45;-webkit-user-select:all;user-select:all}"
     ".note{text-align:center;color:#006c7a;font-size:.85em;margin-top:6px;line-height:1.4}";
+
+static void html_escape(const char *in, char *out, size_t outsz);
 
 static void send_html_open(httpd_req_t *req, const char *body_class)
 {
@@ -305,12 +307,30 @@ static esp_err_t root_get(httpd_req_t *req)
     if (s_saving) {
         return send_success_page(req);
     }
+    sb_config_t cfg;
+    config_store_load(&cfg);
+    char name_esc[256];
+    char city_esc[256];
+    html_escape(cfg.name, name_esc, sizeof(name_esc));
+    html_escape(cfg.city, city_esc, sizeof(city_esc));
+
     const char *html1 =
         "<article>"
         "<form action=\"/\" method=\"POST\" autocomplete=\"off\"><h1>"
         "<img src=\"background.png\" width=\"220\" height=\"121\" alt=\"SearaBoom\"></h1>"
         "<iframe name=\"sbclip\" style=\"position:absolute;width:0;height:0;border:0\"></iframe>"
-        "<div class=\"box\"><p class=\"ttl\"><a href=\"/clip/station\" target=\"sbclip\" tabindex=\"-1\">Escolha a sintonia</a></p>"
+        "<div class=\"box\">"
+        "<label for=\"NAME\">Nome:</label>"
+        "<input name=\"name\" id=\"NAME\" type=\"text\" maxlength=\"40\" placeholder=\"Seu nome\""
+        " tabindex=\"-1\" autocomplete=\"off\" autocorrect=\"off\" autocapitalize=\"words\" spellcheck=\"false\""
+        " value=\"";
+    const char *html_city =
+        "\"><label for=\"CITY\">Cidade:</label>"
+        "<input name=\"city\" id=\"CITY\" type=\"text\" maxlength=\"40\" placeholder=\"Sua cidade\""
+        " tabindex=\"-1\" autocomplete=\"off\" autocorrect=\"off\" autocapitalize=\"words\" spellcheck=\"false\""
+        " value=\"";
+    const char *html_station =
+        "\"><p class=\"ttl\"><a href=\"/clip/station\" target=\"sbclip\" tabindex=\"-1\">Escolha a sintonia</a></p>"
         "<select name=\"url\" id=\"URL\" tabindex=\"-1\" "
         "onclick=\"new Image().src='/clip/station?t='+Date.now()\" "
         "onchange=\"new Image().src='/clip/station?t='+Date.now()\">"
@@ -318,7 +338,7 @@ static esp_err_t root_get(httpd_req_t *req)
         "<option value=\"URL2\">Ibiapina (FM 104.7)</option>"
         "</select></div>"
         "<div class=\"box\"><p class=\"ttl\">Configurações do WiFi</p>"
-        "<label for=\"SSID\"><a href=\"/clip/wifi\" target=\"sbclip\" tabindex=\"-1\">Nome:</a></label>"
+        "<label for=\"SSID\"><a href=\"/clip/wifi\" target=\"sbclip\" tabindex=\"-1\">Rede:</a></label>"
         "<select name=\"ssid\" id=\"SSID\" tabindex=\"-1\" "
         "onclick=\"new Image().src='/clip/wifi?t='+Date.now()\" "
         "onchange=\"new Image().src='/clip/wifi?t='+Date.now()\">";
@@ -348,6 +368,10 @@ static esp_err_t root_get(httpd_req_t *req)
     ESP_LOGI(TAG, "HTTP GET %s", req->uri);
     send_html_open(req, NULL);
     httpd_resp_sendstr_chunk(req, html1);
+    httpd_resp_sendstr_chunk(req, name_esc);
+    httpd_resp_sendstr_chunk(req, html_city);
+    httpd_resp_sendstr_chunk(req, city_esc);
+    httpd_resp_sendstr_chunk(req, html_station);
     httpd_resp_sendstr_chunk(req, s_ssid_options);
     httpd_resp_sendstr_chunk(req, html2);
     httpd_resp_sendstr_chunk(req, NULL);
@@ -384,6 +408,45 @@ static esp_err_t clip_get(httpd_req_t *req)
     return ESP_OK;
 }
 
+static void html_escape(const char *in, char *out, size_t outsz)
+{
+    size_t o = 0;
+    if (!out || outsz == 0) {
+        return;
+    }
+    out[0] = 0;
+    if (!in) {
+        return;
+    }
+    for (; *in && o + 1 < outsz; in++) {
+        const char *rep = NULL;
+        switch (*in) {
+        case '&':
+            rep = "&amp;";
+            break;
+        case '"':
+            rep = "&quot;";
+            break;
+        case '<':
+            rep = "&lt;";
+            break;
+        case '>':
+            rep = "&gt;";
+            break;
+        default:
+            out[o++] = *in;
+            continue;
+        }
+        size_t n = strlen(rep);
+        if (o + n >= outsz) {
+            break;
+        }
+        memcpy(out + o, rep, n);
+        o += n;
+    }
+    out[o] = 0;
+}
+
 static void url_decode_inplace(char *s)
 {
     char *src = s, *dst = s;
@@ -404,7 +467,7 @@ static void url_decode_inplace(char *s)
 
 static esp_err_t root_post(httpd_req_t *req)
 {
-    char buf[512];
+    char buf[768];
     int total = req->content_len;
     if (total >= (int)sizeof(buf)) {
         total = sizeof(buf) - 1;
@@ -429,10 +492,19 @@ static esp_err_t root_post(httpd_req_t *req)
         url_decode_inplace(val);
         if (strcmp(tok, "ssid") == 0) {
             strncpy(cfg.ssid, val, sizeof(cfg.ssid) - 1);
+            cfg.ssid[sizeof(cfg.ssid) - 1] = 0;
         } else if (strcmp(tok, "pass") == 0) {
             strncpy(cfg.password, val, sizeof(cfg.password) - 1);
+            cfg.password[sizeof(cfg.password) - 1] = 0;
         } else if (strcmp(tok, "url") == 0) {
             strncpy(cfg.url_key, val, sizeof(cfg.url_key) - 1);
+            cfg.url_key[sizeof(cfg.url_key) - 1] = 0;
+        } else if (strcmp(tok, "name") == 0) {
+            strncpy(cfg.name, val, sizeof(cfg.name) - 1);
+            cfg.name[sizeof(cfg.name) - 1] = 0;
+        } else if (strcmp(tok, "city") == 0) {
+            strncpy(cfg.city, val, sizeof(cfg.city) - 1);
+            cfg.city[sizeof(cfg.city) - 1] = 0;
         }
     }
 
@@ -455,35 +527,6 @@ static esp_err_t captive_redirect(httpd_req_t *req)
     httpd_resp_set_hdr(req, "Location", "http://4.3.2.1/");
     httpd_resp_send(req, NULL, 0);
     return ESP_OK;
-}
-
-static void join_home_wifi(void)
-{
-    sb_config_t cfg;
-    config_store_load(&cfg);
-    esp_err_t err = wifi_sta_join(&cfg);
-    ESP_LOGI(TAG, "STA join %s: %s", cfg.ssid, esp_err_to_name(err));
-}
-
-static void start_radio_now(void)
-{
-    sb_config_t cfg;
-    config_store_load(&cfg);
-    const char *url = config_store_stream_url(&cfg);
-    sb_clip_id_t tune = (strncmp(cfg.url_key, "URL2", 4) == 0)
-        ? SB_CLIP_TUNE_104 : SB_CLIP_TUNE_102;
-    ESP_LOGI(TAG, "Portal prefetch %s vol=%d", url, cfg.volume);
-    if (radio_player_prefetch(url, cfg.volume) != ESP_OK) {
-        ESP_LOGE(TAG, "Radio prefetch failed");
-        return;
-    }
-    clip_player_play_wait(tune, 15000);
-    if (radio_player_go_live() != ESP_OK) {
-        ESP_LOGE(TAG, "Radio go_live failed");
-        return;
-    }
-    led_status_set(SB_LED_GREEN, 500);
-    s_radio_live = true;
 }
 
 static void portal_teardown(void)
@@ -604,15 +647,19 @@ void captive_portal_run(void)
     ESP_LOGI(TAG, "AP %s up at http://4.3.2.1/", SB_AP_SSID);
     clip_player_loop(SB_CLIP_AP_WELCOME);
 
-    esp_vfs_spiffs_conf_t spiffs = {
-        .base_path = "/spiffs",
-        .partition_label = "storage",
-        .max_files = 5,
-        .format_if_mount_failed = true,
-    };
-    esp_err_t spiffs_err = esp_vfs_spiffs_register(&spiffs);
-    if (spiffs_err != ESP_OK) {
-        ESP_LOGE(TAG, "SPIFFS mount failed: %s", esp_err_to_name(spiffs_err));
+    if (esp_spiffs_mounted("storage")) {
+        ESP_LOGI(TAG, "SPIFFS already mounted");
+    } else {
+        esp_vfs_spiffs_conf_t spiffs = {
+            .base_path = "/spiffs",
+            .partition_label = "storage",
+            .max_files = 5,
+            .format_if_mount_failed = true,
+        };
+        esp_err_t spiffs_err = esp_vfs_spiffs_register(&spiffs);
+        if (spiffs_err != ESP_OK) {
+            ESP_LOGE(TAG, "SPIFFS mount failed: %s", esp_err_to_name(spiffs_err));
+        }
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -644,14 +691,13 @@ void captive_portal_run(void)
     led_status_set(SB_LED_BLUE, 500);
     while (true) {
         if (s_saving && !s_saved_said) {
-            clip_player_stop();
-            clip_player_play(SB_CLIP_AP_SAVED, false);
             s_saved_said = true;
-            join_home_wifi();
-        }
-        if (s_saving && s_saved_said && !s_radio_live && wifi_sta_got_ip()
-            && !clip_player_is_active()) {
-            start_radio_now();
+            clip_player_stop();
+            ESP_LOGI(TAG, "Saved — confirmation clip then reboot");
+            clip_player_play_wait(SB_CLIP_AP_SAVED, 12000);
+            portal_teardown();
+            vTaskDelay(pdMS_TO_TICKS(300));
+            esp_restart();
         }
         if (s_sta_empty_at
             && (esp_timer_get_time() - s_sta_empty_at) >= 3000 * 1000LL) {
@@ -660,12 +706,7 @@ void captive_portal_run(void)
             s_sta_empty_at = 0;
             if (list.num == 0) {
                 if (s_saving) {
-                    if (s_radio_live || wifi_sta_got_ip()) {
-                        ESP_LOGI(TAG, "STA gone after save, dropping AP");
-                        portal_teardown();
-                        return;
-                    }
-                    ESP_LOGW(TAG, "STA gone, no home Wi-Fi yet — restart into setup");
+                    ESP_LOGI(TAG, "STA gone after save — reboot");
                     esp_restart();
                 }
                 s_page_said = false;

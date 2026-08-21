@@ -14,6 +14,8 @@ server/firmware/factory/
 server/firmware/factory-next/
 .env
 *.log
+server/logs/*
+!server/logs/.gitignore
 docs/dev-cam-*.jpg
 *.swp
 .DS_Store

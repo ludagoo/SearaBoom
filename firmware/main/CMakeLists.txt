@@ -12,6 +12,7 @@ idf_component_register(
         "adts_util.c"
         "ota_update.c"
         "log_shipper.c"
+        "listen_stats.c"
         "serial_cmd.c"
     INCLUDE_DIRS "."
     REQUIRES

@@ -17,6 +17,8 @@
 #include "config_store.h"
 #include "clip_player.h"
 #include "radio_player.h"
+#include "log_shipper.h"
+#include "listen_stats.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "serial_cmd";
@@ -75,6 +77,47 @@ static void handle_line(char *line)
         esp_http_client_cleanup(client);
         return;
     }
+    if (strcasecmp(line, "logstat") == 0) {
+        log_shipper_logstat();
+        return;
+    }
+    if (strcasecmp(line, "listen") == 0) {
+        printf("listen_s=%u session_s=%u playing=%d\n",
+               (unsigned)listen_stats_listen_s(),
+               (unsigned)listen_stats_session_s(),
+               listen_stats_playing() ? 1 : 0);
+        return;
+    }
+    if (strncasecmp(line, "name", 4) == 0 && (line[4] == 0 || line[4] == ' ')) {
+        sb_config_t cfg;
+        config_store_load(&cfg);
+        const char *arg = line + 4;
+        while (*arg == ' ') {
+            arg++;
+        }
+        if (*arg) {
+            strncpy(cfg.name, arg, sizeof(cfg.name) - 1);
+            cfg.name[sizeof(cfg.name) - 1] = 0;
+            config_store_save(&cfg);
+        }
+        printf("name=%s city=%s\n", cfg.name[0] ? cfg.name : "-", cfg.city[0] ? cfg.city : "-");
+        return;
+    }
+    if (strncasecmp(line, "city", 4) == 0 && (line[4] == 0 || line[4] == ' ')) {
+        sb_config_t cfg;
+        config_store_load(&cfg);
+        const char *arg = line + 4;
+        while (*arg == ' ') {
+            arg++;
+        }
+        if (*arg) {
+            strncpy(cfg.city, arg, sizeof(cfg.city) - 1);
+            cfg.city[sizeof(cfg.city) - 1] = 0;
+            config_store_save(&cfg);
+        }
+        printf("name=%s city=%s\n", cfg.name[0] ? cfg.name : "-", cfg.city[0] ? cfg.city : "-");
+        return;
+    }
     if (strcasecmp(line, "heap") == 0) {
         printf("heap free=%u min_free=%u\n",
                (unsigned)esp_get_free_heap_size(),
@@ -88,10 +131,14 @@ static void handle_line(char *line)
         return;
     }
     if (strcasecmp(line, "help") == 0 || strcmp(line, "?") == 0) {
-        printf("commands: help | ver | ota | heap | logtest | reboot | wifi wipe | wifi weak | vol [n] | clip <name>|stop | audiotest\n");
+        printf("commands: help | ver | ota | heap | logtest | logstat | listen | reboot | wifi wipe | wifi weak | vol [n] | name [x] | city [x] | clip <name>|stop | audiotest\n");
         printf("  ota        - force OTA now (applies any newer X.Y.Z including patch)\n");
         printf("  heap       - free internal / PSRAM (buffer headroom)\n");
         printf("  logtest    - probe log URL + OTA host connectivity\n");
+        printf("  logstat    - log shipper ring/flash/seq/http\n");
+        printf("  listen     - lifetime/session station PCM seconds and playing\n");
+        printf("  name [x]   - show or set owner name (portal Nome)\n");
+        printf("  city [x]   - show or set owner city (portal Cidade)\n");
         printf("  ver        - print firmware version\n");
         printf("  reboot     - restart\n");
         printf("  wifi wipe  - clear saved SSID/pass and reboot into setup AP\n");

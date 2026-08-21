@@ -18,5 +18,11 @@ for raw in sys.stdin:
         ev = json.loads(line[5:].strip())
     except Exception:
         continue
-    print(f"[{ev.get('device_id','?')}] {ev.get('line','')}", flush=True)
+    bits = [f"[{ev.get('device_id', '?')}]"]
+    if ev.get("server_ts"):
+        bits.append(str(ev["server_ts"]))
+    if ev.get("level"):
+        bits.append(str(ev["level"]))
+    bits.append(ev.get("line", ""))
+    print(" ".join(bits), flush=True)
 PY

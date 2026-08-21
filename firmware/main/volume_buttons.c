@@ -10,11 +10,21 @@ static const char *TAG = "volume_buttons";
 
 /* Fraction of idle benchmark. Official S3 button example uses 0.1. */
 #define SB_TOUCH_SENS 0.1f
+#define SB_CHORD_COMMIT_MS 800
+#define SB_CHORD_SPAN_MS 4000
+#define SB_CHORD_WIPE 4
 
 static volume_btn_cb_t s_cb;
+static volume_gesture_cb_t s_gesture;
 static void *s_ctx;
 static touch_button_handle_t s_btn[2];
-static int s_held;
+static bool s_up_down;
+static bool s_dn_down;
+static bool s_chord;
+static int s_vol_held;
+static int s_chord_count;
+static int64_t s_chord_first_ms;
+static int64_t s_chord_last_ms;
 static int64_t s_last_ms;
 static bool s_ready;
 
@@ -36,20 +46,76 @@ static void fire(int delta)
     s_cb(delta, s_ctx);
 }
 
-static void on_button_event(int delta, touch_button_event_t ev)
+static bool both_down(void)
 {
-    if (ev == TOUCH_BUTTON_EVT_ON_PRESS) {
-        if (s_held != 0) {
-            return;
-        }
-        s_held = delta;
-        ESP_LOGI(TAG, "vol%c press", delta > 0 ? '+' : '-');
-        fire(delta);
+    return s_up_down && s_dn_down;
+}
+
+static bool both_up(void)
+{
+    return !s_up_down && !s_dn_down;
+}
+
+static void chord_reset(void)
+{
+    s_chord_count = 0;
+    s_chord_first_ms = 0;
+    s_chord_last_ms = 0;
+}
+
+static void chord_commit(void)
+{
+    int n = s_chord_count;
+    chord_reset();
+    if (n < 2 || !s_gesture) {
         return;
     }
-    if (ev == TOUCH_BUTTON_EVT_ON_RELEASE && s_held == delta) {
-        s_held = 0;
+    if (n > SB_CHORD_WIPE) {
+        n = SB_CHORD_WIPE;
+    }
+    ESP_LOGI(TAG, "pad chord taps=%d", n);
+    s_gesture(n, s_ctx);
+}
+
+static void on_chord_complete(int64_t now_ms)
+{
+    if (s_chord_count > 0 && s_chord_first_ms
+        && (now_ms - s_chord_first_ms) >= SB_CHORD_SPAN_MS) {
+        chord_commit();
+    }
+    if (s_chord_count == 0) {
+        s_chord_first_ms = now_ms;
+    }
+    s_chord_count++;
+    s_chord_last_ms = now_ms;
+    if (s_chord_count >= SB_CHORD_WIPE) {
+        chord_commit();
+    }
+}
+
+static void on_button_event(int delta, touch_button_event_t ev)
+{
+    bool *pad = (delta > 0) ? &s_up_down : &s_dn_down;
+
+    if (ev == TOUCH_BUTTON_EVT_ON_PRESS) {
+        *pad = true;
+        ESP_LOGI(TAG, "vol%c press", delta > 0 ? '+' : '-');
+        if (both_down()) {
+            s_chord = true;
+            s_vol_held = 0;
+        }
+        return;
+    }
+    if (ev == TOUCH_BUTTON_EVT_ON_RELEASE) {
+        *pad = false;
         ESP_LOGI(TAG, "vol%c release", delta > 0 ? '+' : '-');
+        if (s_vol_held == delta) {
+            s_vol_held = 0;
+        }
+        if (s_chord && both_up()) {
+            s_chord = false;
+            on_chord_complete(esp_timer_get_time() / 1000);
+        }
     }
 }
 
@@ -72,7 +138,7 @@ static esp_err_t make_button(int gpio, int delta, touch_button_handle_t *out)
                                         (void *)(intptr_t)delta);
 }
 
-esp_err_t volume_buttons_init(volume_btn_cb_t cb, void *ctx)
+esp_err_t volume_buttons_init(volume_btn_cb_t cb, volume_gesture_cb_t gesture, void *ctx)
 {
     touch_elem_global_config_t global = TOUCH_ELEM_GLOBAL_DEFAULT_CONFIG();
     /* 20 ms timer instead of 10 ms — volume does not need the default rate. */
@@ -109,6 +175,7 @@ esp_err_t volume_buttons_init(volume_btn_cb_t cb, void *ctx)
     }
 
     s_cb = cb;
+    s_gesture = gesture;
     s_ctx = ctx;
     s_ready = true;
     ESP_LOGI(TAG, "Touch vol-up=T%d vol-down=T%d (touch_element)",
@@ -134,11 +201,34 @@ void volume_buttons_poll(void)
         }
     }
 
-    if (s_held == 0) {
+    int64_t now = esp_timer_get_time() / 1000;
+    if (s_chord_count > 0 && both_up() && !s_chord
+        && (now - s_chord_last_ms) >= SB_CHORD_COMMIT_MS) {
+        chord_commit();
+    }
+
+    /* Drain the queue first so a same-cycle overlap becomes a chord, not a
+     * volume tick. Stay silent until both pads are up after a chord. */
+    if (s_chord || both_down() || s_chord_count > 0) {
+        s_vol_held = 0;
         return;
     }
-    int64_t now = esp_timer_get_time() / 1000;
-    if ((now - s_last_ms) >= SB_DEBOUNCE_MS) {
-        fire(s_held);
+
+    int delta = 0;
+    if (s_up_down && !s_dn_down) {
+        delta = +1;
+    } else if (s_dn_down && !s_up_down) {
+        delta = -1;
+    }
+    if (delta == 0) {
+        s_vol_held = 0;
+        return;
+    }
+
+    if (s_vol_held != delta) {
+        s_vol_held = delta;
+        fire(delta);
+    } else if ((now - s_last_ms) >= SB_DEBOUNCE_MS) {
+        fire(delta);
     }
 }

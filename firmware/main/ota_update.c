@@ -143,9 +143,10 @@ esp_err_t ota_update_check(ota_policy_t policy)
 
     /* Version JSON is a small GET. Stopping the radio here made boot go
      * live, then silent, then start the stream again. Only pause the
-     * station if we are actually going to download firmware. */
+     * station if we are actually going to download firmware. Mark busy so
+     * the log shipper does not open a second TLS session during this GET. */
+    s_busy = true;
     led_status_set(SB_LED_YELLOW, 250);
-    log_shipper_set_paused(true);
 
     char check_url[256];
     snprintf(check_url, sizeof(check_url), "%s/api/firmware/check?current=%s",
@@ -172,7 +173,8 @@ esp_err_t ota_update_check(ota_policy_t policy)
         led_status_set(SB_LED_MAGENTA, 200);
         vTaskDelay(pdMS_TO_TICKS(1500));
         led_status_set(SB_LED_OFF, 0);
-        log_shipper_set_paused(false);
+        s_busy = false;
+        log_shipper_flush();
         radio_player_resume();
         return err == ESP_OK ? ESP_FAIL : err;
     }
@@ -181,7 +183,8 @@ esp_err_t ota_update_check(ota_policy_t policy)
     if (!root) {
         ESP_LOGW(TAG, "Bad OTA JSON");
         led_status_set(SB_LED_OFF, 0);
-        log_shipper_set_paused(false);
+        s_busy = false;
+        log_shipper_flush();
         radio_player_resume();
         return ESP_FAIL;
     }
@@ -203,7 +206,8 @@ esp_err_t ota_update_check(ota_policy_t policy)
         ESP_LOGI(TAG, "Firmware up to date (%s)", app->version);
         cJSON_Delete(root);
         led_status_set(SB_LED_OFF, 0);
-        log_shipper_set_paused(false);
+        s_busy = false;
+        log_shipper_flush();
         radio_player_resume();
         return ESP_OK;
     }
@@ -217,9 +221,13 @@ esp_err_t ota_update_check(ota_policy_t policy)
 
     ESP_LOGW(TAG, "OTA update available -> %s (%s) policy=%s", new_ver, fw_url, policy_name);
     led_status_set(SB_LED_YELLOW, 100);
-    s_busy = true;
+    s_busy = false;
+    log_shipper_flush();
     announce_update_found();
+    log_shipper_set_paused(true);
+    s_busy = true;
     esp_err_t ota_err = download_firmware(fw_url);
+    log_shipper_set_paused(false);
     s_busy = false;
     if (ota_err == ESP_OK) {
         announce_reboot(new_ver);
@@ -230,7 +238,7 @@ esp_err_t ota_update_check(ota_policy_t policy)
     led_status_set(SB_LED_MAGENTA, 150);
     vTaskDelay(pdMS_TO_TICKS(2000));
     led_status_set(SB_LED_OFF, 0);
-    log_shipper_set_paused(false);
+    log_shipper_flush();
     radio_player_resume();
     return ota_err;
 }

@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#052C31" />
+  <title>Ouvintes — SearaBoom</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+        crossorigin="" />
+  <style>
+    :root {
+      --bg: #052C31;
+      --panel: #007985;
+      --ink: #f4fbfb;
+      --muted: #9ec8ce;
+      --gold: #EC9F17;
+      --silent: #e6b422;
+      --off: #7a9aa0;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, "Segoe UI", Helvetica, Arial, sans-serif;
+      font-size: 13px;
+      line-height: 1.35;
+    }
+    a { color: var(--gold); }
+    .num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+
+    header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: .75rem 1.25rem;
+      padding: .7rem 1rem .65rem;
+      border-bottom: 1px solid rgba(255,255,255,.08);
+    }
+    header h1 {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 650;
+      letter-spacing: .01em;
+    }
+    .station-hours {
+      display: flex;
+      gap: 1.25rem;
+      margin-top: .28rem;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .station-hours b {
+      font-weight: 650;
+      color: var(--ink);
+      margin-right: .35rem;
+    }
+    .station-hours .live b { color: var(--gold); }
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .4rem;
+      justify-content: flex-end;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: .4rem;
+      padding: .22rem .55rem .22rem .4rem;
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 3px;
+      color: var(--muted);
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+    .chip i {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--off);
+      flex: 0 0 auto;
+    }
+    .chip.playing { color: var(--gold); border-color: rgba(236,159,23,.35); }
+    .chip.playing i { background: var(--gold); box-shadow: 0 0 0 0 rgba(236,159,23,.55); animation: pulse 1.6s infinite; }
+    .chip.silent { color: var(--silent); border-color: rgba(0,183,200,.35); }
+    .chip.silent i { background: var(--silent); }
+    .chip.off i { background: var(--off); }
+
+    .stage {
+      height: 44vh;
+      min-height: 280px;
+    }
+    #map {
+      width: 100%;
+      height: 100%;
+      min-width: 0;
+      background: #041f23;
+    }
+
+    .roster {
+      padding: .35rem 0 1.5rem;
+      border-top: 1px solid rgba(255,255,255,.08);
+    }
+    .roster-wrap { overflow-x: auto; }
+    .roster-table {
+      width: 100%;
+      min-width: 960px;
+      border-collapse: collapse;
+    }
+    .roster-table th {
+      text-align: left;
+      font-size: 10px;
+      font-weight: 650;
+      letter-spacing: .07em;
+      text-transform: uppercase;
+      color: var(--muted);
+      padding: .5rem .7rem;
+      border-bottom: 1px solid rgba(255,255,255,.1);
+      white-space: nowrap;
+      cursor: pointer;
+      user-select: none;
+    }
+    .roster-table th:hover { color: var(--ink); }
+    .roster-table th[aria-sort] { color: var(--gold); }
+    .roster-table th .dir {
+      display: inline-block;
+      min-width: .7em;
+      margin-left: .2rem;
+      font-size: 9px;
+      opacity: .85;
+    }
+    .roster-table th.num, .roster-table td.num { text-align: right; }
+    .roster-table td {
+      padding: .48rem .7rem;
+      border-bottom: 1px solid rgba(255,255,255,.06);
+      vertical-align: middle;
+      white-space: nowrap;
+    }
+    .roster-table tbody tr { cursor: pointer; }
+    .roster-table tbody tr:hover { background: rgba(0,121,133,.22); }
+    .roster-table tbody tr.is-selected {
+      background: rgba(236,159,23,.08);
+      box-shadow: inset 3px 0 0 var(--gold);
+    }
+    .namecell .name { font-weight: 650; }
+    .namecell .mac {
+      color: var(--muted);
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+    }
+    .st {
+      display: inline-flex;
+      align-items: center;
+      gap: .4rem;
+      color: var(--off);
+      font-size: 12px;
+    }
+    .st i {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+      flex: 0 0 auto;
+    }
+    .st.playing { color: var(--gold); }
+    .st.playing i { animation: pulse 1.6s infinite; }
+    .st.silent { color: var(--silent); }
+    .muted { color: var(--muted); }
+    .flag-hot { color: var(--gold); font-weight: 650; }
+
+    .empty { color: var(--muted); padding: .8rem 1rem; }
+
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(236,159,23,.65); }
+      70% { box-shadow: 0 0 0 7px rgba(236,159,23,0); }
+      100% { box-shadow: 0 0 0 0 rgba(236,159,23,0); }
+    }
+    @keyframes pin-pulse {
+      0%, 100% { filter: drop-shadow(0 0 0 rgba(236,159,23,0)); }
+      50% { filter: drop-shadow(0 0 7px rgba(236,159,23,.95)); }
+    }
+    .pin-playing { animation: pin-pulse 1.6s ease-out infinite; }
+
+    .leaflet-container { background: #041f23; font-family: inherit; }
+    .leaflet-popup-content-wrapper {
+      background: #052C31;
+      color: #f4fbfb;
+      border-radius: 4px;
+      box-shadow: 0 4px 18px rgba(0,0,0,.35);
+    }
+    .leaflet-popup-tip { background: #052C31; }
+    .leaflet-popup-content { margin: .55rem .7rem; font-size: 12px; line-height: 1.45; }
+    .leaflet-popup-content strong { color: #EC9F17; }
+    .leaflet-control-attribution {
+      background: rgba(5, 44, 49, .85) !important;
+      color: #9ec8ce;
+    }
+    .leaflet-control-attribution a { color: #EC9F17; }
+
+    @media (max-width: 800px) {
+      header { flex-wrap: wrap; padding: .6rem .75rem; }
+      .chips { justify-content: flex-start; }
+      .stage {
+        height: 42vh;
+        min-height: 220px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Ouvintes</h1>
+      <div class="station-hours" id="station-hours">
+        <span><b>102.7</b> <span class="num">—</span></span>
+        <span><b>104.7</b> <span class="num">—</span></span>
+      </div>
+    </div>
+    <div class="chips" id="chips" role="status">
+      <span class="chip playing"><i></i> <span class="num">0</span> no ar</span>
+      <span class="chip off"><i></i> <span class="num">0</span> off</span>
+    </div>
+  </header>
+  <div class="stage">
+    <div id="map" role="img" aria-label="Mapa de ouvintes"></div>
+  </div>
+  <section class="roster" id="roster" aria-label="Lista de ouvintes">
+    <div class="roster-wrap">
+      <table class="roster-table">
+        <thead>
+          <tr>
+            <th data-sort="status">Status</th>
+            <th data-sort="name">Nome</th>
+            <th data-sort="city">Cidade</th>
+            <th data-sort="station">Rádio</th>
+            <th class="num" data-sort="listen_s">Total</th>
+            <th class="num" data-sort="listen_today_s">Hoje</th>
+            <th class="num" data-sort="last_session_s">Última</th>
+            <th class="num" data-sort="sessions_today">Sessões</th>
+            <th class="num" data-sort="rssi">RSSI</th>
+            <th data-sort="fw">FW</th>
+            <th data-sort="flag">Flag</th>
+          </tr>
+        </thead>
+        <tbody id="roster-body">
+          <tr><td colspan="11" class="empty">Carregando…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+          crossorigin=""></script>
+  <script>
+    const OSM_TILES = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
+    const OSM_ATTR = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>';
+    const map = L.map("map", { zoomControl: true }).setView([-5.2, -39.5], 7);
+    L.tileLayer(OSM_TILES, { maxZoom: 19, attribution: OSM_ATTR }).addTo(map);
+    const markers = L.layerGroup().addTo(map);
+    const markerByKey = new Map();
+    let fitted = false;
+    let selectedKey = null;
+    let byKey = new Map();
+    let sortKey = "status";
+    let sortDir = 1;
+    let lastData = null;
+
+    function esc(s) {
+      return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[c]));
+    }
+
+    function formatListen(sec) {
+      if (sec == null || sec === "") return "—";
+      const n = Number(sec);
+      if (!Number.isFinite(n)) return "—";
+      const s = Math.max(0, Math.floor(n));
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      if (h > 0) return h + "h " + m + "min";
+      if (m > 0) return m + " min";
+      if (s > 0) return "menos de 1 min";
+      return "0 min";
+    }
+
+    function formatAgo(iso) {
+      const t = Date.parse(iso);
+      if (!Number.isFinite(t)) return "";
+      const sec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+      if (sec < 60) return "há " + sec + " s";
+      const min = Math.floor(sec / 60);
+      if (min < 60) return "há " + min + " min";
+      const hr = Math.floor(min / 60);
+      if (hr < 24) return "há " + hr + " h";
+      return "há " + Math.floor(hr / 24) + " d";
+    }
+
+    function keyOf(l) {
+      return String(l.device_id || l.id || "");
+    }
+
+    function coordsOf(l) {
+      if (l.lat == null || l.lon == null) return null;
+      const lat = Number(l.lat), lon = Number(l.lon);
+      return Number.isFinite(lat) && Number.isFinite(lon) ? [lat, lon] : null;
+    }
+
+    function statusOf(l) {
+      const s = l && l.status;
+      if (s === "playing" || s === "silent" || s === "offline") return s;
+      if (l && l.playing) return "playing";
+      if (l && l.online === true) return "silent";
+      if (l && l.online === false) return "offline";
+      if (l && l.last_seen) {
+        const t = Date.parse(l.last_seen);
+        if (Number.isFinite(t) && (Date.now() - t) < 120000) return "silent";
+      }
+      return "offline";
+    }
+
+    function statusLabel(s) {
+      if (s === "playing") return "no ar";
+      if (s === "silent") return "sem áudio";
+      return "off";
+    }
+
+    function stationLabel(raw) {
+      const t = String(raw || "").trim();
+      if (!t) return "";
+      if (t === "URL1" || t === "102" || t.indexOf("102") !== -1) return "102.7";
+      if (t === "URL2" || t === "104" || t.indexOf("104") !== -1) return "104.7";
+      return t;
+    }
+
+    function shortMac(deviceId) {
+      const parts = String(deviceId || "").toLowerCase().split(":");
+      if (parts.length >= 2 && parts.every((p) => p.length)) return parts.slice(-2).join(":");
+      return "";
+    }
+
+    function identitySub(l) {
+      return shortMac(l.device_id) || (l.device_id ? "" : String(l.id || ""));
+    }
+
+    function formatRssi(v) {
+      if (v == null || v === "") return "—";
+      const n = Number(v);
+      if (!Number.isFinite(n)) return "—";
+      return (n < 0 ? "−" + Math.abs(n) : String(n)) + " dBm";
+    }
+
+    function formatFlag(l) {
+      const at = l.last_flag_at;
+      const seq = l.last_flag_seq;
+      if (at == null && seq == null && !l.flag_count) return { text: "—", hot: false };
+      const ago = at ? formatAgo(at) : "";
+      const seqBit = seq != null && seq !== "" ? "seq=" + seq : "";
+      const t = Date.parse(at);
+      const hot = Number.isFinite(t) && (Date.now() - t) < 15 * 60 * 1000;
+      if (hot) {
+        const parts = ["FLAG"];
+        if (seqBit) parts.push(seqBit);
+        if (ago) parts.push(ago);
+        return { text: parts.join(" · ").replace("FLAG · seq=", "FLAG seq="), hot: true };
+      }
+      if (seqBit && ago) return { text: seqBit + " · " + ago, hot: false };
+      if (seqBit) return { text: seqBit, hot: false };
+      if (ago) return { text: ago, hot: false };
+      return { text: "—", hot: false };
+    }
+
+    function sessionsCell(l) {
+      const today = l.sessions_today;
+      const total = l.sessions_total;
+      if (today == null && total == null) return "—";
+      const t = today == null ? "—" : String(today);
+      if (total == null) return esc(t);
+      return esc(t) + ' <span class="muted">/ ' + esc(String(total)) + "</span>";
+    }
+
+    function rank(s) {
+      return s === "playing" ? 0 : s === "silent" ? 1 : 2;
+    }
+
+    function sortValue(l, key) {
+      if (key === "status") return rank(statusOf(l));
+      if (key === "name") return String(l.name || "Ouvinte").toLocaleLowerCase("pt-BR");
+      if (key === "city") return String(l.city || "").toLocaleLowerCase("pt-BR");
+      if (key === "station") return stationLabel(l.station) || "";
+      if (key === "listen_s") return Number(l.listen_s) || 0;
+      if (key === "listen_today_s") return Number(l.listen_today_s) || 0;
+      if (key === "last_session_s") return Number(l.last_session_s != null ? l.last_session_s : l.session_s) || 0;
+      if (key === "sessions_today") return Number(l.sessions_today) || 0;
+      if (key === "rssi") return l.rssi == null || l.rssi === "" ? -999 : Number(l.rssi);
+      if (key === "fw") return String(l.fw || "");
+      if (key === "flag") {
+        const t = Date.parse(l.last_flag_at);
+        return Number.isFinite(t) ? t : 0;
+      }
+      return 0;
+    }
+
+    function cmp(a, b) {
+      const av = sortValue(a, sortKey);
+      const bv = sortValue(b, sortKey);
+      let d = 0;
+      if (typeof av === "number" && typeof bv === "number") d = av - bv;
+      else d = String(av).localeCompare(String(bv), "pt-BR", { numeric: true, sensitivity: "base" });
+      if (d) return d * sortDir;
+      const name = String(a.name || "").localeCompare(String(b.name || ""), "pt-BR");
+      if (name) return name;
+      return String(keyOf(a)).localeCompare(String(keyOf(b)));
+    }
+
+    function markSortHeaders() {
+      document.querySelectorAll(".roster-table th[data-sort]").forEach((th) => {
+        const on = th.getAttribute("data-sort") === sortKey;
+        th.setAttribute("aria-sort", on ? (sortDir > 0 ? "ascending" : "descending") : "none");
+        let dir = th.querySelector(".dir");
+        if (!dir) {
+          dir = document.createElement("span");
+          dir.className = "dir";
+          th.appendChild(dir);
+        }
+        dir.textContent = on ? (sortDir > 0 ? "▲" : "▼") : "";
+      });
+    }
+
+    function stationTotals(data, list) {
+      const out = {
+        "102.7": { listen_s: 0, playing: 0 },
+        "104.7": { listen_s: 0, playing: 0 }
+      };
+      const st = data && data.stations;
+      if (st && typeof st === "object") {
+        for (const k of Object.keys(out)) {
+          const row = st[k];
+          if (!row || typeof row !== "object") continue;
+          if (row.listen_s != null && Number.isFinite(Number(row.listen_s))) {
+            out[k].listen_s = Math.max(0, Math.floor(Number(row.listen_s)));
+          }
+          if (row.playing != null && Number.isFinite(Number(row.playing))) {
+            out[k].playing = Number(row.playing);
+          }
+        }
+        return out;
+      }
+      for (const l of list) {
+        const k = stationLabel(l.station);
+        if (!out[k]) continue;
+        out[k].listen_s += Math.max(0, Math.floor(Number(l.listen_s) || 0));
+        if (statusOf(l) === "playing") out[k].playing += 1;
+      }
+      return out;
+    }
+
+    function panTo(l) {
+      const xy = coordsOf(l);
+      if (!xy) return;
+      const z = map.getZoom();
+      map.setView(xy, z < 9 ? 11 : z);
+      const m = markerByKey.get(keyOf(l));
+      if (m) m.openPopup();
+    }
+
+    function selectKey(key, pan) {
+      selectedKey = key || null;
+      document.querySelectorAll(".is-selected").forEach((el) => el.classList.remove("is-selected"));
+      if (!selectedKey) return;
+      document.querySelectorAll('[data-key="' + CSS.escape(selectedKey) + '"]').forEach((el) => {
+        el.classList.add("is-selected");
+      });
+      if (pan) {
+        const l = byKey.get(selectedKey);
+        if (l) panTo(l);
+      }
+    }
+
+    function popupHtml(l) {
+      const st = statusOf(l);
+      const flag = formatFlag(l);
+      const city = l.city ? esc(l.city) : "";
+      const radio = stationLabel(l.station);
+      const lines = [
+        "<strong>" + esc(l.name || "Ouvinte") + "</strong>",
+        city,
+        [radio, statusLabel(st)].filter(Boolean).join(" · "),
+        "Total " + esc(formatListen(l.listen_s)) + " · Hoje " + esc(formatListen(l.listen_today_s)),
+        "RSSI " + esc(formatRssi(l.rssi)),
+        flag.text !== "—" ? esc(flag.text) : ""
+      ];
+      return lines.filter(Boolean).join("<br>");
+    }
+
+    function renderChips(nPlay, nSilent, nOff) {
+      const warn = nSilent > 0
+        ? '<span class="chip silent"><i></i> <span class="num">' + nSilent + "</span> sem áudio</span>"
+        : "";
+      document.getElementById("chips").innerHTML =
+        '<span class="chip playing"><i></i> <span class="num">' + nPlay + "</span> no ar</span>" +
+        warn +
+        '<span class="chip off"><i></i> <span class="num">' + nOff + "</span> off</span>";
+    }
+
+    function renderStations(totals) {
+      const el = document.getElementById("station-hours");
+      el.innerHTML = ["102.7", "104.7"].map((k) => {
+        const live = totals[k].playing > 0 ? " live" : "";
+        return '<span class="' + live.trim() + '"><b>' + k + "</b> <span class=\"num\">" +
+          esc(formatListen(totals[k].listen_s)) + "</span></span>";
+      }).join("");
+    }
+
+    function nameCell(l) {
+      const sub = identitySub(l);
+      const tip = l.device_id || l.id || "";
+      return (
+        '<div class="namecell" title="' + esc(tip) + '">' +
+          '<div class="name">' + esc(l.name || "Ouvinte") + "</div>" +
+          (sub ? '<div class="mac">' + esc(sub) + "</div>" : "") +
+        "</div>"
+      );
+    }
+
+    function renderTable(list) {
+      const body = document.getElementById("roster-body");
+      if (!list.length) {
+        body.innerHTML = '<tr><td colspan="11" class="empty">Nenhuma caixa ainda.</td></tr>';
+        return;
+      }
+      body.innerHTML = list.map((l) => {
+        const st = statusOf(l);
+        const flag = formatFlag(l);
+        const sel = keyOf(l) === selectedKey ? " is-selected" : "";
+        const radio = stationLabel(l.station) || "—";
+        return (
+          "<tr class=\"" + sel.trim() + "\" data-key=\"" + esc(keyOf(l)) + "\">" +
+            '<td><span class="st ' + st + '"><i></i> ' + statusLabel(st) + "</span></td>" +
+            "<td>" + nameCell(l) + "</td>" +
+            "<td>" + esc(l.city || "—") + "</td>" +
+            "<td>" + esc(radio) + "</td>" +
+            '<td class="num">' + esc(formatListen(l.listen_s)) + "</td>" +
+            '<td class="num">' + esc(formatListen(l.listen_today_s)) + "</td>" +
+            '<td class="num">' + esc(formatListen(l.last_session_s != null ? l.last_session_s : l.session_s)) + "</td>" +
+            '<td class="num">' + sessionsCell(l) + "</td>" +
+            '<td class="num">' + esc(formatRssi(l.rssi)) + "</td>" +
+            "<td>" + esc(l.fw || "—") + "</td>" +
+            '<td class="' + (flag.hot ? "flag-hot" : "muted") + '">' + esc(flag.text) + "</td>" +
+          "</tr>"
+        );
+      }).join("");
+    }
+
+    function renderMap(list) {
+      markers.clearLayers();
+      markerByKey.clear();
+      const pts = [];
+      for (const l of list) {
+        const st = statusOf(l);
+        if (st === "offline") continue;
+        const xy = coordsOf(l);
+        if (!xy) continue;
+        const playing = st === "playing";
+        const m = L.circleMarker(xy, {
+          radius: playing ? 10 : 7,
+          color: playing ? "#EC9F17" : "#00B7C8",
+          weight: playing ? 2 : 1,
+          fillColor: playing ? "#EC9F17" : "#00B7C8",
+          fillOpacity: playing ? 0.92 : 0.7,
+          opacity: playing ? 1 : 0.7,
+          className: playing ? "pin-playing" : "pin-silent"
+        }).bindPopup(popupHtml(l)).addTo(markers);
+        markerByKey.set(keyOf(l), m);
+        pts.push(xy);
+      }
+      if (pts.length && !fitted) {
+        fitted = true;
+        if (pts.length === 1) map.setView(pts[0], 11);
+        else map.fitBounds(pts, { padding: [36, 36], maxZoom: 12 });
+      }
+      if (selectedKey && markerByKey.has(selectedKey)) {
+        markerByKey.get(selectedKey).openPopup();
+      }
+    }
+
+    function render(data) {
+      if (!data || typeof data !== "object") return;
+      lastData = data;
+      const list = Array.isArray(data.listeners) ? data.listeners.slice() : [];
+      list.sort(cmp);
+      byKey = new Map(list.map((l) => [keyOf(l), l]));
+
+      let nPlay = 0, nSilent = 0, nOff = 0;
+      for (const l of list) {
+        const s = statusOf(l);
+        if (s === "playing") nPlay++;
+        else if (s === "silent") nSilent++;
+        else nOff++;
+      }
+      if (!list.length) {
+        if (Number.isFinite(Number(data.listening))) nPlay = Number(data.listening) || 0;
+        if (Number.isFinite(Number(data.silent))) nSilent = Number(data.silent) || 0;
+      }
+
+      renderChips(nPlay, nSilent, nOff);
+      renderStations(stationTotals(data, list));
+      markSortHeaders();
+      renderTable(list);
+      renderMap(list);
+      if (selectedKey) selectKey(selectedKey, false);
+      map.invalidateSize();
+    }
+
+    document.addEventListener("click", (ev) => {
+      const th = ev.target.closest("th[data-sort]");
+      if (th && th.closest(".roster-table")) {
+        const key = th.getAttribute("data-sort");
+        if (key === sortKey) sortDir = -sortDir;
+        else {
+          sortKey = key;
+          sortDir = (key === "name" || key === "city" || key === "station" || key === "fw" || key === "status") ? 1 : -1;
+        }
+        if (lastData) render(lastData);
+        else poll();
+        return;
+      }
+      const hit = ev.target.closest("tr[data-key]");
+      if (!hit || !document.body.contains(hit)) return;
+      if (!hit.closest(".roster")) return;
+      selectKey(hit.getAttribute("data-key"), true);
+    });
+
+    window.addEventListener("resize", () => map.invalidateSize());
+
+    async function poll() {
+      try {
+        const r = await fetch("/api/ouvintes", { cache: "no-store" });
+        if (!r.ok) return;
+        const data = await r.json();
+        if (data && data.ok === false) return;
+        render(data);
+      } catch (_) {}
+    }
+    poll();
+    setInterval(poll, 10000);
+  </script>
+</body>
+</html>

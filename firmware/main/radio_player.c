@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <string.h>
 #include <stdint.h>
 #include <math.h>
@@ -6,6 +7,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "radio_player.h"
+#include "listen_stats.h"
 #include "pcm_upmix.h"
 #include "audio_element.h"
 #include "audio_pipeline.h"
@@ -22,6 +24,8 @@
 #include "esp_http_client.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
+#include "esp_app_desc.h"
+#include "esp_mac.h"
 #include "esp_wifi.h"
 #include "ringbuf.h"
 
@@ -65,6 +69,29 @@ static const char *TAG = "radio_player";
 #define SB_PROBE_START_HI 10500
 #define SB_PROBE_END_LO 2000
 #define SB_PROBE_END_HI 4500
+
+/* Brasilstream stats group by exact User-Agent. Product + OS comment +
+ * STA MAC (no colons) so they can count SearaBoom and still split boxes. */
+static char s_stream_ua[64];
+
+static const char *stream_user_agent(void)
+{
+    if (s_stream_ua[0]) {
+        return s_stream_ua;
+    }
+    uint8_t mac[6];
+    char ver[16] = "0";
+    const esp_app_desc_t *app = esp_app_get_description();
+    if (app && app->version[0]) {
+        strncpy(ver, app->version, sizeof(ver) - 1);
+        ver[sizeof(ver) - 1] = '\0';
+    }
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(s_stream_ua, sizeof(s_stream_ua),
+             "SearaBoom/%s (SearaBoom; %02x%02x%02x%02x%02x%02x)",
+             ver, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return s_stream_ua;
+}
 
 static audio_pipeline_handle_t s_mix_pipe;
 static audio_pipeline_handle_t s_radio_pipe;
@@ -318,7 +345,11 @@ bool radio_player_pcm_heard(void)
 
 bool radio_player_pcm_flowing(void)
 {
-    return s_pcm_flowing;
+    if (!s_pcm_flowing) {
+        return false;
+    }
+    /* Mixer tap stamps this; treat as stalled if PCM has not moved recently. */
+    return (esp_timer_get_time() / 1000 - s_last_pcm_ms) < 500;
 }
 
 int radio_player_pcm_peak(void)
@@ -416,7 +447,7 @@ static int http_stream_event(http_stream_event_msg_t *msg)
     if (msg->event_id == HTTP_STREAM_PRE_REQUEST) {
         esp_http_client_handle_t client = (esp_http_client_handle_t)msg->http_client;
         esp_http_client_set_header(client, "Icy-MetaData", "0");
-        esp_http_client_set_header(client, "User-Agent", "SearaBoom/1.0");
+        esp_http_client_set_header(client, "User-Agent", stream_user_agent());
     }
     if (msg->event_id == HTTP_STREAM_POST_REQUEST
         || msg->event_id == HTTP_STREAM_ON_RESPONSE
@@ -720,7 +751,8 @@ static esp_err_t ensure_radio(const char *url, int volume, bool hold)
     http_cfg.enable_playlist_parser = false;
     http_cfg.crt_bundle_attach = esp_crt_bundle_attach;
     http_cfg.event_handle = http_stream_event;
-    http_cfg.user_agent = "SearaBoom/1.0";
+    http_cfg.user_agent = stream_user_agent();
+    ESP_LOGI(TAG, "stream UA %s", http_cfg.user_agent);
     http_cfg.out_rb_size = SB_HTTP_RB_SIZE;
     http_cfg.task_stack = 5 * 1024;
     http_cfg.task_core = 1;
@@ -1124,6 +1156,7 @@ bool radio_player_wifi_weak_should_speak(void)
 
 void radio_player_loop(void)
 {
+    listen_stats_poll();
     if (s_want_stop) {
         radio_player_stop();
         return;

@@ -4,6 +4,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "config_store.h"
+#include "listen_stats.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "config_store";
@@ -13,6 +14,31 @@ static const char *NVS_NS = "searaboom";
 static int s_def_vol;
 static bool s_def_dirty;
 static int64_t s_def_at_ms;
+
+static void sanitize_ident(char *s, size_t cap)
+{
+    if (!s || cap == 0) {
+        return;
+    }
+    char tmp[41];
+    size_t o = 0;
+    const char *p = s;
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+    for (; *p && o + 1 < sizeof(tmp) && o + 1 < cap; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x20 || c == 0x7f || c == '"' || c == '\\' || c == '<' || c == '>') {
+            continue;
+        }
+        tmp[o++] = (char)c;
+    }
+    while (o > 0 && tmp[o - 1] == ' ') {
+        o--;
+    }
+    tmp[o] = 0;
+    memcpy(s, tmp, o + 1);
+}
 
 esp_err_t config_store_init(void)
 {
@@ -30,6 +56,8 @@ esp_err_t config_store_load(sb_config_t *cfg)
     strncpy(cfg->ssid, CONFIG_SEARABOOM_WIFI_SSID, sizeof(cfg->ssid) - 1);
     strncpy(cfg->password, CONFIG_SEARABOOM_WIFI_PASSWORD, sizeof(cfg->password) - 1);
     strncpy(cfg->url_key, "URL1", sizeof(cfg->url_key) - 1);
+    cfg->name[0] = 0;
+    cfg->city[0] = 0;
     cfg->volume = SB_DEFAULT_VOLUME;
 
     nvs_handle_t h;
@@ -57,6 +85,16 @@ esp_err_t config_store_load(sb_config_t *cfg)
     if (nvs_get_str(h, "url", cfg->url_key, &len) != ESP_OK) {
         strncpy(cfg->url_key, "URL1", sizeof(cfg->url_key) - 1);
     }
+    len = sizeof(cfg->name);
+    if (nvs_get_str(h, "name", cfg->name, &len) != ESP_OK) {
+        cfg->name[0] = 0;
+    }
+    sanitize_ident(cfg->name, sizeof(cfg->name));
+    len = sizeof(cfg->city);
+    if (nvs_get_str(h, "city", cfg->city, &len) != ESP_OK) {
+        cfg->city[0] = 0;
+    }
+    sanitize_ident(cfg->city, sizeof(cfg->city));
     int32_t vol = SB_DEFAULT_VOLUME;
     bool had_volume = (nvs_get_i32(h, "volume", &vol) == ESP_OK);
     if (had_volume) {
@@ -108,7 +146,9 @@ esp_err_t config_store_load(sb_config_t *cfg)
         }
     }
 
-    ESP_LOGI(TAG, "Loaded ssid=%s url=%s vol=%d", cfg->ssid, cfg->url_key, cfg->volume);
+    ESP_LOGI(TAG, "Loaded ssid=%s url=%s vol=%d name=%s city=%s",
+             cfg->ssid, cfg->url_key, cfg->volume,
+             cfg->name[0] ? cfg->name : "-", cfg->city[0] ? cfg->city : "-");
     return ESP_OK;
 }
 
@@ -188,12 +228,26 @@ esp_err_t config_store_save(const sb_config_t *cfg)
     ESP_ERROR_CHECK(nvs_set_str(h, "ssid", cfg->ssid));
     ESP_ERROR_CHECK(nvs_set_str(h, "pass", cfg->password));
     ESP_ERROR_CHECK(nvs_set_str(h, "url", cfg->url_key));
+    {
+        char name[sizeof(cfg->name)];
+        char city[sizeof(cfg->city)];
+        strncpy(name, cfg->name, sizeof(name) - 1);
+        name[sizeof(name) - 1] = 0;
+        strncpy(city, cfg->city, sizeof(city) - 1);
+        city[sizeof(city) - 1] = 0;
+        sanitize_ident(name, sizeof(name));
+        sanitize_ident(city, sizeof(city));
+        ESP_ERROR_CHECK(nvs_set_str(h, "name", name));
+        ESP_ERROR_CHECK(nvs_set_str(h, "city", city));
+    }
     ESP_ERROR_CHECK(nvs_set_i32(h, "volume", cfg->volume));
     /* Keep curve marker so boot does not remigrate a user-chosen level. */
     ESP_ERROR_CHECK(nvs_set_i32(h, "vol_curve", 2));
     ESP_ERROR_CHECK(nvs_commit(h));
     nvs_close(h);
-    ESP_LOGI(TAG, "Saved config (vol=%d)", cfg->volume);
+    listen_stats_persist();
+    ESP_LOGI(TAG, "Saved config vol=%d name=%s city=%s", cfg->volume,
+             cfg->name[0] ? cfg->name : "-", cfg->city[0] ? cfg->city : "-");
     return ESP_OK;
 }
 

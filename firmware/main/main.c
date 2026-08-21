@@ -7,6 +7,7 @@
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_app_desc.h"
+#include "esp_system.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
 
@@ -28,6 +29,9 @@ static volatile bool s_sta_retry = true;
 static volatile bool s_sta_got_ip;
 #define WIFI_OK_BIT BIT0
 
+static volatile int s_pad_taps;
+static unsigned s_flag_seq;
+
 static void volume_cb(int delta, void *ctx)
 {
     (void)ctx;
@@ -47,6 +51,56 @@ static void volume_cb(int delta, void *ctx)
     s_cfg.volume = v;
     config_store_save_volume_deferred(v);
     radio_player_beep();
+}
+
+static void pad_gesture_cb(int taps, void *ctx)
+{
+    (void)ctx;
+    s_pad_taps = taps;
+}
+
+static void handle_pad_gesture(int taps)
+{
+    if (taps == 2) {
+        config_store_load(&s_cfg);
+        config_store_absorb_deferred_volume(&s_cfg);
+        bool was2 = strncmp(s_cfg.url_key, "URL2", 4) == 0;
+        strncpy(s_cfg.url_key, was2 ? "URL1" : "URL2", sizeof(s_cfg.url_key) - 1);
+        s_cfg.url_key[sizeof(s_cfg.url_key) - 1] = 0;
+        config_store_save(&s_cfg);
+        const char *url = config_store_stream_url(&s_cfg);
+        sb_clip_id_t tune = was2 ? SB_CLIP_TUNE_102 : SB_CLIP_TUNE_104;
+        ESP_LOGI(TAG, "Station switch -> %s %s", s_cfg.url_key, url);
+        /* Same as boot: prefetch while the mixer plays the ident, then go
+         * live. Starting the stream live during the clip fills the radio
+         * PCM rb with nobody reading it; HTTP/AAC stall and never recover. */
+        radio_player_stop();
+        if (radio_player_prefetch(url, s_cfg.volume) != ESP_OK) {
+            ESP_LOGE(TAG, "Station switch prefetch failed");
+        }
+        clip_player_play_wait(tune, 15000);
+        if (radio_player_go_live() != ESP_OK) {
+            ESP_LOGE(TAG, "Station switch go_live failed");
+        }
+        return;
+    }
+    if (taps == 3) {
+        s_flag_seq++;
+        ESP_LOGW(TAG, "USER_FLAG seq=%u uptime_ms=%lld", s_flag_seq,
+                 (long long)(esp_timer_get_time() / 1000));
+        log_shipper_flush();
+        radio_player_beep();
+        return;
+    }
+    if (taps >= 4) {
+        ESP_LOGW(TAG, "USER_WIFI_WIPE");
+        log_shipper_flush();
+        led_status_set(SB_LED_BLUE, 80);
+        radio_player_beep_limit();
+        config_store_clear_wifi();
+        vTaskDelay(pdMS_TO_TICKS(400));
+        esp_restart();
+    }
 }
 
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -83,6 +137,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
         s_sta_got_ip = true;
+        log_shipper_wifi_up();
         if (s_wifi_events) {
             xEventGroupSetBits(s_wifi_events, WIFI_OK_BIT);
         }
@@ -177,6 +232,8 @@ void app_main(void)
     esp_log_level_set("nvs", ESP_LOG_WARN);
     esp_log_level_set("wifi", ESP_LOG_INFO);
 
+    log_shipper_init();
+
     const esp_app_desc_t *app = esp_app_get_description();
     ESP_LOGI(TAG, "SearaBoom ADF starting (fw %s)", app->version);
     ESP_ERROR_CHECK(config_store_init());
@@ -191,7 +248,7 @@ void app_main(void)
     }
     clip_player_init(s_cfg.volume);
     /* Touch element FSM before I2S/AAC. Starting pads at go-live used to buzz. */
-    volume_buttons_init(volume_cb, NULL);
+    volume_buttons_init(volume_cb, pad_gesture_cb, NULL);
 
     bool play_updated = config_store_take_play_updated();
     play_updated = config_store_consume_fw_change(app->version) || play_updated;
@@ -205,9 +262,13 @@ void app_main(void)
         ESP_LOGW(TAG, "Starting captive portal");
         captive_portal_run(); /* returns after save when the phone leaves the AP */
         config_store_load(&s_cfg);
+        s_pad_taps = 0;
+        /* Portal used to start the station before AP teardown. If that
+         * pipeline is wedged/silent, do not skip the boot ident. */
+        if (!radio_player_has_music_info()) {
+            radio_player_stop();
+        }
     }
-
-    log_shipper_init();
 
     if (!radio_player_is_running()) {
         const char *url = config_store_stream_url(&s_cfg);
@@ -238,6 +299,11 @@ void app_main(void)
         led_status_tick();
         clip_player_tick();
         volume_buttons_poll();
+        if (s_pad_taps) {
+            int taps = s_pad_taps;
+            s_pad_taps = 0;
+            handle_pad_gesture(taps);
+        }
         if (radio_player_wifi_weak_resume_ready()) {
             clip_player_stop();
             radio_player_hold_stream(false);
