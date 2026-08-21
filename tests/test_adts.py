@@ -27,6 +27,7 @@ EXPECTED_MS = {
     "tune_102.aac": 4597,
     "tune_104.aac": 5108,
     "wifi_weak.aac": 4365,
+    "net_slow.aac": 3761,
     "ota_available.aac": 5874,
     "ota_rebooting.aac": 2832,
     "ota_done.aac": 4527,

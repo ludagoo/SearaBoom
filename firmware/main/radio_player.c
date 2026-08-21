@@ -38,6 +38,11 @@ static const char *TAG = "radio_player";
 #define SB_WIFI_RSSI_WEAK_DBM (-78)
 #define SB_WIFI_HTTP_LOW_BYTES (128 * 1024)
 #define SB_WIFI_HTTP_RESUME_BYTES (200 * 1024)
+/* Live 64 kbps: 64 KB is ~8 s left. Lower than wifi-weak (128 KB) so a
+ * healthy post-prefetch fill (~100 KB) does not loop the prompt. */
+#define SB_HTTP_SLOW_LOW_BYTES (64 * 1024)
+#define SB_HTTP_SLOW_RESUME_BYTES (128 * 1024)
+#define SB_HTTP_SLOW_RECONNECT_MS 25000
 #define SB_MIX_SR 44100
 #define SB_SLOT_RADIO 0
 #define SB_SLOT_CLIP 1
@@ -129,6 +134,7 @@ static char s_url[256];
 static volatile bool s_want_stop;
 static volatile bool s_wifi_weak_latched;
 static bool s_hold_radio;
+static int64_t s_hold_started_ms;
 
 static int16_t s_beep_pcm[SB_BEEP_FRAMES];
 static int16_t s_limit_pcm[SB_LIMIT_FRAMES];
@@ -561,6 +567,7 @@ static void teardown_radio(void)
     s_running = false;
     s_prefetching = false;
     s_hold_radio = false;
+    s_hold_started_ms = 0;
     mix_route_clip_and_radio();
     vTaskDelay(pdMS_TO_TICKS(30));
     if (s_radio_raw) {
@@ -1077,6 +1084,12 @@ static bool http_buf_hungry(void)
     return filled < SB_WIFI_HTTP_LOW_BYTES;
 }
 
+static bool http_buf_critical(void)
+{
+    int filled = http_rb_filled();
+    return filled >= 0 && filled < SB_HTTP_SLOW_LOW_BYTES;
+}
+
 void radio_player_on_rssi_low(int rssi_dbm)
 {
     s_wifi_weak_latched = true;
@@ -1100,10 +1113,12 @@ void radio_player_hold_stream(bool on)
     }
     s_hold_radio = on;
     if (on) {
+        s_hold_started_ms = esp_timer_get_time() / 1000;
         ESP_LOGW(TAG, "hold radio (HTTP refill) rb=%d", http_rb_filled());
     } else {
         radio_flush_pcm();
         s_last_pcm_ms = esp_timer_get_time() / 1000;
+        s_hold_started_ms = 0;
         s_wifi_weak_latched = false;
         radio_player_arm_rssi_threshold();
         ESP_LOGI(TAG, "resume radio HTTP rb=%d", http_rb_filled());
@@ -1121,9 +1136,15 @@ bool radio_player_wifi_weak_resume_ready(void)
     if (!s_hold_radio) {
         return false;
     }
+    if (!s_got_music_info) {
+        return false;
+    }
     int filled = http_rb_filled();
-    if (filled >= SB_WIFI_HTTP_RESUME_BYTES) {
-        ESP_LOGI(TAG, "HTTP refill ready rb=%d/%d", filled, SB_HTTP_RB_SIZE);
+    int need = s_wifi_weak_latched ? SB_WIFI_HTTP_RESUME_BYTES
+                                   : SB_HTTP_SLOW_RESUME_BYTES;
+    if (filled >= need) {
+        ESP_LOGI(TAG, "HTTP refill ready rb=%d/%d need=%d", filled, SB_HTTP_RB_SIZE,
+                 need);
         return true;
     }
     return false;
@@ -1154,6 +1175,29 @@ bool radio_player_wifi_weak_should_speak(void)
     return true;
 }
 
+bool radio_player_http_slow_should_speak(void)
+{
+    if (s_hold_radio || s_clip_active || s_prefetching) {
+        return false;
+    }
+    if (!s_running || !s_got_music_info) {
+        return false;
+    }
+    int64_t now = esp_timer_get_time() / 1000;
+    if (now < s_stall_grace_until_ms) {
+        return false;
+    }
+    if (s_wifi_weak_latched || sta_rssi_is_weak()) {
+        return false;
+    }
+    int filled = http_rb_filled();
+    if (filled < 0 || filled >= SB_HTTP_SLOW_LOW_BYTES) {
+        return false;
+    }
+    ESP_LOGW(TAG, "HTTP slow rb=%d/%d — hold then prompt", filled, SB_HTTP_RB_SIZE);
+    return true;
+}
+
 void radio_player_loop(void)
 {
     listen_stats_poll();
@@ -1166,7 +1210,18 @@ void radio_player_loop(void)
     }
     drain_mix_evt();
     mix_restart_if_needed();
-    if (s_running && !s_clip_active && !s_hold_radio && !s_wifi_weak_latched) {
+    if (s_hold_radio && !s_wifi_weak_latched && s_running && s_http
+        && s_hold_started_ms > 0) {
+        int64_t now = esp_timer_get_time() / 1000;
+        int filled = http_rb_filled();
+        if (now - s_hold_started_ms >= SB_HTTP_SLOW_RECONNECT_MS
+            && filled >= 0 && filled < SB_HTTP_SLOW_RESUME_BYTES) {
+            radio_soft_restart("HTTP slow hold — reconnect");
+            s_hold_started_ms = now;
+        }
+    }
+    if (s_running && !s_clip_active && !s_hold_radio && !s_wifi_weak_latched
+        && !http_buf_critical()) {
         check_stream_stall();
     }
     if (!s_radio_evt) {
@@ -1212,7 +1267,8 @@ void radio_player_loop(void)
         && ((int)msg.data == AEL_STATUS_ERROR_OPEN || (int)msg.data == AEL_STATUS_ERROR_INPUT
             || (int)msg.data == AEL_STATUS_ERROR_PROCESS)
         && (msg.source == (void *)s_http || msg.source == (void *)s_aac);
-    if (!bad || s_clip_active || s_hold_radio || s_wifi_weak_latched) {
+    if (!bad || s_clip_active || s_hold_radio || s_wifi_weak_latched
+        || http_buf_critical()) {
         return;
     }
     s_stall_strikes++;

@@ -307,15 +307,22 @@ void app_main(void)
         if (radio_player_wifi_weak_resume_ready()) {
             clip_player_stop();
             radio_player_hold_stream(false);
-        } else if (!ota_update_is_busy()
-                   && radio_player_wifi_weak_should_speak() && !clip_player_is_active()) {
-            /* Speak first so the warning is not lost in a mute gap, then
-             * stop consuming radio PCM so HTTP can refill. Skip during OTA
-             * so the download does not fight a UI clip for Wi-Fi/CPU. */
-            clip_player_loop(SB_CLIP_WIFI_WEAK);
-            radio_player_hold_stream(true);
+        } else if (!ota_update_is_busy() && !clip_player_is_active()) {
+            if (radio_player_wifi_weak_should_speak()) {
+                /* Speak first so the warning is not lost in a mute gap, then
+                 * stop consuming radio PCM so HTTP can refill. Skip during OTA
+                 * so the download does not fight a UI clip for Wi-Fi/CPU. */
+                clip_player_loop(SB_CLIP_WIFI_WEAK);
+                radio_player_hold_stream(true);
+            } else if (radio_player_http_slow_should_speak()) {
+                /* Hold first: only ~8 s of AAC left. Speaking over the
+                 * station would finish the ring during the prompt. */
+                radio_player_hold_stream(true);
+                clip_player_loop(SB_CLIP_NET_SLOW);
+            }
         } else if (!radio_player_wifi_weak_holding()
-                   && clip_player_playing() == SB_CLIP_WIFI_WEAK
+                   && (clip_player_playing() == SB_CLIP_WIFI_WEAK
+                       || clip_player_playing() == SB_CLIP_NET_SLOW)
                    && !radio_player_is_running()) {
             clip_player_stop();
         }

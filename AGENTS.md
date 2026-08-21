@@ -20,7 +20,7 @@ Do **not**:
 
 - Upload the new version to `/api/factory/upload` with `slot=live` (that makes USB == OTA, so first Wi‑Fi will not update)
 - Point USB flash at `firmware/build/` — factory files live only in `server/firmware/factory/`
-- USB factory is **0.2.0**. OTA latest is **0.3.0**. Firmware after `0.1.0` applies any newer `X.Y.Z` on boot. Do not bump only the patch vs a `0.0.63` factory image — that build ignored patch.
+- USB factory is **0.3.0**. OTA latest is **0.4.0**. Firmware after `0.1.0` applies any newer `X.Y.Z` on boot. Do not bump only the patch vs a `0.0.63` factory image — that build ignored patch.
 - Use `idf.py flash` to ship boxes. USB install for testers is https://searaboom.goossen.dev/ (ESP Web Tools). `idf.py flash` is local-dev only (`dev_ota.sh --flash`).
 
 Version source of truth: `firmware/VERSION` (also `CONFIG_SEARABOOM_FW_VERSION` in `firmware/sdkconfig.defaults`). CMake embeds `firmware/VERSION` into the app.

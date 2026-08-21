@@ -53,6 +53,8 @@ void radio_player_hold_stream(bool on);
 bool radio_player_wifi_weak_holding(void);
 bool radio_player_wifi_weak_should_speak(void);
 bool radio_player_wifi_weak_resume_ready(void);
+/* HTTP rb draining with RSSI still OK: hold + "internet lenta" prompt. */
+bool radio_player_http_slow_should_speak(void);
 
 /* Station HTTP ringbuf fill in bytes, or -1 if not streaming. */
 int radio_player_http_buffered(void);

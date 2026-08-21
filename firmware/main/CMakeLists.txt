@@ -48,6 +48,7 @@ idf_component_register(
         "../clips/tune_102.aac"
         "../clips/tune_104.aac"
         "../clips/wifi_weak.aac"
+        "../clips/net_slow.aac"
         "../clips/ota_available.aac"
         "../clips/ota_rebooting.aac"
         "../clips/ota_done.aac"

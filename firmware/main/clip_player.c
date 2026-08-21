@@ -22,6 +22,11 @@
 
 static const char *TAG = "clip_player";
 
+#define SB_CLIP_LOOP_PAUSE_MS 2500
+/* net_slow: 3 plays + 2 gaps = 25 s, matching HTTP-slow reconnect. */
+#define SB_NET_SLOW_WINDOW_MS 25000
+#define SB_NET_SLOW_PLAYS 3
+
 #define SB_PROBE_SR 44100
 #define SB_PROBE_MS 1000
 #define SB_PROBE_START_MS 80
@@ -53,6 +58,8 @@ extern const uint8_t tune_104_aac_start[] asm("_binary_tune_104_aac_start");
 extern const uint8_t tune_104_aac_end[] asm("_binary_tune_104_aac_end");
 extern const uint8_t wifi_weak_aac_start[] asm("_binary_wifi_weak_aac_start");
 extern const uint8_t wifi_weak_aac_end[] asm("_binary_wifi_weak_aac_end");
+extern const uint8_t net_slow_aac_start[] asm("_binary_net_slow_aac_start");
+extern const uint8_t net_slow_aac_end[] asm("_binary_net_slow_aac_end");
 extern const uint8_t ota_available_aac_start[] asm("_binary_ota_available_aac_start");
 extern const uint8_t ota_available_aac_end[] asm("_binary_ota_available_aac_end");
 extern const uint8_t ota_rebooting_aac_start[] asm("_binary_ota_rebooting_aac_start");
@@ -72,6 +79,7 @@ static const char *clip_name[SB_CLIP_COUNT] = {
     [SB_CLIP_TUNE_102] = "tune_102",
     [SB_CLIP_TUNE_104] = "tune_104",
     [SB_CLIP_WIFI_WEAK] = "wifi_weak",
+    [SB_CLIP_NET_SLOW] = "net_slow",
     [SB_CLIP_OTA_AVAILABLE] = "ota_available",
     [SB_CLIP_OTA_REBOOTING] = "ota_rebooting",
     [SB_CLIP_OTA_DONE] = "ota_done",
@@ -89,6 +97,7 @@ static const uint8_t *clip_start[SB_CLIP_COUNT] = {
     [SB_CLIP_TUNE_102] = tune_102_aac_start,
     [SB_CLIP_TUNE_104] = tune_104_aac_start,
     [SB_CLIP_WIFI_WEAK] = wifi_weak_aac_start,
+    [SB_CLIP_NET_SLOW] = net_slow_aac_start,
     [SB_CLIP_OTA_AVAILABLE] = ota_available_aac_start,
     [SB_CLIP_OTA_REBOOTING] = ota_rebooting_aac_start,
     [SB_CLIP_OTA_DONE] = ota_done_aac_start,
@@ -105,6 +114,7 @@ static const uint8_t *clip_end[SB_CLIP_COUNT] = {
     [SB_CLIP_TUNE_102] = tune_102_aac_end,
     [SB_CLIP_TUNE_104] = tune_104_aac_end,
     [SB_CLIP_WIFI_WEAK] = wifi_weak_aac_end,
+    [SB_CLIP_NET_SLOW] = net_slow_aac_end,
     [SB_CLIP_OTA_AVAILABLE] = ota_available_aac_end,
     [SB_CLIP_OTA_REBOOTING] = ota_rebooting_aac_end,
     [SB_CLIP_OTA_DONE] = ota_done_aac_end,
@@ -199,6 +209,23 @@ int clip_player_duration_ms(sb_clip_id_t id)
         return 0;
     }
     return dur;
+}
+
+static int clip_loop_pause_ms(sb_clip_id_t id)
+{
+    if (id != SB_CLIP_NET_SLOW) {
+        return SB_CLIP_LOOP_PAUSE_MS;
+    }
+    int dur = s_play_dur_ms > 0 ? s_play_dur_ms : clip_player_duration_ms(id);
+    if (dur <= 0 || SB_NET_SLOW_PLAYS < 2) {
+        return SB_CLIP_LOOP_PAUSE_MS;
+    }
+    int pause = (SB_NET_SLOW_WINDOW_MS - SB_NET_SLOW_PLAYS * dur)
+                / (SB_NET_SLOW_PLAYS - 1);
+    if (pause < 500) {
+        pause = 500;
+    }
+    return pause;
 }
 
 esp_err_t clip_player_init(int volume)
@@ -491,11 +518,12 @@ void clip_player_tick(void)
             unlock();
             return;
         }
-        s_loop_at = esp_timer_get_time() + 2500 * 1000LL;
+        int pause_ms = clip_loop_pause_ms(s_playing_id);
+        s_loop_at = esp_timer_get_time() + (int64_t)pause_ms * 1000LL;
         s_active = false;
         radio_player_set_clip_active(false);
         clip_pipe_halt();
-        ESP_LOGI(TAG, "clip loop pause 2500 ms after %d ms", clip_elapsed_ms());
+        ESP_LOGI(TAG, "clip loop pause %d ms after %d ms", pause_ms, clip_elapsed_ms());
     }
     if (s_loop_at && s_loop && s_playing_id < SB_CLIP_COUNT
         && esp_timer_get_time() >= s_loop_at) {

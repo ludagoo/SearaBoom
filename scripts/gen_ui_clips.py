@@ -100,6 +100,13 @@ CLIPS = [
             "Chega mais perto do roteador."
         ),
     },
+    {
+        "id": "net_slow",
+        "text": (
+            "A internet tá lenta. [pause] "
+            "Tô reconectando."
+        ),
+    },
 ]
 
 

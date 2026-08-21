@@ -131,7 +131,7 @@ static void handle_line(char *line)
         return;
     }
     if (strcasecmp(line, "help") == 0 || strcmp(line, "?") == 0) {
-        printf("commands: help | ver | ota | heap | logtest | logstat | listen | reboot | wifi wipe | wifi weak | vol [n] | name [x] | city [x] | clip <name>|stop | audiotest\n");
+        printf("commands: help | ver | ota | heap | logtest | logstat | listen | reboot | wifi wipe | wifi weak | http | vol [n] | name [x] | city [x] | clip <name>|stop | audiotest\n");
         printf("  ota        - force OTA now (applies any newer X.Y.Z including patch)\n");
         printf("  heap       - free internal / PSRAM (buffer headroom)\n");
         printf("  logtest    - probe log URL + OTA host connectivity\n");
@@ -142,6 +142,7 @@ static void handle_line(char *line)
         printf("  ver        - print firmware version\n");
         printf("  reboot     - restart\n");
         printf("  wifi wipe  - clear saved SSID/pass and reboot into setup AP\n");
+        printf("  http       - station HTTP ringbuf fill (jitter buffer)\n");
         printf("  vol [n]    - show or set volume 1-21 (quiet test: vol 3)\n");
         printf("  clip name  - play a UI clip (welcome|connected|page|...|stop)\n");
         printf("  audiotest  - PCM start/end markers + AAC clip duration at the mixer tap\n");
@@ -168,6 +169,11 @@ static void handle_line(char *line)
     if (strcasecmp(line, "wifi weak") == 0) {
         radio_player_on_rssi_low(-90);
         printf("wifi weak latched (holds stream + prompt until HTTP rb >= 200k)\n");
+        return;
+    }
+    if (strcasecmp(line, "http") == 0) {
+        printf("http rb=%d hold=%d\n", radio_player_http_buffered(),
+               radio_player_wifi_weak_holding() ? 1 : 0);
         return;
     }
     if (strncasecmp(line, "vol", 3) == 0 && (line[3] == 0 || line[3] == ' ')) {
@@ -217,6 +223,11 @@ static void handle_line(char *line)
                 break;
             }
             if (strcmp(nm, "wifi_weak") == 0 && strcasecmp(arg, "weak") == 0) {
+                id = (sb_clip_id_t)i;
+                break;
+            }
+            if (strcmp(nm, "net_slow") == 0
+                && (strcasecmp(arg, "slow") == 0 || strcasecmp(arg, "internet") == 0)) {
                 id = (sb_clip_id_t)i;
                 break;
             }
