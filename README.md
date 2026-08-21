@@ -28,7 +28,7 @@ USB factory flash is **one publish behind** OTA. A newly flashed box picks up th
 
 `dev_ota.sh` bumps the **patch** digit and publishes OTA. It promotes the previous OTA full image to USB factory, then stages this build as the next USB image.
 
-The frozen USB image is **0.0.9**. Working tree / OTA latest is **0.1.0**, so a newly USB-flashed box updates on first Wi‑Fi. Firmware after `0.1.0` applies any newer X.Y.Z on boot.
+The frozen USB image is **0.1.0**. Working tree / OTA latest is **0.2.0**, so a newly USB-flashed box updates on first Wi‑Fi. Firmware after `0.1.0` applies any newer X.Y.Z on boot.
 
 Factory flash (new boxes): https://searaboom.goossen.dev/  
 OTA + logs: https://searaboom.goossen.dev/admin

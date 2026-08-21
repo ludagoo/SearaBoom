@@ -535,7 +535,12 @@ STREAMS = {
 
 @app.get("/stream/<station>")
 def stream_proxy(station: str):
-    """Proxy live AAC with a Content-Type ADF will not mis-classify."""
+    """Unused if firmware stays on direct Brasilstream (0.2.0+).
+
+    Boxes open 8396/8404.brasilstream.com.br themselves. This proxy only
+    relabeled Content-Type to audio/adts for ADF. Remove STREAMS and this
+    route once no field firmware still hits /stream/102|/stream/104.
+    """
     upstream = STREAMS.get(station)
     if not upstream:
         return jsonify({"error": "unknown station"}), 404

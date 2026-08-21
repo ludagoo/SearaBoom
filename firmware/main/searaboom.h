@@ -5,8 +5,10 @@
 #include <stdint.h>
 #include "esp_err.h"
 
-#define SB_URL1 "https://searaboom.goossen.dev/stream/102"
-#define SB_URL2 "https://searaboom.goossen.dev/stream/104"
+/* Brasilstream is ADTS; they label it audio/aac. http_stream_event
+ * forces codec UNKNOWN and Icy-MetaData: 0 so ADF will decode it. */
+#define SB_URL1 "https://8396.brasilstream.com.br/stream"
+#define SB_URL2 "https://8404.brasilstream.com.br/stream"
 #define SB_AP_SSID "SearaBoom"
 #define SB_VOLUME_MIN 1
 #define SB_VOLUME_MAX 21
