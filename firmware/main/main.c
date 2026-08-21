@@ -82,6 +82,7 @@ static void handle_pad_gesture(int taps)
         if (radio_player_go_live() != ESP_OK) {
             ESP_LOGE(TAG, "Station switch go_live failed");
         }
+        clip_player_release_idle();
         return;
     }
     if (taps == 3) {
@@ -273,6 +274,7 @@ void app_main(void)
         if (radio_player_go_live() != ESP_OK) {
             ESP_LOGE(TAG, "Radio go_live failed");
         }
+        clip_player_release_idle();
     }
     led_status_set(SB_LED_OFF, 0);
 

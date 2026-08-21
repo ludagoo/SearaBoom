@@ -33,6 +33,9 @@ esp_err_t clip_player_play_wait(sb_clip_id_t id, int timeout_ms);
 esp_err_t clip_player_wait_started(int timeout_ms);
 
 void clip_player_stop(void);
+/* Destroy clip/probe pipes if nothing is playing. Call after go_live —
+ * never during play_wait ident, or mix/I2S stay silent. */
+void clip_player_release_idle(void);
 bool clip_player_is_active(void);
 sb_clip_id_t clip_player_playing(void);
 const char *clip_player_name(sb_clip_id_t id);

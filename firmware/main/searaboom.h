@@ -6,7 +6,8 @@
 #include "esp_err.h"
 
 /* Brasilstream is ADTS; they label it audio/aac. http_stream_event
- * forces codec UNKNOWN and Icy-MetaData: 0 so ADF will decode it. */
+ * forces codec UNKNOWN and Icy-MetaData: 0 so ADF will decode it.
+ * Canonical URLs stay https://; radio_player tries http:// first. */
 #define SB_URL1 "https://8396.brasilstream.com.br/stream"
 #define SB_URL2 "https://8404.brasilstream.com.br/stream"
 #define SB_AP_SSID "SearaBoom"

@@ -33,6 +33,8 @@ static const char *TAG = "radio_player";
 
 #define SB_STREAM_STALL_MS 15000
 #define SB_STREAM_STALL_GRACE_MS 35000
+/* HTTP Icecast with no music_info by then → HTTPS (TLS). */
+#define SB_HTTP_FALLBACK_MS 8000
 #define SB_STREAM_HARD_RESTART_AFTER 3
 #define SB_HTTP_RB_SIZE (256 * 1024)
 #define SB_WIFI_RSSI_WEAK_DBM (-78)
@@ -131,6 +133,9 @@ static int64_t s_stall_grace_until_ms;
 static int s_restart_backoff_ms = 500;
 static int s_stall_strikes;
 static char s_url[256];
+static bool s_using_http;
+static bool s_force_https;
+static int64_t s_radio_open_ms;
 static volatile bool s_want_stop;
 static volatile bool s_wifi_weak_latched;
 static bool s_hold_radio;
@@ -487,9 +492,48 @@ static void board_codec_start(void)
 static void store_url_volume(const char *url, int volume)
 {
     s_volume = volume;
-    strncpy(s_url, url ? url : "", sizeof(s_url) - 1);
+    if (!url) {
+        s_url[0] = 0;
+        return;
+    }
+    if (strncmp(s_url, url, sizeof(s_url)) != 0) {
+        s_force_https = false;
+        s_using_http = false;
+    }
+    strncpy(s_url, url, sizeof(s_url) - 1);
     s_url[sizeof(s_url) - 1] = 0;
 }
+
+static bool url_https_to_http(char *dst, size_t dst_sz, const char *src)
+{
+    if (!src || strncmp(src, "https://", 8) != 0) {
+        return false;
+    }
+    if (dst_sz < strlen(src)) {
+        return false;
+    }
+    snprintf(dst, dst_sz, "http://%s", src + 8);
+    return true;
+}
+
+static const char *apply_stream_uri(void)
+{
+    static char s_http_url[256];
+    s_using_http = false;
+    if (!s_force_https && url_https_to_http(s_http_url, sizeof(s_http_url), s_url)) {
+        s_using_http = true;
+        if (s_http) {
+            audio_element_set_uri(s_http, s_http_url);
+        }
+        return s_http_url;
+    }
+    if (s_http) {
+        audio_element_set_uri(s_http, s_url);
+    }
+    return s_url;
+}
+
+static void radio_soft_restart(const char *reason);
 
 static void radio_flush_pcm(void)
 {
@@ -546,18 +590,14 @@ static void mix_rewind(void)
     audio_pipeline_change_state(s_mix_pipe, AEL_STATE_INIT);
 }
 
-static void mix_restart_if_needed(void)
+static void mix_restart(void)
 {
     if (!s_mix_pipe || !s_downmix) {
         return;
     }
     audio_element_state_t st = audio_element_get_state(s_downmix);
     audio_element_state_t i2s_st = s_i2s ? audio_element_get_state(s_i2s) : AEL_STATE_RUNNING;
-    if (st != AEL_STATE_FINISHED && st != AEL_STATE_STOPPED && st != AEL_STATE_ERROR
-        && i2s_st != AEL_STATE_FINISHED && i2s_st != AEL_STATE_STOPPED && i2s_st != AEL_STATE_ERROR) {
-        return;
-    }
-    ESP_LOGW(TAG, "mix dead mix=%d i2s=%d, restarting", (int)st, (int)i2s_st);
+    ESP_LOGW(TAG, "mix restart mix=%d i2s=%d", (int)st, (int)i2s_st);
     mix_rewind();
     mix_mute_slot(SB_SLOT_RADIO);
     mix_mute_slot(SB_SLOT_CLIP);
@@ -572,6 +612,20 @@ static void mix_restart_if_needed(void)
         }
     }
     mix_route_clip_and_radio();
+}
+
+static void mix_restart_if_needed(void)
+{
+    if (!s_mix_pipe || !s_downmix) {
+        return;
+    }
+    audio_element_state_t st = audio_element_get_state(s_downmix);
+    audio_element_state_t i2s_st = s_i2s ? audio_element_get_state(s_i2s) : AEL_STATE_RUNNING;
+    if (st != AEL_STATE_FINISHED && st != AEL_STATE_STOPPED && st != AEL_STATE_ERROR
+        && i2s_st != AEL_STATE_FINISHED && i2s_st != AEL_STATE_STOPPED && i2s_st != AEL_STATE_ERROR) {
+        return;
+    }
+    mix_restart();
 }
 
 static void teardown_radio(void)
@@ -632,6 +686,8 @@ static void teardown_radio(void)
     s_running = false;
     s_prefetching = false;
     s_got_music_info = false;
+    s_using_http = false;
+    s_radio_open_ms = 0;
 }
 
 static void teardown_mix(void)
@@ -809,7 +865,11 @@ static esp_err_t ensure_radio(const char *url, int volume, bool hold)
     audio_pipeline_register(s_radio_pipe, s_radio_raw, "rraw");
     const char *link[4] = {"http", "aac", "rm2s", "rraw"};
     audio_pipeline_link(s_radio_pipe, &link[0], 4);
-    audio_element_set_uri(s_http, url);
+    /* Prefer plain HTTP (no live TLS). crt_bundle stays attached so a
+     * failed HTTP open can set the https:// URI and restart. */
+    const char *play = apply_stream_uri();
+    ESP_LOGI(TAG, "stream uri %s", play);
+    s_radio_open_ms = esp_timer_get_time() / 1000;
     /* channels=0: upmix holds until decoder music_info (do not assume mono). */
     audio_element_set_music_info(s_radio_m2s, SB_MIX_SR, 0, 16);
     s_got_music_info = false;
@@ -924,6 +984,10 @@ esp_err_t radio_player_go_live(void)
         return ensure_radio(s_url, s_volume, false);
     }
     ESP_LOGI(TAG, "Go live — mixer reads radio");
+    /* Always rewind mix here. After the ident clip the mixer may still
+     * look RUNNING while wedged on an aborted clip rb; if-needed then
+     * leaves the station silent. Ident is done so a reset is inaudible. */
+    mix_restart();
     if (s_amp_gated && s_i2s) {
         s_amp_gated = false;
         i2s_alc_volume_set(s_i2s, volume_to_alc(s_volume));
@@ -1005,8 +1069,20 @@ static void radio_soft_restart(const char *reason)
     int64_t now = esp_timer_get_time() / 1000;
     s_last_pcm_ms = now;
     s_stall_grace_until_ms = now + SB_STREAM_STALL_GRACE_MS;
+    s_radio_open_ms = now;
     s_got_music_info = false;
     mix_route_clip_and_radio();
+}
+
+static void radio_fallback_https(const char *reason)
+{
+    if (!s_using_http || !s_url[0]) {
+        return;
+    }
+    s_force_https = true;
+    const char *play = apply_stream_uri();
+    ESP_LOGW(TAG, "HTTP failed (%s) — HTTPS fallback %s", reason, play);
+    radio_soft_restart("HTTPS fallback");
 }
 
 static void check_stream_stall(void)
@@ -1223,6 +1299,12 @@ void radio_player_loop(void)
     if (!s_have_out) {
         return;
     }
+    if (s_radio_pipe && s_using_http && !s_got_music_info && s_radio_open_ms) {
+        int64_t now = esp_timer_get_time() / 1000;
+        if (now - s_radio_open_ms >= SB_HTTP_FALLBACK_MS) {
+            radio_fallback_https("no music_info");
+        }
+    }
     drain_mix_evt();
     mix_restart_if_needed();
     if (s_hold_radio && !s_wifi_weak_latched && s_running && s_http
@@ -1271,10 +1353,11 @@ void radio_player_loop(void)
         s_stall_strikes = 0;
         s_last_pcm_ms = esp_timer_get_time() / 1000;
         mix_route_clip_and_radio();
-        ESP_LOGI(TAG, "heap after music: free=%u spiram=%u internal=%u",
+        ESP_LOGI(TAG, "heap after music: free=%u spiram=%u internal=%u tls=%d",
                  (unsigned)esp_get_free_heap_size(),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                 s_using_http ? 0 : 1);
         return;
     }
     bool bad = msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT
@@ -1284,6 +1367,10 @@ void radio_player_loop(void)
         && (msg.source == (void *)s_http || msg.source == (void *)s_aac);
     if (!bad || s_clip_active || s_hold_radio || s_wifi_weak_latched
         || http_buf_critical()) {
+        return;
+    }
+    if (s_using_http && !s_got_music_info) {
+        radio_fallback_https("stream/decoder error");
         return;
     }
     s_stall_strikes++;

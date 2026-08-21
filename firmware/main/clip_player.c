@@ -5,6 +5,7 @@
 #include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "clip_player.h"
 #include "radio_player.h"
 #include "volume_buttons.h"
@@ -270,6 +271,60 @@ static void clip_pipe_halt(void)
     drain_evt();
 }
 
+static void clip_evt_release(void)
+{
+    if (s_pipe || s_probe_pipe || !s_evt) {
+        return;
+    }
+    audio_event_iface_destroy(s_evt);
+    s_evt = NULL;
+}
+
+static void clip_pipe_deinit(void)
+{
+    if (!s_pipe) {
+        return;
+    }
+    clip_pipe_halt();
+    /* Listener first, while element queues still exist. Unregister next so
+     * deinit's terminate cannot abort a mix-linked rb. Destroy s_evt before
+     * element_deinit or a later set_listener spins "Error remove listener". */
+    audio_pipeline_remove_listener(s_pipe);
+    if (s_blob) {
+        audio_pipeline_unregister(s_pipe, s_blob);
+    }
+    if (s_aac) {
+        audio_pipeline_unregister(s_pipe, s_aac);
+    }
+    if (s_m2s) {
+        audio_pipeline_unregister(s_pipe, s_m2s);
+    }
+    if (s_raw) {
+        audio_pipeline_unregister(s_pipe, s_raw);
+    }
+    audio_pipeline_deinit(s_pipe);
+    s_pipe = NULL;
+    clip_evt_release();
+    if (s_blob) {
+        audio_element_deinit(s_blob);
+        s_blob = NULL;
+    }
+    if (s_aac) {
+        audio_element_deinit(s_aac);
+        s_aac = NULL;
+    }
+    if (s_m2s) {
+        audio_element_deinit(s_m2s);
+        s_m2s = NULL;
+    }
+    if (s_raw) {
+        audio_element_deinit(s_raw);
+        s_raw = NULL;
+    }
+    ESP_LOGI(TAG, "clip pipe released internal=%u",
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+}
+
 static void probe_pipe_halt(void)
 {
     if (!s_probe_pipe) {
@@ -281,6 +336,32 @@ static void probe_pipe_halt(void)
     audio_pipeline_reset_elements(s_probe_pipe);
     audio_pipeline_reset_items_state(s_probe_pipe);
     audio_pipeline_change_state(s_probe_pipe, AEL_STATE_INIT);
+}
+
+static void probe_pipe_deinit(void)
+{
+    if (!s_probe_pipe) {
+        return;
+    }
+    probe_pipe_halt();
+    audio_pipeline_remove_listener(s_probe_pipe);
+    if (s_probe) {
+        audio_pipeline_unregister(s_probe_pipe, s_probe);
+    }
+    if (s_probe_raw) {
+        audio_pipeline_unregister(s_probe_pipe, s_probe_raw);
+    }
+    audio_pipeline_deinit(s_probe_pipe);
+    s_probe_pipe = NULL;
+    clip_evt_release();
+    if (s_probe) {
+        audio_element_deinit(s_probe);
+        s_probe = NULL;
+    }
+    if (s_probe_raw) {
+        audio_element_deinit(s_probe_raw);
+        s_probe_raw = NULL;
+    }
 }
 
 static esp_err_t ensure_clip_pipe(void)
@@ -494,9 +575,11 @@ static void abort_pcm_rb(audio_element_handle_t raw)
 
 static void detach_clip_from_mix(void)
 {
-    /* Point mix at mute rbs first so abort/EOS on the clip rb cannot finish I2S. */
+    /* Mute mix before aborting the clip rb. Clip slot timeout is 40 ticks;
+     * 20 ms was short enough that mix still waited on the clip rb, took
+     * ABORT, and finished I2S (silent after station-switch ident). */
     radio_player_set_clip_active(false);
-    vTaskDelay(pdMS_TO_TICKS(20));
+    vTaskDelay(pdMS_TO_TICKS(80));
     abort_pcm_rb(s_raw);
     abort_pcm_rb(s_probe_raw);
     radio_player_attach_clip_pcm(NULL);
@@ -556,6 +639,9 @@ void clip_player_tick(void)
         } else {
             ESP_LOGI(TAG, "clip done after %d ms", clip_elapsed_ms());
             halt_playback();
+            /* Keep Helix until clip_player_release_idle() after go_live.
+             * Deinit here (play_wait ident) aborts mix before the station
+             * is routed — double-tap then stays silent. */
         }
     }
     unlock();
@@ -593,6 +679,16 @@ void clip_player_stop(void)
 {
     lock();
     stop_locked();
+    unlock();
+}
+
+void clip_player_release_idle(void)
+{
+    lock();
+    if (!s_active && !s_loop && s_loop_at == 0) {
+        clip_pipe_deinit();
+        probe_pipe_deinit();
+    }
     unlock();
 }
 
@@ -758,10 +854,6 @@ esp_err_t clip_player_run_pcm_probe(radio_probe_result_t *out, int timeout_ms)
     err = wait_finished(budget);
     if (out) {
         radio_player_probe_result(out);
-    }
-    if (ensure_clip_pipe() == ESP_OK) {
-        ringbuf_handle_t clip_rb = audio_element_get_input_ringbuf(s_raw);
-        radio_player_attach_clip_pcm(clip_rb);
     }
     return err;
 }

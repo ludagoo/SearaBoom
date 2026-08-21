@@ -54,6 +54,7 @@ static void announce_update_found(void)
         ESP_LOGW(TAG, "available clip did not finish; downloading anyway");
     }
     clip_player_stop();
+    clip_player_release_idle();
 }
 
 static esp_err_t download_firmware(const char *fw_url)
