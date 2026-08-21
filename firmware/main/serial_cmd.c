@@ -205,9 +205,14 @@ static void handle_line(char *line)
         return;
     }
     if (strcasecmp(line, "ota") == 0 || strcasecmp(line, "ota force") == 0) {
+        if (ota_update_is_busy()) {
+            printf("OTA already running\n");
+            return;
+        }
         printf("OTA force check...\n");
         ESP_LOGW(TAG, "Serial-triggered OTA (dev policy)");
-        /* Run in this task — stack is large enough */
+        /* Run here — this task already has a 12 KB stack. Spawning another
+         * after the radio is up fails: no 12 KB internal block left. */
         ota_update_check(OTA_POLICY_DEV);
         return;
     }

@@ -154,10 +154,16 @@ static bool wifi_connect_or_setup(void)
     return (bits & WIFI_OK_BIT) != 0;
 }
 
+static TaskHandle_t s_ota_task;
+
 static void ota_task_fn(void *arg)
 {
     (void)arg;
+    /* Wait until the stream is settled. Stack is allocated at boot while
+     * internal heap still has a 12 KB hole — after radio is up it does not. */
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     ota_update_check_on_boot();
+    s_ota_task = NULL;
     vTaskDelete(NULL);
 }
 
@@ -179,6 +185,10 @@ void app_main(void)
 
     config_store_load(&s_cfg);
     serial_cmd_init();
+    if (xTaskCreatePinnedToCore(ota_task_fn, "ota", 12288, NULL, 5, &s_ota_task, 1) != pdPASS) {
+        ESP_LOGE(TAG, "OTA task create failed at boot");
+        s_ota_task = NULL;
+    }
     clip_player_init(s_cfg.volume);
     /* Touch element FSM before I2S/AAC. Starting pads at go-live used to buzz. */
     volume_buttons_init(volume_cb, NULL);
@@ -219,8 +229,8 @@ void app_main(void)
     }
     led_status_set(SB_LED_GREEN, 500);
 
-    /* OTA TLS used to start the instant music_info arrived — same core as
-     * radio AAC. Prefetched PCM sounded clean, then a buzz. */
+    /* Version check after the stream is up. If an update is found the OTA
+     * task stops radio, speaks, then downloads with audio off. */
     int64_t live_at_ms = esp_timer_get_time() / 1000;
     bool ota_started = false;
 
@@ -231,9 +241,11 @@ void app_main(void)
         if (radio_player_wifi_weak_resume_ready()) {
             clip_player_stop();
             radio_player_hold_stream(false);
-        } else if (radio_player_wifi_weak_should_speak() && !clip_player_is_active()) {
+        } else if (!ota_update_is_busy()
+                   && radio_player_wifi_weak_should_speak() && !clip_player_is_active()) {
             /* Speak first so the warning is not lost in a mute gap, then
-             * stop consuming radio PCM so HTTP can refill. */
+             * stop consuming radio PCM so HTTP can refill. Skip during OTA
+             * so the download does not fight a UI clip for Wi-Fi/CPU. */
             clip_player_loop(SB_CLIP_WIFI_WEAK);
             radio_player_hold_stream(true);
         } else if (!radio_player_wifi_weak_holding()
@@ -243,9 +255,11 @@ void app_main(void)
         }
         int64_t now = esp_timer_get_time() / 1000;
         if (!ota_started && (now - live_at_ms) > 15000 && radio_player_has_music_info()) {
-            ESP_LOGI(TAG, "WiFi OK, checking OTA after stream (stable policy: major.minor only)");
-            if (xTaskCreatePinnedToCore(ota_task_fn, "ota", 12288, NULL, 4, NULL, 1) != pdPASS) {
-                ESP_LOGW(TAG, "OTA task create failed — skipping boot check");
+            ESP_LOGI(TAG, "WiFi OK, checking OTA after stream");
+            if (s_ota_task) {
+                xTaskNotifyGive(s_ota_task);
+            } else {
+                ESP_LOGW(TAG, "OTA task missing — skipping boot check");
             }
             ota_started = true;
         }

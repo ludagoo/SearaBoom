@@ -1022,6 +1022,14 @@ static int http_rb_filled(void)
     return rb ? rb_bytes_filled(rb) : -1;
 }
 
+int radio_player_http_buffered(void)
+{
+    if (!s_running) {
+        return -1;
+    }
+    return http_rb_filled();
+}
+
 static bool sta_rssi_is_weak(void)
 {
     wifi_ap_record_t ap = {0};

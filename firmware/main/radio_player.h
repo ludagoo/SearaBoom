@@ -54,4 +54,7 @@ bool radio_player_wifi_weak_holding(void);
 bool radio_player_wifi_weak_should_speak(void);
 bool radio_player_wifi_weak_resume_ready(void);
 
+/* Station HTTP ringbuf fill in bytes, or -1 if not streaming. */
+int radio_player_http_buffered(void);
+
 #endif

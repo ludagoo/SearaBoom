@@ -4,6 +4,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "searaboom.h"
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
@@ -20,6 +21,13 @@
 
 static const char *TAG = "ota_update";
 
+static volatile bool s_busy;
+
+bool ota_update_is_busy(void)
+{
+    return s_busy;
+}
+
 static void stop_radio_for_ota(void)
 {
     if (!radio_player_is_running()) {
@@ -34,6 +42,45 @@ static void stop_radio_for_ota(void)
     }
     ESP_LOGW(TAG, "forcing radio stop before OTA");
     radio_player_stop();
+}
+
+static void announce_update_found(void)
+{
+    stop_radio_for_ota();
+    radio_player_start_idle(radio_player_get_volume());
+    if (clip_player_play_wait(SB_CLIP_OTA_AVAILABLE, 15000) != ESP_OK) {
+        ESP_LOGW(TAG, "available clip did not finish; downloading anyway");
+    }
+    clip_player_stop();
+}
+
+static esp_err_t download_firmware(const char *fw_url)
+{
+    ESP_LOGI(TAG, "OTA download (audio off, full speed)");
+    esp_http_client_config_t ota_http = {
+        .url = fw_url,
+        .timeout_ms = 60000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .keep_alive_enable = true,
+    };
+    esp_https_ota_config_t ota_config = {
+        .http_config = &ota_http,
+    };
+    return esp_https_ota(&ota_config);
+}
+
+static void announce_reboot(const char *new_ver)
+{
+    ESP_LOGI(TAG, "OTA success, announcing reboot into %s", new_ver);
+    config_store_flush_deferred_now();
+    config_store_set_play_updated(true);
+    led_status_set(SB_LED_GREEN, 0);
+    radio_player_start_idle(radio_player_get_volume());
+    if (clip_player_play_wait(SB_CLIP_OTA_REBOOTING, 10000) != ESP_OK) {
+        ESP_LOGW(TAG, "rebooting clip did not finish; restarting anyway");
+    }
+    vTaskDelay(pdMS_TO_TICKS(200));
+    esp_restart();
 }
 
 typedef struct {
@@ -168,32 +215,12 @@ esp_err_t ota_update_check(ota_policy_t policy)
 
     ESP_LOGW(TAG, "OTA update available -> %s (%s) policy=%s", new_ver, fw_url, policy_name);
     led_status_set(SB_LED_YELLOW, 100);
-    stop_radio_for_ota();
-    radio_player_start_idle(radio_player_get_volume());
-    clip_player_loop(SB_CLIP_OTA_AVAILABLE);
-    if (clip_player_wait_started(12000) != ESP_OK) {
-        ESP_LOGW(TAG, "available clip did not start; continuing OTA anyway");
-    }
-
-    esp_http_client_config_t ota_http = {
-        .url = fw_url,
-        .timeout_ms = 60000,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .keep_alive_enable = true,
-    };
-    esp_https_ota_config_t ota_config = {
-        .http_config = &ota_http,
-    };
-
-    esp_err_t ota_err = esp_https_ota(&ota_config);
+    s_busy = true;
+    announce_update_found();
+    esp_err_t ota_err = download_firmware(fw_url);
+    s_busy = false;
     if (ota_err == ESP_OK) {
-        ESP_LOGI(TAG, "OTA success, announcing reboot into %s", new_ver);
-        config_store_flush_deferred_now();
-        config_store_set_play_updated(true);
-        led_status_set(SB_LED_GREEN, 0);
-        clip_player_play_wait(SB_CLIP_OTA_REBOOTING, 10000);
-        vTaskDelay(pdMS_TO_TICKS(200));
-        esp_restart();
+        announce_reboot(new_ver);
     }
     clip_player_stop();
 
