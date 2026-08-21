@@ -43,15 +43,19 @@ static int64_t s_connected_at;
 static const char *s_css =
     "*{margin:0;padding:0;box-sizing:border-box;font-family:\"Segoe UI\",Arial,Helvetica,sans-serif;"
     "-webkit-text-size-adjust:100%;text-size-adjust:100%}"
-    "html,body{width:100%;max-width:100%;overflow-x:hidden;background:#fff;color:#052C31;min-height:100%}"
-    "body{padding:12px 10px 28px}"
+    "html,body{width:100%;max-width:100%;overflow-x:hidden;overflow-y:auto;"
+    "-webkit-overflow-scrolling:touch;background:#fff;color:#052C31;min-height:100%}"
+    "body{padding:8px 10px 20px}"
     "a{color:inherit;text-decoration:none}"
     "article{width:100%;max-width:380px;margin:0 auto}"
-    "h1{margin:0 0 12px;text-align:center}"
-    "h1 img{display:block;width:100%;max-width:220px;height:auto;margin:0 auto}"
+    "h1{margin:0 0 8px;text-align:center}"
+    "h1 img{display:block;width:100%;max-width:160px;height:auto;margin:0 auto}"
     ".tag{display:block;text-align:center;color:#00B7C8;font-size:.78em;letter-spacing:.08em;"
     "text-transform:uppercase;margin:0 0 12px}"
-    ".box{margin:0 0 12px;padding:14px 12px 12px;border-radius:10px;background:#007985}"
+    ".box{margin:0 0 8px;padding:10px 12px 10px;border-radius:10px;background:#007985}"
+    ".who{display:flex;gap:8px}"
+    ".who>span{flex:1;min-width:0}"
+    ".who label{margin:.1em 0 .25em}"
     ".ttl{display:block;width:100%;color:#fff;padding:0 0 10px;font-weight:700;text-align:center;"
     "font-size:1.05em;line-height:1.2}"
     ".ttl a,.box a{color:#fff;text-decoration:none}"
@@ -87,9 +91,9 @@ static void send_html_open(httpd_req_t *req, const char *body_class)
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,maximum-scale=1,"
         "minimum-scale=1,user-scalable=no,viewport-fit=cover\">"
         "<meta name=\"theme-color\" content=\"#052C31\">"
-        "<title>SearaBoom</title><style>");
+        "<title>SearaBoom</title><link rel=\"stylesheet\" href=\"styles.css\"><style>");
     httpd_resp_sendstr_chunk(req, s_css);
-    httpd_resp_sendstr_chunk(req, "</style><link rel=\"stylesheet\" href=\"styles.css\"></head><body");
+    httpd_resp_sendstr_chunk(req, "</style></head><body");
     if (body_class && body_class[0]) {
         httpd_resp_sendstr_chunk(req, " class=\"");
         httpd_resp_sendstr_chunk(req, body_class);
@@ -317,20 +321,9 @@ static esp_err_t root_get(httpd_req_t *req)
     const char *html1 =
         "<article>"
         "<form action=\"/\" method=\"POST\" autocomplete=\"off\"><h1>"
-        "<img src=\"background.png\" width=\"220\" height=\"121\" alt=\"SearaBoom\"></h1>"
+        "<img src=\"background.png\" width=\"160\" height=\"88\" alt=\"SearaBoom\"></h1>"
         "<iframe name=\"sbclip\" style=\"position:absolute;width:0;height:0;border:0\"></iframe>"
-        "<div class=\"box\">"
-        "<label for=\"NAME\">Nome:</label>"
-        "<input name=\"name\" id=\"NAME\" type=\"text\" maxlength=\"40\" placeholder=\"Seu nome\""
-        " tabindex=\"-1\" autocomplete=\"off\" autocorrect=\"off\" autocapitalize=\"words\" spellcheck=\"false\""
-        " value=\"";
-    const char *html_city =
-        "\"><label for=\"CITY\">Cidade:</label>"
-        "<input name=\"city\" id=\"CITY\" type=\"text\" maxlength=\"40\" placeholder=\"Sua cidade\""
-        " tabindex=\"-1\" autocomplete=\"off\" autocorrect=\"off\" autocapitalize=\"words\" spellcheck=\"false\""
-        " value=\"";
-    const char *html_station =
-        "\"><p class=\"ttl\"><a href=\"/clip/station\" target=\"sbclip\" tabindex=\"-1\">Escolha a sintonia</a></p>"
+        "<div class=\"box\"><p class=\"ttl\"><a href=\"/clip/station\" target=\"sbclip\" tabindex=\"-1\">Escolha a sintonia</a></p>"
         "<select name=\"url\" id=\"URL\" tabindex=\"-1\" "
         "onclick=\"new Image().src='/clip/station?t='+Date.now()\" "
         "onchange=\"new Image().src='/clip/station?t='+Date.now()\">"
@@ -347,7 +340,19 @@ static esp_err_t root_get(httpd_req_t *req)
         "<input name=\"pass\" id=\"PASS\" type=\"text\" placeholder=\"Senha do Wi-Fi\""
         " tabindex=\"-1\" autocomplete=\"off\" autocorrect=\"off\" autocapitalize=\"off\" spellcheck=\"false\""
         " onclick=\"new Image().src='/clip/pass?t='+Date.now()\">"
-        "</div><button type=\"submit\" id=\"SAVE\" tabindex=\"-1\""
+        "</div><div class=\"box who\"><span>"
+        "<label for=\"NAME\">Nome:</label>"
+        "<input name=\"name\" id=\"NAME\" type=\"text\" maxlength=\"40\" placeholder=\"Seu nome\""
+        " tabindex=\"-1\" autocomplete=\"off\" autocorrect=\"off\" autocapitalize=\"words\" spellcheck=\"false\""
+        " value=\"";
+    const char *html_city =
+        "\"></span><span><label for=\"CITY\">Cidade:</label>"
+        "<input name=\"city\" id=\"CITY\" type=\"text\" maxlength=\"40\" placeholder=\"Sua cidade\""
+        " tabindex=\"-1\" autocomplete=\"off\" autocorrect=\"off\" autocapitalize=\"words\" spellcheck=\"false\""
+        " value=\"";
+    const char *html3 =
+        "\"></span></div>"
+        "<button type=\"submit\" id=\"SAVE\" tabindex=\"-1\""
         " onclick=\"new Image().src='/clip/save?t='+Date.now()\">Salvar</button></form>"
         "<script>"
         "(function(){"
@@ -368,12 +373,12 @@ static esp_err_t root_get(httpd_req_t *req)
     ESP_LOGI(TAG, "HTTP GET %s", req->uri);
     send_html_open(req, NULL);
     httpd_resp_sendstr_chunk(req, html1);
+    httpd_resp_sendstr_chunk(req, s_ssid_options);
+    httpd_resp_sendstr_chunk(req, html2);
     httpd_resp_sendstr_chunk(req, name_esc);
     httpd_resp_sendstr_chunk(req, html_city);
     httpd_resp_sendstr_chunk(req, city_esc);
-    httpd_resp_sendstr_chunk(req, html_station);
-    httpd_resp_sendstr_chunk(req, s_ssid_options);
-    httpd_resp_sendstr_chunk(req, html2);
+    httpd_resp_sendstr_chunk(req, html3);
     httpd_resp_sendstr_chunk(req, NULL);
     return ESP_OK;
 }
