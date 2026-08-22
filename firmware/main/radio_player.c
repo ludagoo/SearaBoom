@@ -45,6 +45,10 @@ static const char *TAG = "radio_player";
 #define SB_HTTP_SLOW_LOW_BYTES (64 * 1024)
 #define SB_HTTP_SLOW_RESUME_BYTES (128 * 1024)
 #define SB_HTTP_SLOW_RECONNECT_MS 25000
+#define SB_HTTP_SLOW_GROW_BYTES (16 * 1024)
+#define SB_HTTP_SLOW_RECONNECT_MAX 3
+#define SB_HTTP_SLOW_DEBOUNCE_MS 2000
+#define SB_BUFFER_PROMPT_COOLDOWN_MS (3 * 60 * 1000)
 #define SB_MIX_SR 44100
 #define SB_SLOT_RADIO 0
 #define SB_SLOT_CLIP 1
@@ -140,6 +144,20 @@ static volatile bool s_want_stop;
 static volatile bool s_wifi_weak_latched;
 static bool s_hold_radio;
 static int64_t s_hold_started_ms;
+static int s_hold_last_filled;
+static int s_hold_reconnects;
+static int64_t s_http_slow_prompt_ms;
+static int64_t s_wifi_weak_prompt_ms;
+static int64_t s_http_slow_low_since;
+static int64_t s_hold_snap_ms;
+static volatile bool s_need_hard_on_wifi;
+static volatile bool s_wifi_rejoin;
+static int s_rb_drop_band = -1;
+static int s_http_evt_st = -1;
+static int s_aac_evt_st = -1;
+
+static int http_rb_filled(void);
+static void stream_snap(const char *why);
 
 static int16_t *s_beep_pcm;
 static int16_t *s_limit_pcm;
@@ -257,6 +275,16 @@ void radio_player_beep(void)
 void radio_player_beep_limit(void)
 {
     beep_play(s_limit_pcm, SB_LIMIT_FRAMES);
+}
+
+void radio_player_ungate(void)
+{
+    if (!s_i2s) {
+        return;
+    }
+    s_amp_gated = false;
+    i2s_alc_volume_set(s_i2s, volume_to_alc(s_volume));
+    ESP_LOGI(TAG, "amp ungated alc=%d dB", volume_to_alc(s_volume));
 }
 
 /* Overlay mix output. ADF tone_stream is a flash-MP3 reader and needs a mix
@@ -635,6 +663,8 @@ static void teardown_radio(void)
     s_prefetching = false;
     s_hold_radio = false;
     s_hold_started_ms = 0;
+    s_hold_reconnects = 0;
+    s_need_hard_on_wifi = false;
     mix_route_clip_and_radio();
     vTaskDelay(pdMS_TO_TICKS(30));
     if (s_radio_raw) {
@@ -1051,6 +1081,7 @@ static void radio_soft_restart(const char *reason)
     if (!s_radio_pipe) {
         return;
     }
+    stream_snap(reason);
     ESP_LOGW(TAG, "%s — soft restart in %d ms (strike %d)", reason, s_restart_backoff_ms,
              s_stall_strikes + 1);
     audio_pipeline_stop(s_radio_pipe);
@@ -1072,6 +1103,21 @@ static void radio_soft_restart(const char *reason)
     s_radio_open_ms = now;
     s_got_music_info = false;
     mix_route_clip_and_radio();
+}
+
+static void radio_hard_restart(const char *reason)
+{
+    if (!s_url[0]) {
+        return;
+    }
+    stream_snap(reason);
+    ESP_LOGW(TAG, "%s — hard restart of radio", reason);
+    int vol = s_volume;
+    char url[sizeof(s_url)];
+    memcpy(url, s_url, sizeof(url));
+    teardown_radio();
+    vTaskDelay(pdMS_TO_TICKS(500));
+    radio_player_start(url, vol);
 }
 
 static void radio_fallback_https(const char *reason)
@@ -1099,15 +1145,11 @@ static void check_stream_stall(void)
         return;
     }
     s_stall_strikes++;
-    ESP_LOGW(TAG, "stream stall: no PCM for %lld ms", (long long)idle);
+    ESP_LOGW(TAG, "stream stall: no PCM for %lld ms strike=%d", (long long)idle,
+             s_stall_strikes);
+    stream_snap("pcm-stall");
     if (s_stall_strikes >= SB_STREAM_HARD_RESTART_AFTER && s_url[0]) {
-        ESP_LOGW(TAG, "stream stall: hard restart of radio");
-        int vol = s_volume;
-        char url[sizeof(s_url)];
-        memcpy(url, s_url, sizeof(url));
-        teardown_radio();
-        vTaskDelay(pdMS_TO_TICKS(500));
-        radio_player_start(url, vol);
+        radio_hard_restart("stream stall");
         return;
     }
     radio_soft_restart("stream stall");
@@ -1160,6 +1202,41 @@ int radio_player_http_buffered(void)
     return http_rb_filled();
 }
 
+static void stream_snap(const char *why)
+{
+    int filled = http_rb_filled();
+    int pcm = s_radio_pcm ? (int)rb_bytes_filled(s_radio_pcm) : -1;
+    wifi_ap_record_t ap = {0};
+    bool assoc = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK);
+    int64_t now = esp_timer_get_time() / 1000;
+    int pcm_idle = s_last_pcm_ms ? (int)(now - s_last_pcm_ms) : -1;
+    int hold_ms = s_hold_started_ms ? (int)(now - s_hold_started_ms) : 0;
+    int need = s_wifi_weak_latched ? SB_WIFI_HTTP_RESUME_BYTES
+                                   : SB_HTTP_SLOW_RESUME_BYTES;
+    /* W so log_shipper flushes. One line: rb vs PCM vs Wi-Fi vs element. */
+    ESP_LOGW(TAG,
+             "stall %s rb=%d/%d need=%d pcmrb=%d music=%d hold=%d weak=%d "
+             "hold_ms=%d recon=%d rssi=%d assoc=%d pcm_idle=%d http_el=%d aac_el=%d "
+             "tls=%d clip=%d run=%d",
+             why ? why : "-", filled, SB_HTTP_RB_SIZE, need, pcm,
+             (int)s_got_music_info, (int)s_hold_radio, (int)s_wifi_weak_latched,
+             hold_ms, s_hold_reconnects, assoc ? ap.rssi : 0, (int)assoc, pcm_idle,
+             s_http ? (int)audio_element_get_state(s_http) : -1,
+             s_aac ? (int)audio_element_get_state(s_aac) : -1,
+             s_using_http ? 0 : 1, (int)s_clip_active, (int)s_running);
+}
+
+void radio_player_log_health(const char *why)
+{
+    stream_snap(why);
+}
+
+static bool sta_associated(void)
+{
+    wifi_ap_record_t ap = {0};
+    return esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+}
+
 static bool sta_rssi_is_weak(void)
 {
     wifi_ap_record_t ap = {0};
@@ -1190,10 +1267,27 @@ void radio_player_on_rssi_low(int rssi_dbm)
 
 void radio_player_on_sta_lost(void)
 {
+    stream_snap("sta-lost");
     s_wifi_weak_latched = false;
-    if (s_hold_radio) {
-        s_hold_radio = false;
+    /* Keep radio muted. Unholding here used to feed a dead pipe to mix
+     * while net_slow kept looping. Rebuild on GOT_IP. */
+    if (s_running || s_hold_radio) {
+        s_need_hard_on_wifi = true;
+        if (!s_hold_radio) {
+            s_hold_radio = true;
+            s_hold_started_ms = esp_timer_get_time() / 1000;
+            s_hold_last_filled = http_rb_filled();
+            s_hold_reconnects = 0;
+        }
         mix_route_clip_and_radio();
+    }
+}
+
+void radio_player_on_sta_got_ip(void)
+{
+    stream_snap("sta-got-ip");
+    if (s_need_hard_on_wifi) {
+        s_wifi_rejoin = true;
     }
 }
 
@@ -1205,14 +1299,17 @@ void radio_player_hold_stream(bool on)
     s_hold_radio = on;
     if (on) {
         s_hold_started_ms = esp_timer_get_time() / 1000;
-        ESP_LOGW(TAG, "hold radio (HTTP refill) rb=%d", http_rb_filled());
+        s_hold_last_filled = http_rb_filled();
+        s_hold_reconnects = 0;
+        s_hold_snap_ms = 0;
+        stream_snap("hold");
     } else {
+        stream_snap("resume");
         radio_flush_pcm();
         s_last_pcm_ms = esp_timer_get_time() / 1000;
         s_hold_started_ms = 0;
         s_wifi_weak_latched = false;
         radio_player_arm_rssi_threshold();
-        ESP_LOGI(TAG, "resume radio HTTP rb=%d", http_rb_filled());
     }
     mix_route_clip_and_radio();
 }
@@ -1234,8 +1331,7 @@ bool radio_player_wifi_weak_resume_ready(void)
     int need = s_wifi_weak_latched ? SB_WIFI_HTTP_RESUME_BYTES
                                    : SB_HTTP_SLOW_RESUME_BYTES;
     if (filled >= need) {
-        ESP_LOGI(TAG, "HTTP refill ready rb=%d/%d need=%d", filled, SB_HTTP_RB_SIZE,
-                 need);
+        stream_snap("refill-ready");
         return true;
     }
     return false;
@@ -1261,8 +1357,12 @@ bool radio_player_wifi_weak_should_speak(void)
         }
         s_wifi_weak_latched = true;
     }
-    ESP_LOGW(TAG, "wifi weak and HTTP rb=%d/%d — prompt then hold",
-             http_rb_filled(), SB_HTTP_RB_SIZE);
+    if (s_wifi_weak_prompt_ms
+        && (now - s_wifi_weak_prompt_ms) < SB_BUFFER_PROMPT_COOLDOWN_MS) {
+        return false;
+    }
+    s_wifi_weak_prompt_ms = now;
+    stream_snap("wifi-weak");
     return true;
 }
 
@@ -1278,14 +1378,29 @@ bool radio_player_http_slow_should_speak(void)
     if (now < s_stall_grace_until_ms) {
         return false;
     }
-    if (s_wifi_weak_latched || sta_rssi_is_weak()) {
+    if (s_wifi_weak_latched || sta_rssi_is_weak() || !sta_associated()) {
+        s_http_slow_low_since = 0;
         return false;
     }
     int filled = http_rb_filled();
     if (filled < 0 || filled >= SB_HTTP_SLOW_LOW_BYTES) {
+        s_http_slow_low_since = 0;
         return false;
     }
-    ESP_LOGW(TAG, "HTTP slow rb=%d/%d — hold then prompt", filled, SB_HTTP_RB_SIZE);
+    if (!s_http_slow_low_since) {
+        s_http_slow_low_since = now;
+        return false;
+    }
+    if ((now - s_http_slow_low_since) < SB_HTTP_SLOW_DEBOUNCE_MS) {
+        return false;
+    }
+    if (s_http_slow_prompt_ms
+        && (now - s_http_slow_prompt_ms) < SB_BUFFER_PROMPT_COOLDOWN_MS) {
+        return false;
+    }
+    s_http_slow_prompt_ms = now;
+    s_http_slow_low_since = 0;
+    stream_snap("http-slow");
     return true;
 }
 
@@ -1299,26 +1414,76 @@ void radio_player_loop(void)
     if (!s_have_out) {
         return;
     }
+    if (s_wifi_rejoin) {
+        s_wifi_rejoin = false;
+        s_need_hard_on_wifi = false;
+        if (s_url[0]) {
+            radio_hard_restart("wifi back");
+            return;
+        }
+    }
     if (s_radio_pipe && s_using_http && !s_got_music_info && s_radio_open_ms) {
         int64_t now = esp_timer_get_time() / 1000;
         if (now - s_radio_open_ms >= SB_HTTP_FALLBACK_MS) {
-            radio_fallback_https("no music_info");
+            if (!sta_associated()) {
+                static int64_t s_fb_skip_log_ms;
+                if (now - s_fb_skip_log_ms >= 30000) {
+                    s_fb_skip_log_ms = now;
+                    ESP_LOGW(TAG, "HTTPS fallback skipped — no wifi");
+                }
+            } else {
+                radio_fallback_https("no music_info");
+            }
         }
     }
     drain_mix_evt();
     mix_restart_if_needed();
+    {
+        int filled = http_rb_filled();
+        if (s_hold_radio) {
+            int64_t now = esp_timer_get_time() / 1000;
+            int hold_ms = s_hold_started_ms ? (int)(now - s_hold_started_ms) : 0;
+            int period = (!sta_associated() || hold_ms > 30000) ? 30000 : 5000;
+            if (s_hold_snap_ms == 0 || (now - s_hold_snap_ms) >= period) {
+                s_hold_snap_ms = now;
+                stream_snap("hold-tick");
+            }
+        } else if (s_running && filled >= 0) {
+            if (filled < SB_WIFI_HTTP_LOW_BYTES) {
+                int band = filled / (32 * 1024);
+                if (band != s_rb_drop_band) {
+                    s_rb_drop_band = band;
+                    stream_snap("rb-drop");
+                }
+            } else {
+                s_rb_drop_band = -1;
+            }
+        }
+    }
     if (s_hold_radio && !s_wifi_weak_latched && s_running && s_http
-        && s_hold_started_ms > 0) {
+        && s_hold_started_ms > 0 && sta_associated() && !s_need_hard_on_wifi) {
         int64_t now = esp_timer_get_time() / 1000;
         int filled = http_rb_filled();
         if (now - s_hold_started_ms >= SB_HTTP_SLOW_RECONNECT_MS
             && filled >= 0 && filled < SB_HTTP_SLOW_RESUME_BYTES) {
-            radio_soft_restart("HTTP slow hold — reconnect");
-            s_hold_started_ms = now;
+            int grew = filled - s_hold_last_filled;
+            s_hold_last_filled = filled;
+            if (grew >= SB_HTTP_SLOW_GROW_BYTES) {
+                s_hold_started_ms = now;
+                ESP_LOGW(TAG, "HTTP slow hold filling rb=%d grew=%d — wait",
+                         filled, grew);
+            } else if (s_hold_reconnects + 1 >= SB_HTTP_SLOW_RECONNECT_MAX) {
+                radio_hard_restart("HTTP slow hold — still empty");
+                return;
+            } else {
+                s_hold_reconnects++;
+                radio_soft_restart("HTTP slow hold — reconnect");
+                s_hold_started_ms = now;
+                s_hold_last_filled = 0;
+            }
         }
     }
-    if (s_running && !s_clip_active && !s_hold_radio && !s_wifi_weak_latched
-        && !http_buf_critical()) {
+    if (s_running && !s_clip_active && !s_hold_radio && !s_wifi_weak_latched) {
         check_stream_stall();
     }
     if (!s_radio_evt) {
@@ -1353,6 +1518,9 @@ void radio_player_loop(void)
         s_stall_strikes = 0;
         s_last_pcm_ms = esp_timer_get_time() / 1000;
         mix_route_clip_and_radio();
+        if (s_hold_radio) {
+            stream_snap("music-info");
+        }
         ESP_LOGI(TAG, "heap after music: free=%u spiram=%u internal=%u tls=%d",
                  (unsigned)esp_get_free_heap_size(),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
@@ -1360,13 +1528,34 @@ void radio_player_loop(void)
                  s_using_http ? 0 : 1);
         return;
     }
+    if (msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT
+        && msg.cmd == AEL_MSG_CMD_REPORT_STATUS
+        && (msg.source == (void *)s_http || msg.source == (void *)s_aac)) {
+        int st = (int)msg.data;
+        int *prev = (msg.source == (void *)s_http) ? &s_http_evt_st : &s_aac_evt_st;
+        if (st != *prev) {
+            *prev = st;
+            ESP_LOGW(TAG, "stream evt %s status=%d",
+                     msg.source == (void *)s_http ? "http" : "aac", st);
+            if (st <= AEL_STATUS_ERROR_UNKNOWN || st == AEL_STATUS_STATE_FINISHED
+                || st == AEL_STATUS_STATE_STOPPED || st == AEL_STATUS_INPUT_DONE) {
+                stream_snap("el-evt");
+            }
+        }
+    }
     bool bad = msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT
         && msg.cmd == AEL_MSG_CMD_REPORT_STATUS
         && ((int)msg.data == AEL_STATUS_ERROR_OPEN || (int)msg.data == AEL_STATUS_ERROR_INPUT
             || (int)msg.data == AEL_STATUS_ERROR_PROCESS)
         && (msg.source == (void *)s_http || msg.source == (void *)s_aac);
-    if (!bad || s_clip_active || s_hold_radio || s_wifi_weak_latched
+    if (!bad) {
+        return;
+    }
+    if (s_clip_active || s_hold_radio || s_wifi_weak_latched
         || http_buf_critical()) {
+        ESP_LOGW(TAG, "stream err ignored hold=%d clip=%d weak=%d rb=%d st=%d",
+                 (int)s_hold_radio, (int)s_clip_active, (int)s_wifi_weak_latched,
+                 http_rb_filled(), (int)msg.data);
         return;
     }
     if (s_using_http && !s_got_music_info) {

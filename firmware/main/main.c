@@ -114,6 +114,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         }
         ESP_LOGW(TAG, "WiFi disconnected, retrying");
         radio_player_on_sta_lost();
+        clip_player_stop();
         esp_wifi_connect();
         return;
     }
@@ -138,6 +139,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
         s_sta_got_ip = true;
+        radio_player_on_sta_got_ip();
         log_shipper_wifi_up();
         if (s_wifi_events) {
             xEventGroupSetBits(s_wifi_events, WIFI_OK_BIT);
@@ -225,6 +227,9 @@ void app_main(void)
     const esp_app_desc_t *app = esp_app_get_description();
     ESP_LOGI(TAG, "SearaBoom ADF starting (fw %s)", app->version);
     ESP_ERROR_CHECK(config_store_init());
+    /* SPIFFS is already mounted by log_shipper_init(). USB factory rewrites
+     * storage.bin (marker present) but not NVS — drop pad cal only. */
+    config_store_wipe_touch_if_usb_factory();
     ESP_ERROR_CHECK(led_status_init());
     led_status_set(SB_LED_WHITE, 0);
 
@@ -236,6 +241,13 @@ void app_main(void)
     clip_player_init(s_cfg.volume);
     /* Touch element FSM before I2S/AAC. Starting pads at go-live used to buzz. */
     volume_buttons_init(volume_cb, pad_gesture_cb, NULL);
+    if (volume_buttons_needs_cal()) {
+        ESP_LOGI(TAG, "Pad cal: touch + then -");
+        led_status_set(SB_LED_YELLOW, 200);
+        radio_player_start_idle(s_cfg.volume);
+        volume_buttons_calibrate();
+        led_status_set(SB_LED_WHITE, 0);
+    }
 
     bool play_updated = config_store_take_play_updated();
     play_updated = config_store_consume_fw_change(app->version) || play_updated;

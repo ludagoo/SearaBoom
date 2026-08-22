@@ -22,6 +22,7 @@ int radio_player_get_volume(void);
 bool radio_player_has_music_info(void);
 void radio_player_beep(void);
 void radio_player_beep_limit(void);
+void radio_player_ungate(void);
 
 void radio_player_pcm_arm(void);
 bool radio_player_pcm_heard(void);
@@ -48,6 +49,7 @@ void radio_player_probe_result(radio_probe_result_t *out);
 /* WIFI_EVENT_STA_BSS_RSSI_LOW handler: latch only. Play from the app loop. */
 void radio_player_on_rssi_low(int rssi_dbm);
 void radio_player_on_sta_lost(void);
+void radio_player_on_sta_got_ip(void);
 void radio_player_arm_rssi_threshold(void);
 void radio_player_hold_stream(bool on);
 bool radio_player_wifi_weak_holding(void);
@@ -58,5 +60,7 @@ bool radio_player_http_slow_should_speak(void);
 
 /* Station HTTP ringbuf fill in bytes, or -1 if not streaming. */
 int radio_player_http_buffered(void);
+/* One-line stall snapshot (HTTP rb, PCM rb, RSSI, element state). */
+void radio_player_log_health(const char *why);
 
 #endif

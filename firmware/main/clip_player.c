@@ -24,9 +24,10 @@
 static const char *TAG = "clip_player";
 
 #define SB_CLIP_LOOP_PAUSE_MS 2500
-/* net_slow: 3 plays + 2 gaps = 25 s, matching HTTP-slow reconnect. */
+/* net_slow: 3 plays + 2 gaps = 25 s, matching HTTP-slow reconnect. Then stop. */
 #define SB_NET_SLOW_WINDOW_MS 25000
 #define SB_NET_SLOW_PLAYS 3
+#define SB_WIFI_WEAK_PLAYS 4
 
 #define SB_PROBE_SR 44100
 #define SB_PROBE_MS 1000
@@ -138,6 +139,7 @@ static sb_clip_id_t s_pending_field = SB_CLIP_COUNT;
 static int64_t s_loop_at;
 static int64_t s_play_started_us;
 static int s_play_dur_ms;
+static int s_loop_plays;
 
 static audio_pipeline_handle_t s_probe_pipe;
 static audio_element_handle_t s_probe;
@@ -601,17 +603,32 @@ void clip_player_tick(void)
             unlock();
             return;
         }
+        int max_plays = 0;
+        if (s_playing_id == SB_CLIP_NET_SLOW) {
+            max_plays = SB_NET_SLOW_PLAYS;
+        } else if (s_playing_id == SB_CLIP_WIFI_WEAK) {
+            max_plays = SB_WIFI_WEAK_PLAYS;
+        }
+        if (max_plays && s_loop_plays >= max_plays) {
+            ESP_LOGI(TAG, "clip loop stop after %d plays (%s)", s_loop_plays,
+                     clip_name[s_playing_id]);
+            halt_playback();
+            unlock();
+            return;
+        }
         int pause_ms = clip_loop_pause_ms(s_playing_id);
         s_loop_at = esp_timer_get_time() + (int64_t)pause_ms * 1000LL;
         s_active = false;
         radio_player_set_clip_active(false);
         clip_pipe_halt();
-        ESP_LOGI(TAG, "clip loop pause %d ms after %d ms", pause_ms, clip_elapsed_ms());
+        ESP_LOGI(TAG, "clip loop pause %d ms after %d ms play %d", pause_ms,
+                 clip_elapsed_ms(), s_loop_plays);
     }
     if (s_loop_at && s_loop && s_playing_id < SB_CLIP_COUNT
         && esp_timer_get_time() >= s_loop_at) {
         start_id = s_playing_id;
         start_loop = true;
+        s_loop_plays++;
         s_loop_at = 0;
         s_finished = false;
         s_active = false;
@@ -660,6 +677,7 @@ static void halt_playback(void)
 {
     s_loop = false;
     s_loop_at = 0;
+    s_loop_plays = 0;
     s_active = false;
     s_finished = false;
     s_playing_id = SB_CLIP_COUNT;
@@ -694,12 +712,15 @@ void clip_player_release_idle(void)
 
 bool clip_player_is_active(void)
 {
-    return s_active;
+    return s_active || (s_loop && s_playing_id < SB_CLIP_COUNT);
 }
 
 sb_clip_id_t clip_player_playing(void)
 {
-    return s_active ? s_playing_id : SB_CLIP_COUNT;
+    if (s_active || (s_loop && s_playing_id < SB_CLIP_COUNT)) {
+        return s_playing_id;
+    }
+    return SB_CLIP_COUNT;
 }
 
 esp_err_t clip_player_play(sb_clip_id_t id, bool loop)
@@ -729,6 +750,7 @@ esp_err_t clip_player_play(sb_clip_id_t id, bool loop)
     audio_element_set_music_info(s_m2s, 44100, 1, 16);
     s_loop = loop;
     s_loop_at = 0;
+    s_loop_plays = 1;
     s_playing_id = id;
     if (id == SB_CLIP_AP_PAGE) {
         s_pending_page = SB_CLIP_COUNT;

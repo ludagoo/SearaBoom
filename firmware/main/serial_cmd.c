@@ -19,6 +19,7 @@
 #include "radio_player.h"
 #include "log_shipper.h"
 #include "listen_stats.h"
+#include "volume_buttons.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "serial_cmd";
@@ -131,7 +132,7 @@ static void handle_line(char *line)
         return;
     }
     if (strcasecmp(line, "help") == 0 || strcmp(line, "?") == 0) {
-        printf("commands: help | ver | ota | heap | logtest | logstat | listen | reboot | wifi wipe | wifi weak | http | vol [n] | name [x] | city [x] | clip <name>|stop | audiotest\n");
+        printf("commands: help | ver | ota | heap | logtest | logstat | listen | reboot | wifi wipe | wifi weak | http | vol [n] | name [x] | city [x] | clip <name>|stop | audiotest | touch | touch cal | touch raw | touch sens\n");
         printf("  ota        - force OTA now (applies any newer X.Y.Z including patch)\n");
         printf("  heap       - free internal / PSRAM (buffer headroom)\n");
         printf("  logtest    - probe log URL + OTA host connectivity\n");
@@ -142,10 +143,47 @@ static void handle_line(char *line)
         printf("  ver        - print firmware version\n");
         printf("  reboot     - restart\n");
         printf("  wifi wipe  - clear saved SSID/pass and reboot into setup AP\n");
-        printf("  http       - station HTTP ringbuf fill (jitter buffer)\n");
+        printf("  http       - station HTTP ringbuf + stall snapshot\n");
         printf("  vol [n]    - show or set volume 1-21 (quiet test: vol 3)\n");
         printf("  clip name  - play a UI clip (welcome|connected|page|...|stop)\n");
         printf("  audiotest  - PCM start/end markers + AAC clip duration at the mixer tap\n");
+        printf("  touch      - show per-pad sensitivity\n");
+        printf("  touch cal  - factory: hold + , then hold -\n");
+        printf("  touch raw  - 8s live pad readings (press each)\n");
+        printf("  touch sens a b - save vol+ / vol- (e.g. 0.015 0.10)\n");
+        return;
+    }
+    if (strcasecmp(line, "touch") == 0) {
+        float up = 0;
+        float dn = 0;
+        volume_buttons_get_sens(&up, &dn);
+        printf("touch sens vol+=%.3f vol-=%.3f need_cal=%d\n",
+               up, dn, (int)volume_buttons_needs_cal());
+        return;
+    }
+    if (strcasecmp(line, "touch raw") == 0) {
+        volume_buttons_dump_raw(8000);
+        return;
+    }
+    if (strncasecmp(line, "touch sens", 10) == 0) {
+        float up = 0;
+        float dn = 0;
+        if (sscanf(line + 10, "%f %f", &up, &dn) != 2) {
+            printf("usage: touch sens <up> <dn>   e.g. touch sens 0.015 0.10\n");
+            return;
+        }
+        esp_err_t err = volume_buttons_set_sens(up, dn);
+        float a = 0;
+        float b = 0;
+        volume_buttons_get_sens(&a, &b);
+        printf("touch sens vol+=%.3f vol-=%.3f %s\n", a, b, esp_err_to_name(err));
+        return;
+    }
+    if (strcasecmp(line, "touch cal") == 0) {
+        printf("touch cal: hold + then -\n");
+        radio_player_start_idle(radio_player_get_volume());
+        esp_err_t err = volume_buttons_calibrate();
+        printf("touch cal %s\n", esp_err_to_name(err));
         return;
     }
     if (strcasecmp(line, "ver") == 0 || strcasecmp(line, "version") == 0) {
@@ -172,8 +210,10 @@ static void handle_line(char *line)
         return;
     }
     if (strcasecmp(line, "http") == 0) {
-        printf("http rb=%d hold=%d\n", radio_player_http_buffered(),
-               radio_player_wifi_weak_holding() ? 1 : 0);
+        printf("http rb=%d hold=%d music=%d\n", radio_player_http_buffered(),
+               radio_player_wifi_weak_holding() ? 1 : 0,
+               radio_player_has_music_info() ? 1 : 0);
+        radio_player_log_health("serial");
         return;
     }
     if (strncasecmp(line, "vol", 3) == 0 && (line[3] == 0 || line[3] == ' ')) {

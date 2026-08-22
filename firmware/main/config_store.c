@@ -1,4 +1,6 @@
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_log.h"
@@ -327,4 +329,103 @@ esp_err_t config_store_clear_wifi(void)
     nvs_close(h);
     ESP_LOGW(TAG, "Cleared saved WiFi");
     return err;
+}
+
+bool config_store_load_touch_sens(float *up, float *dn)
+{
+    nvs_handle_t h;
+    int32_t u = 0;
+    int32_t d = 0;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+        return false;
+    }
+    uint8_t ok_flag = 0;
+    nvs_get_u8(h, "tsens_ok", &ok_flag);
+    bool ok = ok_flag == 1
+              && nvs_get_i32(h, "tsens_up", &u) == ESP_OK
+              && nvs_get_i32(h, "tsens_dn", &d) == ESP_OK
+              && u >= 1 && u <= 500 && d >= 1 && d <= 500;
+    nvs_close(h);
+    if (!ok) {
+        return false;
+    }
+    if (up) {
+        *up = (float)u / 1000.0f;
+    }
+    if (dn) {
+        *dn = (float)d / 1000.0f;
+    }
+    return true;
+}
+
+esp_err_t config_store_save_touch_sens(float up, float dn)
+{
+    int32_t u = (int32_t)(up * 1000.0f + 0.5f);
+    int32_t d = (int32_t)(dn * 1000.0f + 0.5f);
+    if (u < 1) {
+        u = 1;
+    }
+    if (u > 500) {
+        u = 500;
+    }
+    if (d < 1) {
+        d = 1;
+    }
+    if (d > 500) {
+        d = 500;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_i32(h, "tsens_up", u);
+    if (err == ESP_OK) {
+        err = nvs_set_i32(h, "tsens_dn", d);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_u8(h, "tsens_ok", 1);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "touch sens up=%.3f dn=%.3f", (float)u / 1000.0f,
+                 (float)d / 1000.0f);
+    }
+    return err;
+}
+
+esp_err_t config_store_wipe_touch_if_usb_factory(void)
+{
+    struct stat st;
+    if (stat("/spiffs/usb_factory", &st) != 0) {
+        return ESP_OK;
+    }
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "USB factory: pad-cal wipe skipped (%s), keeping marker",
+                 esp_err_to_name(err));
+        return err;
+    }
+    (void)nvs_erase_key(h, "tsens_ok");
+    (void)nvs_erase_key(h, "tsens_up");
+    (void)nvs_erase_key(h, "tsens_dn");
+    err = nvs_commit(h);
+    nvs_close(h);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "USB factory: pad-cal NVS commit failed (%s), keeping marker",
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    if (unlink("/spiffs/usb_factory") != 0) {
+        ESP_LOGW(TAG, "USB factory: wiped pad cal but could not unlink marker");
+    } else {
+        ESP_LOGW(TAG, "USB factory: wiped pad calibration");
+    }
+    return ESP_OK;
 }

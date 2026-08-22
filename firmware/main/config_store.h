@@ -20,5 +20,11 @@ bool config_store_take_play_updated(void);
 bool config_store_consume_fw_change(const char *version);
 bool config_store_has_wifi(const sb_config_t *cfg);
 esp_err_t config_store_clear_wifi(void);
+/* Per-pad touch sensitivity (fraction of idle). False if never calibrated. */
+bool config_store_load_touch_sens(float *up, float *dn);
+esp_err_t config_store_save_touch_sens(float up, float dn);
+/* USB factory rewrites SPIFFS, not NVS. First boot after that flash sees
+ * /spiffs/usb_factory, drops tsens_* (Wi-Fi stays), then unlinks the marker. */
+esp_err_t config_store_wipe_touch_if_usb_factory(void);
 
 #endif

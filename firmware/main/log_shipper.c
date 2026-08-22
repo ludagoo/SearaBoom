@@ -16,6 +16,7 @@
 #include "esp_wifi.h"
 #include "esp_spiffs.h"
 #include "esp_heap_caps.h"
+#include "esp_attr.h"
 #include "log_shipper.h"
 #include "config_store.h"
 #include "listen_stats.h"
@@ -38,7 +39,9 @@ static const char *TAG = "log_shipper";
 #define LOGQ_PATH "/spiffs/logq"
 #define LOGQ_TMP "/spiffs/logq.tmp"
 
-static char s_ring[LOG_RING_BYTES];
+/* Large log buffers live in PSRAM. s_chunk is the shipper-task staging
+ * buffer (POST text, SPIFFS copy, flash compact) — one 1.5 KB block. */
+static EXT_RAM_BSS_ATTR char s_ring[LOG_RING_BYTES];
 static size_t s_ring_len;
 static SemaphoreHandle_t s_mu;
 static vprintf_like_t s_prev_vprintf;
@@ -51,10 +54,9 @@ static volatile bool s_flush_soon;
 static char s_device_id[18];
 static char s_fw[32];
 static char s_reset[16];
-static char s_chunk[LOG_POST_MAX];
-static char s_payload[LOG_POST_MAX + 768];
-static char s_io[LOG_POST_MAX];
-static char s_spill[LOG_POST_MAX];
+static EXT_RAM_BSS_ATTR char s_chunk[LOG_POST_MAX];
+static EXT_RAM_BSS_ATTR char s_payload[LOG_POST_MAX + 768];
+static EXT_RAM_BSS_ATTR char s_spill[LOG_POST_MAX];
 static size_t s_spill_len;
 static size_t s_pending_len;
 static bool s_pending_flash;
@@ -300,8 +302,8 @@ static void flash_compact(void)
         return;
     }
     size_t n;
-    while ((n = fread(s_io, 1, sizeof(s_io), in)) > 0) {
-        if (fwrite(s_io, 1, n, out) != n) {
+    while ((n = fread(s_chunk, 1, sizeof(s_chunk), in)) > 0) {
+        if (fwrite(s_chunk, 1, n, out) != n) {
             break;
         }
     }
@@ -359,10 +361,10 @@ static void drain_spill_to_flash(void)
         return;
     }
     n = s_spill_len;
-    if (n > sizeof(s_io)) {
-        n = sizeof(s_io);
+    if (n > sizeof(s_chunk)) {
+        n = sizeof(s_chunk);
     }
-    memcpy(s_io, s_spill, n);
+    memcpy(s_chunk, s_spill, n);
     if (n < s_spill_len) {
         memmove(s_spill, s_spill + n, s_spill_len - n);
         s_spill_len -= n;
@@ -370,7 +372,7 @@ static void drain_spill_to_flash(void)
         s_spill_len = 0;
     }
     xSemaphoreGive(s_mu);
-    flash_append(s_io, n);
+    flash_append(s_chunk, n);
 }
 
 static void spill_ring_to_flash(void)
@@ -387,8 +389,8 @@ static void spill_ring_to_flash(void)
         return;
     }
     n = s_ring_len;
-    if (n > sizeof(s_io)) {
-        n = sizeof(s_io);
+    if (n > sizeof(s_chunk)) {
+        n = sizeof(s_chunk);
         for (size_t i = n; i > 0; --i) {
             if (s_ring[i - 1] == '\n') {
                 n = i;
@@ -396,12 +398,12 @@ static void spill_ring_to_flash(void)
             }
         }
     }
-    memcpy(s_io, s_ring, n);
+    memcpy(s_chunk, s_ring, n);
     memmove(s_ring, s_ring + n, s_ring_len - n);
     s_ring_len -= n;
     xSemaphoreGive(s_mu);
     if (n > 0) {
-        flash_append(s_io, n);
+        flash_append(s_chunk, n);
     }
 }
 
@@ -814,6 +816,9 @@ esp_err_t log_shipper_init(void)
     s_inited = true;
 
     ESP_LOGI(TAG, "boot fw=%s reset=%s", s_fw, s_reset);
+    ESP_LOGI(TAG, "PSRAM log buf ring=%u chunk=%u payload=%u spill=%u",
+             (unsigned)sizeof(s_ring), (unsigned)sizeof(s_chunk),
+             (unsigned)sizeof(s_payload), (unsigned)sizeof(s_spill));
 
     mount_spiffs();
     flash_refresh_size();
