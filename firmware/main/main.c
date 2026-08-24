@@ -114,7 +114,6 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         }
         ESP_LOGW(TAG, "WiFi disconnected, retrying");
         radio_player_on_sta_lost();
-        clip_player_stop();
         esp_wifi_connect();
         return;
     }
@@ -299,6 +298,9 @@ void app_main(void)
         led_status_tick();
         clip_player_tick();
         volume_buttons_poll();
+        if (radio_player_take_stop_clip()) {
+            clip_player_stop();
+        }
         if (s_pad_taps) {
             int taps = s_pad_taps;
             s_pad_taps = 0;

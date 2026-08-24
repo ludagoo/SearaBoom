@@ -50,6 +50,8 @@ void radio_player_probe_result(radio_probe_result_t *out);
 void radio_player_on_rssi_low(int rssi_dbm);
 void radio_player_on_sta_lost(void);
 void radio_player_on_sta_got_ip(void);
+/* True once after STA lost while streaming — stop the net_slow clip in app loop. */
+bool radio_player_take_stop_clip(void);
 void radio_player_arm_rssi_threshold(void);
 void radio_player_hold_stream(bool on);
 bool radio_player_wifi_weak_holding(void);

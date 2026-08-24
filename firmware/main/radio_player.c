@@ -152,6 +152,8 @@ static int64_t s_http_slow_low_since;
 static int64_t s_hold_snap_ms;
 static volatile bool s_need_hard_on_wifi;
 static volatile bool s_wifi_rejoin;
+static volatile bool s_sta_lost_pending;
+static volatile bool s_stop_clip;
 static int s_rb_drop_band = -1;
 static int s_http_evt_st = -1;
 static int s_aac_evt_st = -1;
@@ -665,6 +667,8 @@ static void teardown_radio(void)
     s_hold_started_ms = 0;
     s_hold_reconnects = 0;
     s_need_hard_on_wifi = false;
+    s_wifi_rejoin = false;
+    s_sta_lost_pending = false;
     mix_route_clip_and_radio();
     vTaskDelay(pdMS_TO_TICKS(30));
     if (s_radio_raw) {
@@ -1267,28 +1271,33 @@ void radio_player_on_rssi_low(int rssi_dbm)
 
 void radio_player_on_sta_lost(void)
 {
-    stream_snap("sta-lost");
+    /* sys_evt stack is tiny — only flags here. Snap/mix/clip in radio_player_loop. */
     s_wifi_weak_latched = false;
-    /* Keep radio muted. Unholding here used to feed a dead pipe to mix
-     * while net_slow kept looping. Rebuild on GOT_IP. */
     if (s_running || s_hold_radio) {
         s_need_hard_on_wifi = true;
+        s_stop_clip = true;
+        s_sta_lost_pending = true;
         if (!s_hold_radio) {
             s_hold_radio = true;
             s_hold_started_ms = esp_timer_get_time() / 1000;
             s_hold_last_filled = http_rb_filled();
             s_hold_reconnects = 0;
         }
-        mix_route_clip_and_radio();
     }
 }
 
 void radio_player_on_sta_got_ip(void)
 {
-    stream_snap("sta-got-ip");
     if (s_need_hard_on_wifi) {
         s_wifi_rejoin = true;
     }
+}
+
+bool radio_player_take_stop_clip(void)
+{
+    bool stop = s_stop_clip;
+    s_stop_clip = false;
+    return stop;
 }
 
 void radio_player_hold_stream(bool on)
@@ -1414,9 +1423,15 @@ void radio_player_loop(void)
     if (!s_have_out) {
         return;
     }
+    if (s_sta_lost_pending) {
+        s_sta_lost_pending = false;
+        stream_snap("sta-lost");
+        mix_route_clip_and_radio();
+    }
     if (s_wifi_rejoin) {
         s_wifi_rejoin = false;
         s_need_hard_on_wifi = false;
+        stream_snap("sta-got-ip");
         if (s_url[0]) {
             radio_hard_restart("wifi back");
             return;
