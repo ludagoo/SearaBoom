@@ -331,7 +331,7 @@ esp_err_t config_store_clear_wifi(void)
     return err;
 }
 
-bool config_store_load_touch_sens(float *up, float *dn)
+bool config_store_load_touch_sens(float *up, float *dn, uint8_t *rev)
 {
     nvs_handle_t h;
     int32_t u = 0;
@@ -340,7 +340,11 @@ bool config_store_load_touch_sens(float *up, float *dn)
         return false;
     }
     uint8_t ok_flag = 0;
+    uint8_t stored_rev = 1;
     nvs_get_u8(h, "tsens_ok", &ok_flag);
+    if (nvs_get_u8(h, "tsens_rev", &stored_rev) != ESP_OK || stored_rev < 1) {
+        stored_rev = 1;
+    }
     bool ok = ok_flag == 1
               && nvs_get_i32(h, "tsens_up", &u) == ESP_OK
               && nvs_get_i32(h, "tsens_dn", &d) == ESP_OK
@@ -354,6 +358,9 @@ bool config_store_load_touch_sens(float *up, float *dn)
     }
     if (dn) {
         *dn = (float)d / 1000.0f;
+    }
+    if (rev) {
+        *rev = stored_rev;
     }
     return true;
 }
@@ -387,6 +394,9 @@ esp_err_t config_store_save_touch_sens(float up, float dn)
         err = nvs_set_u8(h, "tsens_ok", 1);
     }
     if (err == ESP_OK) {
+        err = nvs_set_u8(h, "tsens_rev", SB_TOUCH_SENS_REV);
+    }
+    if (err == ESP_OK) {
         err = nvs_commit(h);
     }
     nvs_close(h);
@@ -414,6 +424,7 @@ esp_err_t config_store_wipe_touch_if_usb_factory(void)
     (void)nvs_erase_key(h, "tsens_ok");
     (void)nvs_erase_key(h, "tsens_up");
     (void)nvs_erase_key(h, "tsens_dn");
+    (void)nvs_erase_key(h, "tsens_rev");
     err = nvs_commit(h);
     nvs_close(h);
     if (err != ESP_OK) {

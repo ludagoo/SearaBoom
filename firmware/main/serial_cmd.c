@@ -150,7 +150,7 @@ static void handle_line(char *line)
         printf("  touch      - show per-pad sensitivity\n");
         printf("  touch cal  - factory: hold + , then hold -\n");
         printf("  touch raw  - 8s live pad readings (press each)\n");
-        printf("  touch sens a b - save vol+ / vol- (e.g. 0.015 0.10)\n");
+        printf("  touch sens a b - save vol+ / vol- (e.g. 0.22 0.22)\n");
         return;
     }
     if (strcasecmp(line, "touch") == 0) {
@@ -169,7 +169,7 @@ static void handle_line(char *line)
         float up = 0;
         float dn = 0;
         if (sscanf(line + 10, "%f %f", &up, &dn) != 2) {
-            printf("usage: touch sens <up> <dn>   e.g. touch sens 0.015 0.10\n");
+            printf("usage: touch sens <up> <dn>   e.g. touch sens 0.22 0.22\n");
             return;
         }
         esp_err_t err = volume_buttons_set_sens(up, dn);
