@@ -17,8 +17,8 @@
 static const char *TAG = "volume_buttons";
 
 /* channel_sens is a press threshold: higher = firmer press needed.
- * Official S3 button example uses 0.1, which grazes too easily here. */
-#define SB_TOUCH_SENS 0.22f
+ * Boot cal is off. 0.1 was the pre-cal default; a bit firmer here. */
+#define SB_TOUCH_SENS 0.13f
 /* Cal: abs(smooth-idle)/idle vs frozen idle (not live benchmark). */
 #define SB_TOUCH_CAL_SEE 0.008f
 #define SB_TOUCH_CAL_MIN_DELTA 40u
@@ -194,19 +194,10 @@ esp_err_t volume_buttons_init(volume_btn_cb_t cb, volume_gesture_cb_t gesture, v
         return err;
     }
 
-    uint8_t tsens_rev = 0;
-    if (!config_store_load_touch_sens(&s_sens_up, &s_sens_dn, &tsens_rev)) {
-        s_sens_up = SB_TOUCH_SENS;
-        s_sens_dn = SB_TOUCH_SENS;
-        s_need_cal = true;
-    } else if (tsens_rev < SB_TOUCH_SENS_REV) {
-        /* v1 stored 40% of a dedicated press; raise to 80%. */
-        s_sens_up = peak_to_sens(s_sens_up / SB_TOUCH_CAL_FRAC_V1);
-        s_sens_dn = peak_to_sens(s_sens_dn / SB_TOUCH_CAL_FRAC_V1);
-        config_store_save_touch_sens(s_sens_up, s_sens_dn);
-        ESP_LOGI(TAG, "touch sens migrated rev %u -> %d up=%.3f dn=%.3f",
-                 (unsigned)tsens_rev, SB_TOUCH_SENS_REV, s_sens_up, s_sens_dn);
-    }
+    /* Ignore stored pad cal for now; use a fixed threshold on both pads. */
+    s_sens_up = SB_TOUCH_SENS;
+    s_sens_dn = SB_TOUCH_SENS;
+    s_need_cal = false;
 
     err = make_button(board_hw_vol_up_gpio(), +1, s_sens_up, &s_btn[0]);
     if (err == ESP_OK) {

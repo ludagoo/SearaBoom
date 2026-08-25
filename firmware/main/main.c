@@ -242,13 +242,6 @@ void app_main(void)
     clip_player_init(s_cfg.volume);
     /* Touch element FSM before I2S/AAC. Starting pads at go-live used to buzz. */
     volume_buttons_init(volume_cb, pad_gesture_cb, NULL);
-    if (volume_buttons_needs_cal()) {
-        ESP_LOGI(TAG, "Pad cal: touch + then -");
-        led_status_set(SB_LED_YELLOW, 200);
-        radio_player_start_idle(s_cfg.volume);
-        volume_buttons_calibrate();
-        led_status_set(SB_LED_WHITE, 0);
-    }
 
     bool play_updated = config_store_take_play_updated();
     play_updated = config_store_consume_fw_change(app->version) || play_updated;
