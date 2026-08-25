@@ -1,5 +1,5 @@
 set(COMPONENT_REQUIRES)
-set(COMPONENT_PRIV_REQUIRES audio_sal audio_hal esp_dispatcher esp_peripherals display_service)
+set(COMPONENT_PRIV_REQUIRES audio_sal audio_hal esp_dispatcher esp_peripherals display_service driver)
 
 if(CONFIG_AUDIO_BOARD_CUSTOM)
 message(STATUS "Current board name is SearaBoom custom")
@@ -7,6 +7,7 @@ list(APPEND COMPONENT_ADD_INCLUDEDIRS ./searaboom_board ./dummy_codec)
 set(COMPONENT_SRCS
 ./searaboom_board/board.c
 ./searaboom_board/board_pins_config.c
+./searaboom_board/board_hw.c
 ./dummy_codec/dummy_codec.c
 )
 endif()

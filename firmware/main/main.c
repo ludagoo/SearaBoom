@@ -12,6 +12,7 @@
 #include "sdkconfig.h"
 
 #include "searaboom.h"
+#include "board.h"
 #include "config_store.h"
 #include "led_status.h"
 #include "volume_buttons.h"
@@ -226,6 +227,7 @@ void app_main(void)
     const esp_app_desc_t *app = esp_app_get_description();
     ESP_LOGI(TAG, "SearaBoom ADF starting (fw %s)", app->version);
     ESP_ERROR_CHECK(config_store_init());
+    board_hw_detect();
     /* SPIFFS is already mounted by log_shipper_init(). USB factory rewrites
      * storage.bin (marker present) but not NVS — drop pad cal only. */
     config_store_wipe_touch_if_usb_factory();

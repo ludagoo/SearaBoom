@@ -7,7 +7,7 @@ choice CUSTOMER_AUDIO_BOARD
         Select an audio board to use with the ESP-ADF
 
 config MY_BOARD_SEARABOOM
-    bool "SearaBoom ESP32-S3-Zero + external I2S amp"
+    bool "SearaBoom ESP32-S3-Zero/SuperMini + external I2S amp"
 
 endchoice
 

@@ -43,7 +43,7 @@ config SEARABOOM_BTN_VOL_DOWN
     default 6
 
 config SEARABOOM_LED_GPIO
-    int "WS2812 LED GPIO (ESP32-S3-Zero)"
+    int "WS2812 LED GPIO (Zero default; SuperMini is 48 at runtime)"
     default 21
 
 config SEARABOOM_WIFI_TIMEOUT_MS

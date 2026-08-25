@@ -20,6 +20,7 @@
 #include "log_shipper.h"
 #include "listen_stats.h"
 #include "volume_buttons.h"
+#include "board.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "serial_cmd";
@@ -132,7 +133,7 @@ static void handle_line(char *line)
         return;
     }
     if (strcasecmp(line, "help") == 0 || strcmp(line, "?") == 0) {
-        printf("commands: help | ver | ota | heap | logtest | logstat | listen | reboot | wifi wipe | wifi weak | http | vol [n] | name [x] | city [x] | clip <name>|stop | audiotest | touch | touch cal | touch raw | touch sens\n");
+        printf("commands: help | ver | board | ota | heap | logtest | logstat | listen | reboot | wifi wipe | wifi weak | http | vol [n] | name [x] | city [x] | clip <name>|stop | audiotest | touch | touch cal | touch raw | touch sens\n");
         printf("  ota        - force OTA now (applies any newer X.Y.Z including patch)\n");
         printf("  heap       - free internal / PSRAM (buffer headroom)\n");
         printf("  logtest    - probe log URL + OTA host connectivity\n");
@@ -186,9 +187,14 @@ static void handle_line(char *line)
         printf("touch cal %s\n", esp_err_to_name(err));
         return;
     }
+    if (strcasecmp(line, "board") == 0) {
+        board_hw_dump();
+        return;
+    }
     if (strcasecmp(line, "ver") == 0 || strcasecmp(line, "version") == 0) {
         const esp_app_desc_t *app = esp_app_get_description();
-        printf("version=%s kconfig=%s\n", app->version, CONFIG_SEARABOOM_FW_VERSION);
+        printf("version=%s kconfig=%s board=%s\n", app->version,
+               CONFIG_SEARABOOM_FW_VERSION, board_hw_name());
         return;
     }
     if (strcasecmp(line, "reboot") == 0 || strcasecmp(line, "reset") == 0) {

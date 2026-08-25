@@ -1,5 +1,6 @@
 #include "volume_buttons.h"
 #include "searaboom.h"
+#include "board.h"
 #include "config_store.h"
 #include "radio_player.h"
 #include "led_status.h"
@@ -207,9 +208,9 @@ esp_err_t volume_buttons_init(volume_btn_cb_t cb, volume_gesture_cb_t gesture, v
                  (unsigned)tsens_rev, SB_TOUCH_SENS_REV, s_sens_up, s_sens_dn);
     }
 
-    err = make_button(CONFIG_SEARABOOM_BTN_VOL_UP, +1, s_sens_up, &s_btn[0]);
+    err = make_button(board_hw_vol_up_gpio(), +1, s_sens_up, &s_btn[0]);
     if (err == ESP_OK) {
-        err = make_button(CONFIG_SEARABOOM_BTN_VOL_DOWN, -1, s_sens_dn, &s_btn[1]);
+        err = make_button(board_hw_vol_down_gpio(), -1, s_sens_dn, &s_btn[1]);
     }
     if (err == ESP_OK) {
         err = touch_element_start();
@@ -228,8 +229,8 @@ esp_err_t volume_buttons_init(volume_btn_cb_t cb, volume_gesture_cb_t gesture, v
     s_ctx = ctx;
     s_ready = true;
     ESP_LOGI(TAG, "Touch vol-up=T%d vol-down=T%d sens=%.3f/%.3f cal=%d",
-             (int)gpio_to_touch(CONFIG_SEARABOOM_BTN_VOL_UP),
-             (int)gpio_to_touch(CONFIG_SEARABOOM_BTN_VOL_DOWN),
+             (int)gpio_to_touch(board_hw_vol_up_gpio()),
+             (int)gpio_to_touch(board_hw_vol_down_gpio()),
              s_sens_up, s_sens_dn, (int)s_need_cal);
     return ESP_OK;
 }
@@ -284,9 +285,9 @@ static esp_err_t apply_sens(void)
         touch_button_delete(s_btn[1]);
         s_btn[1] = NULL;
     }
-    esp_err_t err = make_button(CONFIG_SEARABOOM_BTN_VOL_UP, +1, s_sens_up, &s_btn[0]);
+    esp_err_t err = make_button(board_hw_vol_up_gpio(), +1, s_sens_up, &s_btn[0]);
     if (err == ESP_OK) {
-        err = make_button(CONFIG_SEARABOOM_BTN_VOL_DOWN, -1, s_sens_dn, &s_btn[1]);
+        err = make_button(board_hw_vol_down_gpio(), -1, s_sens_dn, &s_btn[1]);
     }
     if (err == ESP_OK) {
         err = touch_element_start();
@@ -315,8 +316,8 @@ void volume_buttons_dump_raw(int ms)
     if (!s_ready || ms <= 0) {
         return;
     }
-    touch_pad_t ch_up = gpio_to_touch(CONFIG_SEARABOOM_BTN_VOL_UP);
-    touch_pad_t ch_dn = gpio_to_touch(CONFIG_SEARABOOM_BTN_VOL_DOWN);
+    touch_pad_t ch_up = gpio_to_touch(board_hw_vol_up_gpio());
+    touch_pad_t ch_dn = gpio_to_touch(board_hw_vol_down_gpio());
     uint32_t idle_up = pad_smooth(ch_up);
     uint32_t idle_dn = pad_smooth(ch_dn);
     printf("touch raw idle +=%u -=%u  press each pad\n",
@@ -431,8 +432,8 @@ esp_err_t volume_buttons_calibrate(void)
     chord_reset();
     led_status_set(SB_LED_YELLOW, 0);
     radio_player_ungate();
-    touch_pad_t ch_up = gpio_to_touch(CONFIG_SEARABOOM_BTN_VOL_UP);
-    touch_pad_t ch_dn = gpio_to_touch(CONFIG_SEARABOOM_BTN_VOL_DOWN);
+    touch_pad_t ch_up = gpio_to_touch(board_hw_vol_up_gpio());
+    touch_pad_t ch_dn = gpio_to_touch(board_hw_vol_down_gpio());
 
     printf("cal: hands off\n");
     vTaskDelay(pdMS_TO_TICKS(700));

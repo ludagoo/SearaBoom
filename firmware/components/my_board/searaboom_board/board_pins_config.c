@@ -21,11 +21,12 @@ esp_err_t get_i2s_pins(int port, board_i2s_pin_t *i2s_config)
 {
     AUDIO_NULL_CHECK(TAG, i2s_config, return ESP_FAIL);
     if (port == 0) {
-        /* Match original BoomV5S3Zero.ino pinout */
+        /* Zero and SuperMini carriers both use dout/bclk/ws on 2/3/4.
+         * board_hw_detect() picks the onboard WS2812 GPIO. */
         i2s_config->mck_io_num = -1;
-        i2s_config->bck_io_num = GPIO_NUM_3;
-        i2s_config->ws_io_num = GPIO_NUM_4;
-        i2s_config->data_out_num = GPIO_NUM_2;
+        i2s_config->bck_io_num = board_hw_i2s_bclk();
+        i2s_config->ws_io_num = board_hw_i2s_ws();
+        i2s_config->data_out_num = board_hw_i2s_dout();
         i2s_config->data_in_num = -1;
     } else {
         memset(i2s_config, -1, sizeof(board_i2s_pin_t));
