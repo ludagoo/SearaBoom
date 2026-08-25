@@ -24,8 +24,6 @@
 #include "esp_http_client.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
-#include "esp_app_desc.h"
-#include "esp_mac.h"
 #include "esp_wifi.h"
 #include "ringbuf.h"
 
@@ -81,27 +79,11 @@ static const char *TAG = "radio_player";
 #define SB_PROBE_END_LO 2000
 #define SB_PROBE_END_HI 4500
 
-/* Brasilstream stats group by exact User-Agent. Product + OS comment +
- * STA MAC (no colons) so they can count SearaBoom and still split boxes. */
-static char s_stream_ua[64];
-
+/* Brasilstream groups listeners by User-Agent. VLC 3.0.21 is a known
+ * client string so the boxes count as ordinary players. */
 static const char *stream_user_agent(void)
 {
-    if (s_stream_ua[0]) {
-        return s_stream_ua;
-    }
-    uint8_t mac[6];
-    char ver[16] = "0";
-    const esp_app_desc_t *app = esp_app_get_description();
-    if (app && app->version[0]) {
-        strncpy(ver, app->version, sizeof(ver) - 1);
-        ver[sizeof(ver) - 1] = '\0';
-    }
-    esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    snprintf(s_stream_ua, sizeof(s_stream_ua),
-             "SearaBoom/%s (SearaBoom; %02x%02x%02x%02x%02x%02x)",
-             ver, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    return s_stream_ua;
+    return "VLC/3.0.21";
 }
 
 static audio_pipeline_handle_t s_mix_pipe;
