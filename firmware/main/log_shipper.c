@@ -44,6 +44,7 @@ static const char *TAG = "log_shipper";
 static EXT_RAM_BSS_ATTR char s_ring[LOG_RING_BYTES];
 static size_t s_ring_len;
 static SemaphoreHandle_t s_mu;
+static SemaphoreHandle_t s_console_mu;
 static vprintf_like_t s_prev_vprintf;
 static volatile bool s_paused;
 static volatile bool s_inited;
@@ -233,10 +234,23 @@ static int shipper_vprintf(const char *fmt, va_list args)
             ring_append(line, use);
         }
     }
-    if (s_prev_vprintf) {
-        return s_prev_vprintf(fmt, args);
+    
+    int ret = 0;
+    if (s_console_mu && xSemaphoreTake(s_console_mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (s_prev_vprintf) {
+            ret = s_prev_vprintf(fmt, args);
+        } else {
+            ret = vprintf(fmt, args);
+        }
+        xSemaphoreGive(s_console_mu);
+    } else {
+        if (s_prev_vprintf) {
+            ret = s_prev_vprintf(fmt, args);
+        } else {
+            ret = vprintf(fmt, args);
+        }
     }
-    return vprintf(fmt, args);
+    return ret;
 }
 
 static void mount_spiffs(void)
@@ -792,6 +806,27 @@ static void shipper_task(void *arg)
     }
 }
 
+int log_shipper_vprintf_locked(const char *fmt, va_list args)
+{
+    int ret = 0;
+    if (s_console_mu && xSemaphoreTake(s_console_mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+        ret = vprintf(fmt, args);
+        xSemaphoreGive(s_console_mu);
+    } else {
+        ret = vprintf(fmt, args);
+    }
+    return ret;
+}
+
+int log_shipper_printf(const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    int ret = log_shipper_vprintf_locked(fmt, args);
+    va_end(args);
+    return ret;
+}
+
 esp_err_t log_shipper_init(void)
 {
     if (s_inited) {
@@ -799,6 +834,10 @@ esp_err_t log_shipper_init(void)
     }
     s_mu = xSemaphoreCreateMutex();
     if (!s_mu) {
+        return ESP_ERR_NO_MEM;
+    }
+    s_console_mu = xSemaphoreCreateMutex();
+    if (!s_console_mu) {
         return ESP_ERR_NO_MEM;
     }
 
@@ -863,7 +902,7 @@ void log_shipper_logstat(void)
         spill = s_spill_len;
         xSemaphoreGive(s_mu);
     }
-    printf("logstat ring=%u flash=%u paused=%d ready=%d seq=%u http=%d\n",
+    log_shipper_printf("logstat ring=%u flash=%u paused=%d ready=%d seq=%u http=%d\n",
            (unsigned)ring,
            (unsigned)(flash_unread() + spill),
            (int)s_paused,
