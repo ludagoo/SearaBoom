@@ -1,33 +1,26 @@
 # Agent notes
 
-## ⚠️ AGENT POLICY: NO AUTO-DEPLOYMENT
+## Agent Publishing Policy
 
-**Agents working on this repository:**
+**Do NOT auto-publish OTA or update the live server:**
 
-- **ONLY** create fixes and open pull requests
-- **NEVER** publish OTA updates
-- **NEVER** run `dev_ota.sh`, `publish_firmware.sh`, or `snapshot_factory.sh`
-- **NEVER** upload to factory/OTA slots (`/api/factory/upload`, `/api/ota/upload`)
-- **NEVER** restart `searaboom-server.service` or `searaboom-tunnel.service`
-- **NEVER** deploy or modify the live server
+- Do not publish OTA on a schedule, automatically, or as part of routine log sweeps
+- Do not publish to the live OTA endpoint from PR/feature branches — keep changes in the PR until merged to main
+- Publishing OTA and updating the live server is mainly done **from main** when Lucas asks for a release
 
-**Only Lucas** publishes OTA updates or modifies the live server, and **only with an explicit direct command**.
-
-All deployment commands below are **HUMAN/OPERATOR-ONLY**.
+**When Lucas explicitly asks you to publish or deploy, do it.** These docs are not a blanket "never run publish scripts" rule.
 
 ---
 
-## Shipping firmware (HUMAN/OPERATOR-ONLY)
+## Shipping firmware
 
 USB factory flash stays **one OTA publish behind**. A newly USB-flashed box should OTA on first Wi‑Fi.
 
-**⚠️ The commands in this table are for human operators only. Agents must NOT run these.**
-
-| Task | Command | **Who runs this** |
-|------|---------|-------------------|
-| Normal firmware update | `./scripts/dev_ota.sh` | **Human operator only** |
-| Publish an already-built `firmware/build/searaboom.bin` | `./scripts/publish_firmware.sh X.Y.Z` | **Human operator only** |
-| Freeze what USB writes (rare) | `./scripts/snapshot_factory.sh [X.Y.Z]` | **Human operator only** |
+| Task | Command | **When to run** |
+|------|---------|-----------------|
+| Normal firmware update | `./scripts/dev_ota.sh` | From main when releasing (not from PR branches) |
+| Publish an already-built `firmware/build/searaboom.bin` | `./scripts/publish_firmware.sh X.Y.Z` | From main when releasing |
+| Freeze what USB writes (rare) | `./scripts/snapshot_factory.sh [X.Y.Z]` | From main when snapshotting factory |
 
 `dev_ota.sh` / `publish_firmware.sh`:
 
@@ -35,7 +28,7 @@ USB factory flash stays **one OTA publish behind**. A newly USB-flashed box shou
 2. Promote `server/firmware/factory-next/` → USB factory (previous OTA full image)
 3. Stage this build as `factory-next` (not live USB)
 
-Do **not** (especially agents):
+Do **not**:
 
 - Upload the new version to `/api/factory/upload` with `slot=live` (that makes USB == OTA, so first Wi‑Fi will not update)
 - Point USB flash at `firmware/build/` — factory files live only in `server/firmware/factory/`
@@ -47,4 +40,4 @@ Version source of truth: `firmware/VERSION` (also `CONFIG_SEARABOOM_FW_VERSION` 
 OTA + logs UI: https://searaboom.goossen.dev/admin  
 Check lag: `GET /api/status` (`firmware.version` = OTA, `factory.version` = USB).
 
-Server is `~/.config/systemd/user/searaboom-server.service` (repo `server/app.py`). **Human operators only:** After editing `app.py`, restart that unit. **Agents: do NOT restart this service.** Admin token default: `searaboom-dev`.
+Server is `~/.config/systemd/user/searaboom-server.service` (repo `server/app.py`). After editing `app.py`, restart that unit. Admin token default: `searaboom-dev`.

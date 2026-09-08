@@ -12,26 +12,21 @@ source "$IDF_PATH/export.sh"
 ./scripts/setup_host.sh   # udev + uucp; log out/in once
 ```
 
-User units `searaboom-server` and `searaboom-tunnel` live in `~/.config/systemd/user/` (not in this repo). Same processes: `./scripts/run_server.sh` and `./scripts/run_tunnel.sh`. **Agents: do NOT restart these services.**
+User units `searaboom-server` and `searaboom-tunnel` live in `~/.config/systemd/user/` (not in this repo). Same processes: `./scripts/run_server.sh` and `./scripts/run_tunnel.sh`.
 
 Agent / automation notes for this pipeline: [`AGENTS.md`](AGENTS.md).
 
-## Flash vs OTA (HUMAN/OPERATOR-ONLY)
+## Flash vs OTA
 
-**⚠️ Agents working on this repository:**
-- **ONLY** create fixes and open pull requests
-- **NEVER** publish OTA updates or run deployment scripts
-- See [`AGENTS.md`](AGENTS.md) for the complete agent policy
-
-**The following commands are for human operators only:**
+**Agent publishing policy:** Do not auto-publish OTA or update the live server from PR branches. Publishing is mainly done from main when releasing. See [`AGENTS.md`](AGENTS.md) for details.
 
 USB factory flash is **one publish behind** OTA. A newly flashed box picks up the current OTA the first time it joins Wi‑Fi.
 
-| Situation | What to do | **Who runs this** |
-|-----------|------------|-------------------|
-| New or bricked unit | https://searaboom.goossen.dev/ in Chrome/Edge with the box on **that computer’s** USB, or `idf.py -p /dev/ttyACM0 flash` | **Human operator only** |
-| Day-to-day firmware | `./scripts/dev_ota.sh` (publishes OTA; USB factory stays behind) | **Human operator only** |
-| Freeze a new USB image | `./scripts/snapshot_factory.sh` (only when you mean to change what USB writes) | **Human operator only** |
+| Situation | What to do | **When to run** |
+|-----------|------------|-----------------|
+| New or bricked unit | https://searaboom.goossen.dev/ in Chrome/Edge with the box on **that computer’s** USB, or `idf.py -p /dev/ttyACM0 flash` | Manual flash (new/bricked units) |
+| Day-to-day firmware | `./scripts/dev_ota.sh` (publishes OTA; USB factory stays behind) | From main when releasing |
+| Freeze a new USB image | `./scripts/snapshot_factory.sh` (only when you mean to change what USB writes) | From main when snapshotting factory |
 
 `dev_ota.sh` bumps the **patch** digit and publishes OTA. It promotes the previous OTA full image to USB factory, then stages this build as the next USB image.
 
