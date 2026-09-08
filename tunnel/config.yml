@@ -6,5 +6,5 @@ credentials-file: /home/lucas/Work/SearaBoom/tunnel/e70a4d09-968d-4dac-b0a2-6a39
 
 ingress:
   - hostname: searaboom.goossen.dev
-    service: http://127.0.0.1:8080
+    service: http://127.0.0.1:18080
   - service: http_status:404

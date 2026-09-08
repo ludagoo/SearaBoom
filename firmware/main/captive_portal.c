@@ -6,6 +6,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_task_wdt.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -253,6 +254,9 @@ static void build_ssid_options(void)
     wifi_scan_config_t scan = {0};
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     esp_wifi_start();
+    if (esp_task_wdt_status(NULL) == ESP_OK) {
+        esp_task_wdt_reset();
+    }
     if (esp_wifi_scan_start(&scan, true) != ESP_OK) {
         snprintf(s_ssid_options, sizeof(s_ssid_options),
                  "<option value=\"Nenhum Rede Encontrado\">Nenhum Rede Encontrado</option>");
@@ -549,6 +553,9 @@ static esp_err_t captive_redirect(httpd_req_t *req)
 static void portal_teardown(void)
 {
     s_dns_run = false;
+    if (esp_task_wdt_status(NULL) == ESP_OK) {
+        esp_task_wdt_reset();
+    }
     vTaskDelay(pdMS_TO_TICKS(700));
     if (s_server) {
         httpd_stop(s_server);

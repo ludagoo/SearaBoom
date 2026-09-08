@@ -5,6 +5,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_task_wdt.h"
 #include "searaboom.h"
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
@@ -60,6 +61,9 @@ static void announce_update_found(void)
 static esp_err_t download_firmware(const char *fw_url)
 {
     ESP_LOGI(TAG, "OTA download (audio off, full speed)");
+    if (esp_task_wdt_status(NULL) == ESP_OK) {
+        esp_task_wdt_reset();
+    }
     esp_http_client_config_t ota_http = {
         .url = fw_url,
         .timeout_ms = 60000,
@@ -69,7 +73,11 @@ static esp_err_t download_firmware(const char *fw_url)
     esp_https_ota_config_t ota_config = {
         .http_config = &ota_http,
     };
-    return esp_https_ota(&ota_config);
+    esp_err_t err = esp_https_ota(&ota_config);
+    if (esp_task_wdt_status(NULL) == ESP_OK) {
+        esp_task_wdt_reset();
+    }
+    return err;
 }
 
 static void announce_reboot(const char *new_ver)
@@ -167,7 +175,13 @@ esp_err_t ota_update_check(ota_policy_t policy)
         .crt_bundle_attach = esp_crt_bundle_attach,
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (esp_task_wdt_status(NULL) == ESP_OK) {
+        esp_task_wdt_reset();
+    }
     esp_err_t err = esp_http_client_perform(client);
+    if (esp_task_wdt_status(NULL) == ESP_OK) {
+        esp_task_wdt_reset();
+    }
     int status = esp_http_client_get_status_code(client);
     esp_http_client_cleanup(client);
 
