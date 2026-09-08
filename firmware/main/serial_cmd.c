@@ -145,7 +145,7 @@ static void handle_line(char *line)
         log_shipper_printf("  reboot     - restart\n");
         log_shipper_printf("  wifi wipe  - clear saved SSID/pass and reboot into setup AP\n");
         log_shipper_printf("  http       - station HTTP ringbuf + stall snapshot\n");
-        log_shipper_printf("  vol [n]    - show or set volume 1-21 (quiet test: vol 3)\n");
+        log_shipper_printf("  vol [n]    - show or set volume 1-21 (min/QA: vol 1)\n");
         log_shipper_printf("  clip name  - play a UI clip (welcome|connected|page|...|stop)\n");
         log_shipper_printf("  audiotest  - PCM start/end markers + AAC clip duration at the mixer tap\n");
         log_shipper_printf("  touch      - show per-pad sensitivity\n");

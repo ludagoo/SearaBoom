@@ -1,10 +1,23 @@
 #!/usr/bin/env bash
 # On-device cutoff check: PCM start/end markers, then an AAC clip duration.
+# Usage: audiotest.sh [--box ID]
 set -euo pipefail
-PORT="${SEARABOOM_PORT:-/dev/ttyACM0}"
-python3 - <<PY
-import re, serial, sys, time
-port = "$PORT"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BOX=""
+if [[ "${1:-}" == "--box" ]]; then
+  BOX="${2:?}"
+  shift 2
+fi
+if [[ -n "$BOX" ]]; then
+  PORT="$(python3 "$ROOT/scripts/qa_boxes.py" path "$BOX")"
+else
+  PORT="${SEARABOOM_PORT:-/dev/ttyACM0}"
+fi
+PY="${SEARABOOM_ESPTOOL_PYTHON:-$HOME/.espressif/python_env/idf5.3_py3.14_env/bin/python}"
+export PORT
+"$PY" - <<'PY'
+import os, re, serial, sys, time
+port = os.environ["PORT"]
 s = serial.Serial(port, 115200, timeout=0.5)
 time.sleep(0.15)
 s.write(b"audiotest\n")

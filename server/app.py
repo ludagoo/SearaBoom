@@ -1784,6 +1784,36 @@ def healthz():
     return jsonify({"ok": True})
 
 
+@app.post("/api/lab/origin-webhook")
+def lab_origin_webhook():
+    from lab_origin import verify_webhook
+    from lab_qa import handle_origin_event, seen_delivery, write_status
+
+    raw = request.get_data()
+    headers = {k: v for k, v in request.headers.items()}
+    if not verify_webhook(headers, raw):
+        return jsonify({"error": "invalid signature"}), 401
+    delivery = headers.get("Webhook-Id") or headers.get("webhook-id") or ""
+    if seen_delivery(delivery):
+        return jsonify({"ok": True, "duplicate": True})
+    try:
+        envelope = json.loads(raw.decode() or "{}")
+    except json.JSONDecodeError:
+        return jsonify({"error": "invalid json"}), 400
+    try:
+        result = handle_origin_event(envelope)
+    except Exception as e:
+        write_status({"running": False, "error": str(e)})
+        return jsonify({"ok": False, "error": str(e)}), 202
+    return jsonify(result), 202
+
+
+@app.get("/api/lab/status")
+def lab_status():
+    from lab_qa import flask_status
+    return jsonify(flask_status())
+
+
 @app.get("/api/admin/log-acks")
 def log_acks_list():
     token = request.headers.get("X-Admin-Token") or request.args.get("token")

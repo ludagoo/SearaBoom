@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Freeze the current firmware/build as the USB factory image.
-# Factory stays on this version until the next OTA publish promotes factory-next.
+# Freeze the current firmware/build as the USB factory image (local files only).
+# Does not publish OTA. Prefer ./scripts/publish_firmware.sh so OTA and USB match.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$ROOT/firmware/build"

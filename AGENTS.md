@@ -1,46 +1,49 @@
 # Agent notes
 
-## Agent Publishing Policy
+## How we work
 
-**Do NOT auto-publish OTA or update the live server:**
+```
+branch off main → PR → USB box checks (firmware) → merge
+                 → publish from main only when Lucas asks
+```
 
-- Do not publish OTA on a schedule, automatically, or as part of routine log sweeps
-- Do not publish to the live OTA endpoint from PR/feature branches — keep changes in the PR until merged to main
-- Publishing OTA and updating the live server is mainly done **from main** when Lucas asks for a release
+- `main` is the only long-lived branch (trunk + release). No standing `dev` or `release` branch.
+- Do **not** publish OTA or USB factory from a PR. Do **not** bump `firmware/VERSION` except at release.
+- Do **not** flash dedicated QA boxes (`/dev/searaboom-qa-*`). Those belong to the Origin webhook QA agent.
+- Firmware/device PRs: push and wait for **USB box (s3-zero)** and **USB box (s3-supermini)**.
+  - Rerun quiet QA: comment `/hw-test`
+  - Soak: `/hw-test soak`
+  - Loud / mic: `/hw-test listen` (only when Lucas says the room is OK)
+  - Pads / human steps: `/hw-test hands`
+- Local bring-up: a USB box that is **not** in `~/.config/searaboom/qa-boxes.json`.
+- When opening a PR, use `PULL_REQUEST_TEMPLATE.md`.
 
-**When Lucas explicitly asks you to publish or deploy, do it.** These docs are not a blanket "never run publish scripts" rule.
+## Agent publishing policy
 
----
+**Do NOT auto-publish OTA or update the live server.**
 
-## Shipping firmware
+- Not on a schedule, not from log sweeps, not from PR branches.
+- Publishing is **from `main` when Lucas asks.** Then do it.
 
-USB factory flash stays **one OTA publish behind**. A newly USB-flashed box should OTA on first Wi‑Fi.
+A release ships **one** version to OTA **and** USB factory (`slot=live`).
 
-| Task | Command | **When to run** |
-|------|---------|-----------------|
-| Normal firmware update | `./scripts/dev_ota.sh` | From main when releasing (not from PR branches) |
-| Publish an already-built `firmware/build/searaboom.bin` | `./scripts/publish_firmware.sh X.Y.Z` | From main when releasing |
-| Freeze what USB writes (rare) | `./scripts/snapshot_factory.sh [X.Y.Z]` | From main when snapshotting factory |
+| Task | Command | When |
+|------|---------|------|
+| Firmware release | `./scripts/dev_ota.sh` | From main when Lucas asks |
+| Already-built bin | `./scripts/publish_firmware.sh X.Y.Z` | From main when releasing |
+| USB factory only | `./scripts/snapshot_factory.sh [X.Y.Z]` | Rare |
 
-`dev_ota.sh` / `publish_firmware.sh`:
+Do **not** point the public flash page at `firmware/build/`. Factory files live in `server/firmware/factory/`. USB install for testers is https://searaboom.goossen.dev/. `idf.py flash` is local-dev only, never on QA nodes.
 
-1. Upload the new app as **OTA latest**
-2. Promote `server/firmware/factory-next/` → USB factory (previous OTA full image)
-3. Stage this build as `factory-next` (not live USB)
+Version source of truth: `firmware/VERSION` (also `CONFIG_SEARABOOM_FW_VERSION` in `firmware/sdkconfig.defaults`).
 
-Do **not**:
+OTA + logs: https://searaboom.goossen.dev/admin  
+Lab fleet: `GET /api/lab/status`  
+After a release, `GET /api/status` — `firmware.version` and `factory.version` should match.
 
-- Upload the new version to `/api/factory/upload` with `slot=live` (that makes USB == OTA, so first Wi‑Fi will not update)
-- Point USB flash at `firmware/build/` — factory files live only in `server/firmware/factory/`
-- USB factory is **0.5.0**. OTA latest is **0.5.2**. Firmware after `0.1.0` applies any newer `X.Y.Z` on boot. Do not bump only the patch vs a `0.0.63` factory image — that build ignored patch.
-- Use `idf.py flash` to ship boxes. USB install for testers is https://searaboom.goossen.dev/ (ESP Web Tools). `idf.py flash` is local-dev only (`dev_ota.sh --flash`).
+Server: `~/.config/systemd/user/searaboom-server.service` (repo `server/app.py`). After editing `app.py`, restart that unit. Do **not** restart it from a PR. Admin token default: `searaboom-dev`.
 
-Version source of truth: `firmware/VERSION` (also `CONFIG_SEARABOOM_FW_VERSION` in `firmware/sdkconfig.defaults`). CMake embeds `firmware/VERSION` into the app.
-
-OTA + logs UI: https://searaboom.goossen.dev/admin 
-Check lag: `GET /api/status` (`firmware.version` = OTA, `factory.version` = USB).
-
-Server is `~/.config/systemd/user/searaboom-server.service` (repo `server/app.py`). After editing `app.py`, restart that unit. Admin token default: `searaboom-dev`.
+QA Origin app (this host): `./scripts/setup_origin_app.sh`. Webhook: `POST /api/lab/origin-webhook`.
 
 ## Log acknowledgments
 

@@ -14,23 +14,26 @@ source "$IDF_PATH/export.sh"
 
 User units `searaboom-server` and `searaboom-tunnel` live in `~/.config/systemd/user/` (not in this repo). Same processes: `./scripts/run_server.sh` and `./scripts/run_tunnel.sh`.
 
-Agent / automation notes for this pipeline: [`AGENTS.md`](AGENTS.md).
+Agent / automation notes: [`AGENTS.md`](AGENTS.md).
+
+## How we work
+
+`main` is the only long-lived branch. Work on a PR. Firmware changes get **USB box** checks on the lab (both S3-Zero and SuperMini). Do not flash `/dev/searaboom-qa-*` yourself. Publish OTA + USB factory from `main` only when releasing (`./scripts/dev_ota.sh`).
+
+Rerun / extra QA on a PR: `/hw-test`, `/hw-test soak`, `/hw-test listen` (noise OK), `/hw-test hands` (at the boxes).
 
 ## Flash vs OTA
 
-**Agent publishing policy:** Do not auto-publish OTA or update the live server from PR branches. Publishing is mainly done from main when releasing. See [`AGENTS.md`](AGENTS.md) for details.
-
-USB factory flash is **one publish behind** OTA. A newly flashed box picks up the current OTA the first time it joins Wi‑Fi.
+A release ships the **same** version to OTA and USB factory.
 
 | Situation | What to do | **When to run** |
 |-----------|------------|-----------------|
-| New or bricked unit | https://searaboom.goossen.dev/ in Chrome/Edge with the box on **that computer’s** USB, or `idf.py -p /dev/ttyACM0 flash` | Manual flash (new/bricked units) |
-| Day-to-day firmware | `./scripts/dev_ota.sh` (publishes OTA; USB factory stays behind) | From main when releasing |
-| Freeze a new USB image | `./scripts/snapshot_factory.sh` (only when you mean to change what USB writes) | From main when snapshotting factory |
+| New or bricked unit | https://searaboom.goossen.dev/ in Chrome/Edge with the box on **that computer’s** USB | Manual flash (new/bricked units) |
+| Firmware release | `./scripts/dev_ota.sh` | From main when releasing |
+| USB factory only | `./scripts/snapshot_factory.sh` | Rare |
+| PR hardware QA | push the PR; lab webhook runs Grok on the QA fleet | automatic on firmware paths |
 
-`dev_ota.sh` bumps the **patch** digit and publishes OTA. It promotes the previous OTA full image to USB factory, then stages this build as the next USB image.
-
-The frozen USB image is **0.5.0**. Working tree / OTA latest is **0.5.2**, so a newly USB-flashed box updates on first Wi‑Fi. Firmware after `0.1.0` applies any newer X.Y.Z on boot.
+`dev_ota.sh` bumps the **patch** digit, builds, and publishes that build as both OTA latest and USB factory. Firmware after `0.1.0` applies any newer X.Y.Z on boot. Do not `idf.py flash` dedicated QA boxes.
 
 Factory flash (new boxes): https://searaboom.goossen.dev/  
 OTA + logs: https://searaboom.goossen.dev/admin

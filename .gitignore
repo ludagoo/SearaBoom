@@ -1,7 +1,9 @@
 .venv/
 __pycache__/
 *.pyc
-.cursor/
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**
 firmware/build/
 firmware/sdkconfig
 firmware/sdkconfig.old

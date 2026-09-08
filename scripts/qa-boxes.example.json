@@ -1,0 +1,27 @@
+{
+  "quiet_volume": 1,
+  "listen_box": "zero-fast",
+  "boxes": {
+    "zero-fast": {
+      "usb_serial": "D0:CF:13:07:DE:FC",
+      "hw": "s3-zero",
+      "role": "fast",
+      "note": "USB-JTAG ID_SERIAL_SHORT. Confirm carrier with serial: board"
+    },
+    "supermini-fast": {
+      "usb_serial": "",
+      "hw": "s3-supermini",
+      "role": "fast"
+    },
+    "zero-soak": {
+      "usb_serial": "",
+      "hw": "s3-zero",
+      "role": "soak"
+    },
+    "supermini-soak": {
+      "usb_serial": "",
+      "hw": "s3-supermini",
+      "role": "soak"
+    }
+  }
+}
