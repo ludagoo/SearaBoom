@@ -5,6 +5,7 @@
 #include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_task_wdt.h"
 #include "esp_heap_caps.h"
 #include "clip_player.h"
 #include "radio_player.h"
@@ -591,6 +592,9 @@ static void halt_playback(void);
 
 void clip_player_tick(void)
 {
+    if (esp_task_wdt_status(NULL) == ESP_OK) {
+        esp_task_wdt_reset();
+    }
     volume_buttons_poll();
     config_store_flush_deferred();
     radio_player_loop();

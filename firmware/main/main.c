@@ -8,6 +8,7 @@
 #include "esp_timer.h"
 #include "esp_app_desc.h"
 #include "esp_system.h"
+#include "esp_task_wdt.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
 
@@ -207,8 +208,18 @@ static bool wifi_connect_or_setup(void)
     esp_wifi_set_max_tx_power(68);
 
     led_status_set(SB_LED_RED, 500);
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_events, WIFI_OK_BIT, pdFALSE, pdTRUE,
-                                           pdMS_TO_TICKS(CONFIG_SEARABOOM_WIFI_TIMEOUT_MS));
+    int64_t deadline_ms = (esp_timer_get_time() / 1000) + CONFIG_SEARABOOM_WIFI_TIMEOUT_MS;
+    EventBits_t bits = 0;
+    while ((esp_timer_get_time() / 1000) < deadline_ms) {
+        if (esp_task_wdt_status(NULL) == ESP_OK) {
+            esp_task_wdt_reset();
+        }
+        bits = xEventGroupWaitBits(s_wifi_events, WIFI_OK_BIT, pdFALSE, pdTRUE,
+                                   pdMS_TO_TICKS(1000));
+        if (bits & WIFI_OK_BIT) {
+            break;
+        }
+    }
     return (bits & WIFI_OK_BIT) != 0;
 }
 
@@ -223,6 +234,12 @@ void app_main(void)
     esp_log_level_set("wifi", ESP_LOG_INFO);
 
     log_shipper_init();
+    if (esp_task_wdt_add(NULL) != ESP_OK) {
+        ESP_LOGW(TAG, "task wdt add failed");
+    } else {
+        ESP_LOGI(TAG, "task wdt subscribed timeout=%ds panic=1",
+                 CONFIG_ESP_TASK_WDT_TIMEOUT_S);
+    }
 
     const esp_app_desc_t *app = esp_app_get_description();
     ESP_LOGI(TAG, "SearaBoom ADF starting (fw %s)", app->version);
