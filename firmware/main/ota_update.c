@@ -61,9 +61,17 @@ static void announce_update_found(void)
 static esp_err_t download_firmware(const char *fw_url)
 {
     ESP_LOGI(TAG, "OTA download (audio off, full speed)");
-    if (esp_task_wdt_status(NULL) == ESP_OK) {
-        esp_task_wdt_reset();
+    
+    /* esp_https_ota() blocks for 30-60s downloading the full firmware binary.
+     * The WDT timeout is 15s, so unsubscribe the main task during download to
+     * prevent spurious panic. Re-subscribe after completion. The OTA task itself
+     * is not subscribed, so this only affects the calling (main) task. */
+    bool was_subscribed = (esp_task_wdt_status(NULL) == ESP_OK);
+    if (was_subscribed) {
+        esp_task_wdt_delete(NULL);
+        ESP_LOGI(TAG, "WDT unsubscribed for blocking OTA download");
     }
+    
     esp_http_client_config_t ota_http = {
         .url = fw_url,
         .timeout_ms = 60000,
@@ -74,9 +82,15 @@ static esp_err_t download_firmware(const char *fw_url)
         .http_config = &ota_http,
     };
     esp_err_t err = esp_https_ota(&ota_config);
-    if (esp_task_wdt_status(NULL) == ESP_OK) {
-        esp_task_wdt_reset();
+    
+    if (was_subscribed) {
+        if (esp_task_wdt_add(NULL) == ESP_OK) {
+            ESP_LOGI(TAG, "WDT re-subscribed after OTA download");
+        } else {
+            ESP_LOGW(TAG, "Failed to re-subscribe to WDT after OTA");
+        }
     }
+    
     return err;
 }
 
