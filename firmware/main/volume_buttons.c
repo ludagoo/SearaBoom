@@ -4,6 +4,7 @@
 #include "config_store.h"
 #include "radio_player.h"
 #include "led_status.h"
+#include "log_shipper.h"
 #include "sdkconfig.h"
 #include "esp_timer.h"
 #include "esp_log.h"
@@ -311,7 +312,7 @@ void volume_buttons_dump_raw(int ms)
     touch_pad_t ch_dn = gpio_to_touch(board_hw_vol_down_gpio());
     uint32_t idle_up = pad_smooth(ch_up);
     uint32_t idle_dn = pad_smooth(ch_dn);
-    printf("touch raw idle +=%u -=%u  press each pad\n",
+    log_shipper_printf("touch raw idle +=%u -=%u  press each pad\n",
            (unsigned)idle_up, (unsigned)idle_dn);
     int64_t end = esp_timer_get_time() / 1000 + ms;
     while ((esp_timer_get_time() / 1000) < end) {
@@ -321,7 +322,7 @@ void volume_buttons_dump_raw(int ms)
         uint32_t dd = d > idle_dn ? d - idle_dn : idle_dn - d;
         float ru = idle_up ? (float)du / (float)idle_up : 0;
         float rd = idle_dn ? (float)dd / (float)idle_dn : 0;
-        printf("touch raw +=%u d=%u rel=%.4f  -=%u d=%u rel=%.4f\n",
+        log_shipper_printf("touch raw +=%u d=%u rel=%.4f  -=%u d=%u rel=%.4f\n",
                (unsigned)u, (unsigned)du, ru, (unsigned)d, (unsigned)dd, rd);
         vTaskDelay(pdMS_TO_TICKS(200));
     }
@@ -345,7 +346,7 @@ static void beep_n(int n)
 static void cal_fail(const char *why)
 {
     ESP_LOGW(TAG, "%s", why);
-    printf("%s\n", why);
+    log_shipper_printf("%s\n", why);
     led_status_set(SB_LED_RED, 0);
     radio_player_beep_limit();
     vTaskDelay(pdMS_TO_TICKS(800));
@@ -426,7 +427,7 @@ esp_err_t volume_buttons_calibrate(void)
     touch_pad_t ch_up = gpio_to_touch(board_hw_vol_up_gpio());
     touch_pad_t ch_dn = gpio_to_touch(board_hw_vol_down_gpio());
 
-    printf("cal: hands off\n");
+    log_shipper_printf("cal: hands off\n");
     vTaskDelay(pdMS_TO_TICKS(700));
     uint32_t acc_up = 0;
     uint32_t acc_dn = 0;
@@ -445,7 +446,7 @@ esp_err_t volume_buttons_calibrate(void)
     uint32_t idle_dn = idle_n ? (acc_dn / (uint32_t)idle_n) : 0;
     ESP_LOGI(TAG, "cal idle +=%u -=%u", (unsigned)idle_up, (unsigned)idle_dn);
 
-    printf("cal: hold +\n");
+    log_shipper_printf("cal: hold +\n");
     beep_n(1);
     float peak_up = 0;
     if (!wait_pad(ch_up, idle_up, '+', &peak_up, SB_TOUCH_CAL_TIMEOUT_MS)) {
@@ -462,12 +463,12 @@ esp_err_t volume_buttons_calibrate(void)
         cal_fail(msg);
         return ESP_FAIL;
     }
-    printf("cal: + peak=%.3f\n", peak_up);
+    log_shipper_printf("cal: + peak=%.3f\n", peak_up);
     radio_player_beep();
     wait_release(ch_up, idle_up, 4000);
 
     led_status_set(SB_LED_YELLOW, 200);
-    printf("cal: hold -\n");
+    log_shipper_printf("cal: hold -\n");
     beep_n(2);
     float peak_dn = 0;
     if (!wait_pad(ch_dn, idle_dn, '-', &peak_dn, SB_TOUCH_CAL_TIMEOUT_MS)) {
@@ -484,7 +485,7 @@ esp_err_t volume_buttons_calibrate(void)
         cal_fail(msg);
         return ESP_FAIL;
     }
-    printf("cal: - peak=%.3f\n", peak_dn);
+    log_shipper_printf("cal: - peak=%.3f\n", peak_dn);
 
     s_sens_up = peak_to_sens(peak_up);
     s_sens_dn = peak_to_sens(peak_dn);
@@ -498,7 +499,7 @@ esp_err_t volume_buttons_calibrate(void)
     led_status_set(SB_LED_OFF, 0);
     ESP_LOGI(TAG, "cal done up=%.3f dn=%.3f (peak %.3f/%.3f)",
              s_sens_up, s_sens_dn, peak_up, peak_dn);
-    printf("cal done vol+=%.3f vol-=%.3f\n", s_sens_up, s_sens_dn);
+    log_shipper_printf("cal done vol+=%.3f vol-=%.3f\n", s_sens_up, s_sens_dn);
     return err;
 }
 
