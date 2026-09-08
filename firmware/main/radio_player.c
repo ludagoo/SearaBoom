@@ -62,7 +62,12 @@ static const char *TAG = "radio_player";
 /* 0 busy-spins mix (current + rb-swap races at 240 MHz). 1 tick yields. */
 #define SB_MIX_MUTE_TIMEOUT 1
 #define SB_MIX_CLIP_TIMEOUT 40
-#define SB_MIX_RADIO_TIMEOUT 50
+/* Increased from 50 to 200 ticks to tolerate transient HTTP/network jitter.
+ * The radio PCM rb is 32 KB (~180 ms at 44100 stereo). A 50 ms timeout was
+ * too aggressive: even with strong RSSI, TCP retransmits or server slowness
+ * can briefly starve the AAC decoder, causing mix underruns and rb-drop storms.
+ * 200 ms gives the HTTP→AAC→PCM pipeline time to recover without restarting. */
+#define SB_MIX_RADIO_TIMEOUT 200
 
 #define SB_BEEP_HZ 2000
 #define SB_BEEP_MS 55
