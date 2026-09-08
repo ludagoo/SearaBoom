@@ -18,13 +18,15 @@ Agent / automation notes for this pipeline: [`AGENTS.md`](AGENTS.md).
 
 ## Flash vs OTA
 
+**Agent publishing policy:** Do not auto-publish OTA or update the live server from PR branches. Publishing is mainly done from main when releasing. See [`AGENTS.md`](AGENTS.md) for details.
+
 USB factory flash is **one publish behind** OTA. A newly flashed box picks up the current OTA the first time it joins Wi‑Fi.
 
-| Situation | What to do |
-|-----------|------------|
-| New or bricked unit | https://searaboom.goossen.dev/ in Chrome/Edge with the box on **that computer’s** USB, or `idf.py -p /dev/ttyACM0 flash` |
-| Day-to-day firmware | `./scripts/dev_ota.sh` (publishes OTA; USB factory stays behind) |
-| Freeze a new USB image | `./scripts/snapshot_factory.sh` (only when you mean to change what USB writes) |
+| Situation | What to do | **When to run** |
+|-----------|------------|-----------------|
+| New or bricked unit | https://searaboom.goossen.dev/ in Chrome/Edge with the box on **that computer’s** USB, or `idf.py -p /dev/ttyACM0 flash` | Manual flash (new/bricked units) |
+| Day-to-day firmware | `./scripts/dev_ota.sh` (publishes OTA; USB factory stays behind) | From main when releasing |
+| Freeze a new USB image | `./scripts/snapshot_factory.sh` (only when you mean to change what USB writes) | From main when snapshotting factory |
 
 `dev_ota.sh` bumps the **patch** digit and publishes OTA. It promotes the previous OTA full image to USB factory, then stages this build as the next USB image.
 

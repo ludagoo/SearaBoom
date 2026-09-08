@@ -1,14 +1,26 @@
 # Agent notes
 
+## Agent Publishing Policy
+
+**Do NOT auto-publish OTA or update the live server:**
+
+- Do not publish OTA on a schedule, automatically, or as part of routine log sweeps
+- Do not publish to the live OTA endpoint from PR/feature branches — keep changes in the PR until merged to main
+- Publishing OTA and updating the live server is mainly done **from main** when Lucas asks for a release
+
+**When Lucas explicitly asks you to publish or deploy, do it.** These docs are not a blanket "never run publish scripts" rule.
+
+---
+
 ## Shipping firmware
 
 USB factory flash stays **one OTA publish behind**. A newly USB-flashed box should OTA on first Wi‑Fi.
 
-| Task | Command |
-|------|---------|
-| Normal firmware update | `./scripts/dev_ota.sh` |
-| Publish an already-built `firmware/build/searaboom.bin` | `./scripts/publish_firmware.sh X.Y.Z` |
-| Freeze what USB writes (rare) | `./scripts/snapshot_factory.sh [X.Y.Z]` |
+| Task | Command | **When to run** |
+|------|---------|-----------------|
+| Normal firmware update | `./scripts/dev_ota.sh` | From main when releasing (not from PR branches) |
+| Publish an already-built `firmware/build/searaboom.bin` | `./scripts/publish_firmware.sh X.Y.Z` | From main when releasing |
+| Freeze what USB writes (rare) | `./scripts/snapshot_factory.sh [X.Y.Z]` | From main when snapshotting factory |
 
 `dev_ota.sh` / `publish_firmware.sh`:
 
