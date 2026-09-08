@@ -37,7 +37,39 @@ Do **not**:
 
 Version source of truth: `firmware/VERSION` (also `CONFIG_SEARABOOM_FW_VERSION` in `firmware/sdkconfig.defaults`). CMake embeds `firmware/VERSION` into the app.
 
-OTA + logs UI: https://searaboom.goossen.dev/admin  
+OTA + logs UI: https://searaboom.goossen.dev/admin 
 Check lag: `GET /api/status` (`firmware.version` = OTA, `factory.version` = USB).
 
 Server is `~/.config/systemd/user/searaboom-server.service` (repo `server/app.py`). After editing `app.py`, restart that unit. Admin token default: `searaboom-dev`.
+
+## Log acknowledgments
+
+Device logs persist under `server/logs/`. To avoid reprocessing the same events in sweeps, mark them as acknowledged:
+
+**Persistence:** `server/logs/log_acks.json` stores fingerprints (recurring error patterns) and watermarks (per-device "processed through" timestamps).
+
+**Admin API** (token-protected like other admin routes):
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/admin/log-acks` | GET | List all fingerprint acks and device watermarks |
+| `/api/admin/log-acks/mark` | POST | Mark logs as acked (fingerprint or watermark) |
+| `/api/admin/log-acks/clear` | POST | Clear a fingerprint ack or device watermark |
+| `/api/admin/log-acks/fingerprint` | GET | Compute fingerprint for a log pattern |
+
+**Marking logs:**
+
+- **Fingerprint mode** (for recurring error patterns): `POST /api/admin/log-acks/mark` with `device_id`, `tag`, `msg`, optional `note`, `pr_url`.
+  - Fingerprint = hash(device_id + tag + normalized message). Normalization removes numbers/IPs/timestamps.
+- **Watermark mode** (for "scanned through"): `POST /api/admin/log-acks/mark` with `device_id`, `watermark` (unix timestamp), optional `note`, `pr_url`.
+
+**Querying logs:**
+
+`GET /api/logs?unacked=1` filters out acked logs (by fingerprint or watermark).
+
+**Sweep workflow:**
+
+1. Scan logs with `GET /api/logs?unacked=1` or equivalent.
+2. For each issue filed/fixed, call `/api/admin/log-acks/mark` with the log pattern (fingerprint) or set a device watermark.
+3. Include a `note` describing the fix and/or a `pr_url` linking to the PR.
+4. Skip acked signatures on subsequent sweeps unless volume spikes again (check total vs acked count).

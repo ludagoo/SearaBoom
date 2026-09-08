@@ -45,10 +45,12 @@ LOG_LINES_PER_DEVICE = 2000
 LOGS_DIR = ROOT / "logs"
 DEVICES_PATH = LOGS_DIR / "devices.json"
 GEOCODE_PATH = LOGS_DIR / "geocode.json"
+LOG_ACKS_PATH = LOGS_DIR / "log_acks.json"
 GEO_TTL_S = 24 * 3600
 ONLINE_WINDOW_S = 120
 PLAYING_WINDOW_S = 180
 DEVICES_SAVE_DEBOUNCE_S = 1.0
+ACKS_SAVE_DEBOUNCE_S = 1.0
 GEO_LOOKUP_TIMEOUT_S = 3
 NOMINATIM_MIN_INTERVAL_S = 1.0
 OUVINTES_ID_SALT = os.environ.get("SEARABOOM_OUVINTES_SALT", "searaboom-ouvintes-v1")
@@ -83,6 +85,9 @@ geocode_inflight: set[str] = set()
 _nominatim_lock = threading.Lock()
 _nominatim_last_ts = 0.0
 _devices_save_timer: threading.Timer | None = None
+_acks_save_timer: threading.Timer | None = None
+log_acks: dict[str, dict] = {}
+log_watermarks: dict[str, float] = {}
 subscribers: list[queue.Queue] = []
 
 FW_DIR.mkdir(parents=True, exist_ok=True)
@@ -430,6 +435,44 @@ def schedule_save_devices() -> None:
         _devices_save_timer.start()
 
 
+def acks_for_disk() -> dict:
+    return {
+        "fingerprints": log_acks,
+        "watermarks": log_watermarks,
+    }
+
+
+def flush_acks_now() -> None:
+    global _acks_save_timer
+    with log_lock:
+        timer = _acks_save_timer
+        _acks_save_timer = None
+        snapshot = json.dumps(acks_for_disk(), indent=2) + "\n"
+    if timer is not None:
+        timer.cancel()
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = LOG_ACKS_PATH.with_name("log_acks.json.tmp")
+    tmp.write_text(snapshot)
+    tmp.replace(LOG_ACKS_PATH)
+
+
+def schedule_save_acks() -> None:
+    global _acks_save_timer
+
+    def fire() -> None:
+        global _acks_save_timer
+        with log_lock:
+            _acks_save_timer = None
+        flush_acks_now()
+
+    with log_lock:
+        if _acks_save_timer is not None:
+            _acks_save_timer.cancel()
+        _acks_save_timer = threading.Timer(ACKS_SAVE_DEBOUNCE_S, fire)
+        _acks_save_timer.daemon = True
+        _acks_save_timer.start()
+
+
 def coerce_nonneg_int(val, default=None) -> int | None:
     if isinstance(val, bool) or val is None or val == "":
         return default
@@ -748,6 +791,92 @@ def station_label(station) -> str:
 
 def normalize_city(city: str) -> str:
     return " ".join((city or "").split()).casefold()
+
+
+def normalize_log_message(msg: str) -> str:
+    """Normalize log message for fingerprinting by removing dynamic content."""
+    # Replace numbers, IPs, timestamps, etc. with placeholders
+    msg = re.sub(r"\b\d+\b", "N", msg)
+    msg = re.sub(r"\b0x[0-9a-fA-F]+\b", "0xH", msg)
+    msg = re.sub(r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b", "IP", msg)
+    return " ".join(msg.split())
+
+
+def compute_log_fingerprint(device_id: str, tag: str, msg: str) -> str:
+    """Compute a stable fingerprint for a log entry type."""
+    normalized = normalize_log_message(msg)
+    key = f"{device_id}|{tag or 'none'}|{normalized}"
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+
+
+def is_log_acked_by_fingerprint(device_id: str, tag: str, msg: str) -> bool:
+    """Check if a log entry is acknowledged by fingerprint."""
+    fp = compute_log_fingerprint(device_id, tag, msg)
+    return fp in log_acks
+
+
+def is_log_acked_by_watermark(device_id: str, server_ts: float) -> bool:
+    """Check if a log entry is acknowledged by device watermark."""
+    wm = log_watermarks.get(device_id)
+    return wm is not None and server_ts <= wm
+
+
+def mark_log_acked(device_id: str, tag: str, msg: str, note: str | None = None, pr_url: str | None = None) -> dict:
+    """Mark a log pattern as acknowledged."""
+    fp = compute_log_fingerprint(device_id, tag, msg)
+    ack = {
+        "device_id": device_id,
+        "tag": tag or None,
+        "normalized_msg": normalize_log_message(msg),
+        "fingerprint": fp,
+        "acked_at": utc_iso(),
+    }
+    if note:
+        ack["note"] = str(note).strip()
+    if pr_url:
+        ack["pr_url"] = str(pr_url).strip()
+    with log_lock:
+        log_acks[fp] = ack
+        schedule_save_acks()
+    return ack
+
+
+def mark_device_watermark(device_id: str, server_ts: float, note: str | None = None, pr_url: str | None = None) -> dict:
+    """Mark all logs up to a timestamp as acknowledged for a device."""
+    with log_lock:
+        log_watermarks[device_id] = float(server_ts)
+        schedule_save_acks()
+    result = {
+        "device_id": device_id,
+        "watermark": server_ts,
+        "watermark_iso": utc_iso(server_ts),
+        "marked_at": utc_iso(),
+    }
+    if note:
+        result["note"] = str(note).strip()
+    if pr_url:
+        result["pr_url"] = str(pr_url).strip()
+    return result
+
+
+def clear_log_ack(fingerprint: str) -> bool:
+    """Clear an acknowledgment by fingerprint."""
+    with log_lock:
+        if fingerprint in log_acks:
+            del log_acks[fingerprint]
+            schedule_save_acks()
+            return True
+    return False
+
+
+def clear_device_watermark(device_id: str) -> bool:
+    """Clear a device watermark."""
+    with log_lock:
+        if device_id in log_watermarks:
+            del log_watermarks[device_id]
+            schedule_save_acks()
+            return True
+    return False
 
 
 def flush_geocode_now() -> None:
@@ -1135,16 +1264,46 @@ def load_persisted_logs() -> None:
         rec.setdefault("last_seen", rec.get("first_seen"))
 
 
+def load_log_acks() -> None:
+    if not LOG_ACKS_PATH.is_file():
+        return
+    try:
+        data = json.loads(LOG_ACKS_PATH.read_text())
+    except (json.JSONDecodeError, OSError):
+        return
+    if not isinstance(data, dict):
+        return
+    with log_lock:
+        fps = data.get("fingerprints")
+        if isinstance(fps, dict):
+            for key, val in fps.items():
+                if isinstance(val, dict):
+                    log_acks[str(key)] = val
+        wms = data.get("watermarks")
+        if isinstance(wms, dict):
+            for key, val in wms.items():
+                try:
+                    log_watermarks[str(key)] = float(val)
+                except (TypeError, ValueError):
+                    pass
+
+
 load_persisted_logs()
 backfill_user_flags()
 load_geocode_cache()
+load_log_acks()
 threading.Thread(target=warmup_city_geocode, name="geocode-warmup", daemon=True).start()
 atexit.register(flush_devices_now)
+atexit.register(flush_acks_now)
 
 
 def _handle_stop(_signum, _frame):
     try:
         flush_devices_now()
+    except Exception:
+        pass
+    try:
+        flush_acks_now()
     except Exception:
         pass
     raise SystemExit(0)
@@ -1444,6 +1603,7 @@ def logs_get():
             since = float(since_raw)
         except (TypeError, ValueError):
             since = None
+    unacked_only = coerce_bool(request.args.get("unacked"))
     with log_lock:
         if device:
             lines = list(device_logs.get(device, []))
@@ -1457,6 +1617,19 @@ def logs_get():
         lines = [e for e in lines if float(e.get("ts") or 0) > since]
     if level:
         lines = [e for e in lines if (e.get("level") or "") == level]
+    if unacked_only:
+        with log_lock:
+            lines = [
+                e for e in lines
+                if not (
+                    is_log_acked_by_fingerprint(
+                        e.get("device_id", ""), e.get("tag", ""), e.get("msg", "")
+                    )
+                    or is_log_acked_by_watermark(
+                        e.get("device_id", ""), float(e.get("ts", 0))
+                    )
+                )
+            ]
     lines = lines[-limit:]
     return jsonify({"ok": True, "lines": lines})
 
@@ -1609,6 +1782,105 @@ def stream_proxy(station: str):
 @app.get("/healthz")
 def healthz():
     return jsonify({"ok": True})
+
+
+@app.get("/api/admin/log-acks")
+def log_acks_list():
+    token = request.headers.get("X-Admin-Token") or request.args.get("token")
+    if token != ADMIN_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    with log_lock:
+        acks = list(log_acks.values())
+        watermarks = {
+            device_id: {"device_id": device_id, "watermark": ts, "watermark_iso": utc_iso(ts)}
+            for device_id, ts in log_watermarks.items()
+        }
+    return jsonify({
+        "ok": True,
+        "fingerprints": acks,
+        "watermarks": list(watermarks.values()),
+    })
+
+
+@app.post("/api/admin/log-acks/mark")
+def log_acks_mark():
+    token = request.headers.get("X-Admin-Token") or request.form.get("token")
+    if token != ADMIN_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    device_id = (data.get("device_id") or "").strip().lower()
+    if not device_id:
+        return jsonify({"error": "device_id required"}), 400
+    note = data.get("note")
+    pr_url = data.get("pr_url")
+    
+    # Watermark mode: mark all logs up to a timestamp
+    if "watermark" in data:
+        try:
+            watermark = float(data["watermark"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "invalid watermark timestamp"}), 400
+        result = mark_device_watermark(device_id, watermark, note, pr_url)
+        return jsonify({"ok": True, "watermark": result})
+    
+    # Fingerprint mode: mark specific log pattern
+    tag = data.get("tag", "")
+    msg = data.get("msg", "")
+    if not msg:
+        return jsonify({"error": "msg required for fingerprint mode"}), 400
+    
+    ack = mark_log_acked(device_id, tag, msg, note, pr_url)
+    return jsonify({"ok": True, "ack": ack})
+
+
+@app.post("/api/admin/log-acks/clear")
+def log_acks_clear():
+    token = request.headers.get("X-Admin-Token") or request.form.get("token")
+    if token != ADMIN_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    
+    # Clear watermark
+    if "device_id" in data:
+        device_id = str(data["device_id"]).strip().lower()
+        if clear_device_watermark(device_id):
+            return jsonify({"ok": True, "cleared": "watermark", "device_id": device_id})
+        return jsonify({"error": "watermark not found"}), 404
+    
+    # Clear fingerprint ack
+    if "fingerprint" in data:
+        fp = str(data["fingerprint"]).strip()
+        if clear_log_ack(fp):
+            return jsonify({"ok": True, "cleared": "fingerprint", "fingerprint": fp})
+        return jsonify({"error": "fingerprint not found"}), 404
+    
+    return jsonify({"error": "device_id or fingerprint required"}), 400
+
+
+@app.get("/api/admin/log-acks/fingerprint")
+def log_acks_compute_fingerprint():
+    token = request.headers.get("X-Admin-Token") or request.args.get("token")
+    if token != ADMIN_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    device_id = (request.args.get("device_id") or "").strip().lower()
+    tag = request.args.get("tag", "")
+    msg = request.args.get("msg", "")
+    if not device_id or not msg:
+        return jsonify({"error": "device_id and msg required"}), 400
+    fp = compute_log_fingerprint(device_id, tag, msg)
+    normalized = normalize_log_message(msg)
+    with log_lock:
+        is_acked = fp in log_acks
+        ack_info = log_acks.get(fp) if is_acked else None
+    return jsonify({
+        "ok": True,
+        "fingerprint": fp,
+        "device_id": device_id,
+        "tag": tag or None,
+        "normalized_msg": normalized,
+        "is_acked": is_acked,
+        "ack": ack_info,
+    })
 
 
 @app.errorhandler(404)
