@@ -35,7 +35,7 @@ static const char *TAG = "log_shipper";
 #define LOG_SPILL_PERIOD_MS 10000
 #define LOG_FLASH_CAP (48 * 1024)
 #define LOG_MU_WAIT_MS 5
-#define LOG_TLS_MIN_INTERNAL 8192
+#define LOG_TLS_MIN_INTERNAL 12288
 #define LOGQ_PATH "/spiffs/logq"
 #define LOGQ_TMP "/spiffs/logq.tmp"
 
@@ -690,7 +690,16 @@ static bool ship_chunk(void)
     s_last_http = status;
     bool ok = (err == ESP_OK && status >= 200 && status < 300);
     if (!ok) {
-        ESP_LOGW(TAG, "ship fail err=%s http=%d", esp_err_to_name(err), status);
+        if (err == ESP_ERR_ESP_TLS_CONNECTION_FAILED || err == ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST) {
+            ESP_LOGW(TAG, "ship fail TLS handshake err=%s heap_int=%u http=%d",
+                     esp_err_to_name(err),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     status);
+        } else if (err != ESP_OK) {
+            ESP_LOGW(TAG, "ship fail err=%s http=%d", esp_err_to_name(err), status);
+        } else {
+            ESP_LOGW(TAG, "ship fail http=%d", status);
+        }
     }
     esp_http_client_cleanup(client);
     if (ok) {
@@ -701,8 +710,18 @@ static bool ship_chunk(void)
 
 static bool tls_heap_ok(void)
 {
-    return heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
-           >= LOG_TLS_MIN_INTERNAL;
+    size_t avail = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (avail < LOG_TLS_MIN_INTERNAL) {
+        static int64_t s_last_heap_warn_ms;
+        int64_t now = esp_timer_get_time() / 1000;
+        if (s_last_heap_warn_ms == 0 || (now - s_last_heap_warn_ms) >= 60000) {
+            s_last_heap_warn_ms = now;
+            ESP_LOGW(TAG, "TLS heap low: %u < %d, deferring log ship",
+                     (unsigned)avail, LOG_TLS_MIN_INTERNAL);
+        }
+        return false;
+    }
+    return true;
 }
 
 static bool can_post(void)
