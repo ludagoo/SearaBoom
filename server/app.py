@@ -27,10 +27,9 @@ from flask import Flask, Response, jsonify, request, send_from_directory, stream
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parent
-if str(REPO) not in sys.path:
-    sys.path.insert(0, str(REPO))
-from factory_flasher.layout import esptool_write_args, factory_plan, file_map
-from factory_flasher.packaging import desktop_zip_bytes
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from factory_layout import esptool_write_args, factory_plan, file_map
 
 FW_DIR = ROOT / "firmware"
 META_PATH = FW_DIR / "latest.json"
@@ -226,6 +225,105 @@ def factory_manifest() -> dict:
         "files": files,
         "serial_port": port,
         "serial_present": Path(port).exists(),
+        "flasher": flasher_manifest(),
+    }
+
+
+FLASHER_TARGETS = (
+    {
+        "id": "linux-amd64",
+        "os": "linux",
+        "arch": "amd64",
+        "filename": "searaboom-factory-flasher-linux-amd64",
+        "label": "Linux x86_64",
+    },
+    {
+        "id": "linux-arm64",
+        "os": "linux",
+        "arch": "arm64",
+        "filename": "searaboom-factory-flasher-linux-arm64",
+        "label": "Linux arm64",
+    },
+    {
+        "id": "windows-amd64",
+        "os": "windows",
+        "arch": "amd64",
+        "filename": "searaboom-factory-flasher-windows-amd64.exe",
+        "label": "Windows x64",
+    },
+    {
+        "id": "darwin-amd64",
+        "os": "darwin",
+        "arch": "amd64",
+        "filename": "searaboom-factory-flasher-darwin-amd64",
+        "label": "macOS Intel",
+    },
+    {
+        "id": "darwin-arm64",
+        "os": "darwin",
+        "arch": "arm64",
+        "filename": "searaboom-factory-flasher-darwin-arm64",
+        "label": "macOS Apple silicon",
+    },
+)
+
+
+def flasher_dirs() -> list[Path]:
+    env = os.environ.get("SEARABOOM_FLASHER_DIR")
+    if env:
+        return [Path(env)]
+    return [
+        REPO / "factory_flasher" / "dist",
+        ROOT / "static" / "factory-flasher",
+    ]
+
+
+def flasher_file(filename: str) -> Path | None:
+    safe = Path(filename).name
+    if safe != filename:
+        return None
+    for directory in flasher_dirs():
+        path = directory / safe
+        if path.is_file():
+            return path
+    return None
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def flasher_tool_version() -> str:
+    path = REPO / "factory_flasher" / "VERSION"
+    if path.is_file():
+        return path.read_text().strip()
+    return ""
+
+
+def flasher_manifest() -> dict:
+    downloads = []
+    for target in FLASHER_TARGETS:
+        path = flasher_file(target["filename"])
+        downloads.append({
+            **target,
+            "url": f"/api/factory/flasher/{target['id']}",
+            "ready": bool(path),
+            "size": path.stat().st_size if path else 0,
+            "sha256": sha256_file(path) if path else None,
+        })
+    return {
+        "tool": "searaboom-factory-flasher",
+        "version": flasher_tool_version(),
+        "downloads": downloads,
+        "note": (
+            "One executable per OS/arch. The program fetches the live USB "
+            "factory image from this server at runtime. Firmware is not "
+            "inside the binary."
+        ),
     }
 
 
@@ -1331,15 +1429,37 @@ def factory_web_tools():
 
 
 @app.get("/api/factory/desktop.zip")
-def factory_desktop_zip():
-    data = desktop_zip_bytes()
-    return Response(
-        data,
-        mimetype="application/zip",
-        headers={
-            "Content-Disposition": "attachment; filename=searaboom-factory-flasher.zip",
-            "Cache-Control": "no-store",
-        },
+def factory_desktop_zip_gone():
+    return jsonify({
+        "error": "desktop.zip was removed",
+        "message": "Download one factory-flasher binary from /api/factory/flasher",
+        "flasher": flasher_manifest(),
+    }), 410
+
+
+@app.get("/api/factory/flasher")
+def factory_flasher_index():
+    return jsonify(flasher_manifest())
+
+
+@app.get("/api/factory/flasher/<target_id>")
+def factory_flasher_download(target_id: str):
+    target = next((item for item in FLASHER_TARGETS if item["id"] == target_id), None)
+    if not target:
+        return jsonify({"error": "unknown flasher target", "id": target_id}), 404
+    path = flasher_file(target["filename"])
+    if not path:
+        return jsonify({
+            "error": "flasher binary not built yet",
+            "target": target,
+            "hint": "run ./scripts/build_factory_flasher.sh and leave files in factory_flasher/dist/",
+        }), 404
+    return send_from_directory(
+        path.parent,
+        path.name,
+        as_attachment=True,
+        download_name=target["filename"],
+        mimetype="application/octet-stream",
     )
 
 

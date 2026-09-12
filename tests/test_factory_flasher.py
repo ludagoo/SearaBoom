@@ -1,48 +1,21 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import io
+import hashlib
 import json
+import os
 import sys
-import zipfile
 from pathlib import Path
-from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "server"))
 
-from factory_flasher.core import (  # noqa: E402
-    CAL_CEILING_S,
-    UsbPort,
-    cal_prompt_from_line,
-    cal_terminal,
-    collect_serial_output,
-    eligible_ports,
+from factory_layout import (  # noqa: E402
+    FACTORY_FILES,
     esptool_write_args,
-    fetch_factory_image,
-    is_qa_device_path,
-    new_ports,
-    parse_board_line,
-    parse_progress_line,
-    parse_version_line,
-    validate_manifest,
+    factory_plan,
+    offset_hex,
 )
-from factory_flasher.layout import FACTORY_FILES, factory_plan, offset_hex  # noqa: E402
-from factory_flasher.packaging import desktop_zip_bytes  # noqa: E402
-from factory_flasher.server import request_is_local  # noqa: E402
-from factory_flasher.session import FactorySession  # noqa: E402
-
-
-def _port(device: str, serial: str, vid: int = 0x303A) -> UsbPort:
-    return UsbPort(
-        device=device,
-        serial=serial,
-        vid=vid,
-        pid=0x1001,
-        manufacturer="Espressif",
-        product="USB JTAG/serial debug unit",
-        hwid=f"USB VID:PID=303A:1001 SER={serial}",
-    )
 
 
 def test_layout_matches_restore_script() -> None:
@@ -58,6 +31,17 @@ def test_layout_matches_restore_script() -> None:
     assert "--chip esp32s3" in restore
 
 
+def test_layout_go_matches_python() -> None:
+    go = (ROOT / "factory_flasher" / "internal" / "layout" / "layout.go").read_text()
+    for item in FACTORY_FILES:
+        assert f'Filename: "{item.filename}"' in go
+        assert f"Offset: {offset_hex(item.offset)}," in go or f"Offset: 0x{item.offset:X}," in go or f"Offset: 0x{item.offset:x}," in go
+    assert 'Chip      = "esp32s3"' in go
+    assert "Baud      = 460800" in go
+    assert 'Before    = "default_reset"' in go
+    assert 'After     = "hard_reset"' in go
+
+
 def test_esptool_args_order() -> None:
     tmp = Path("/tmp/searaboom-factory-layout-test")
     tmp.mkdir(parents=True, exist_ok=True)
@@ -70,8 +54,6 @@ def test_esptool_args_order() -> None:
     assert args[:6] == ["--chip", "esp32s3", "-p", "/dev/ttyACM9", "-b", "460800"]
     assert "--before" in args and "default_reset" in args
     assert "--after" in args and "hard_reset" in args
-    joined = " ".join(args)
-    assert "0x0 " in joined or joined.endswith("0x0")
     pos = {item.filename: args.index(str(files[item.filename])) for item in FACTORY_FILES}
     off = {item.filename: args[pos[item.filename] - 1] for item in FACTORY_FILES}
     assert off["bootloader.bin"] == "0x0"
@@ -88,223 +70,6 @@ def test_plan_build_paths() -> None:
     assert by_key["app"]["offset"] == 0x20000
 
 
-def test_progress_and_serial_parsers() -> None:
-    assert parse_progress_line("Writing at 0x00020000... (67 %)") == 67
-    assert parse_progress_line("hello") is None
-    assert parse_version_line("version=0.5.20 kconfig=0.5.20 board=s3-zero") == "0.5.20"
-    assert parse_board_line("board=s3-supermini i2s dout=6") == "s3-supermini"
-    assert cal_prompt_from_line("cal: hold +") == "hold+"
-    assert cal_prompt_from_line("cal: hold -") == "hold-"
-    assert cal_prompt_from_line("touch cal ESP_OK") == "done"
-    assert cal_prompt_from_line("cal fail: no +") == "fail"
-    assert cal_prompt_from_line("touch cal: hold + then -") is None
-    assert cal_terminal("touch cal: hold + then -\ncal: hands off\n") is None
-    assert cal_terminal("cal: hold +\ncal done\ntouch cal ESP_OK") == "done"
-    assert cal_terminal("cal fail: no +\ntouch cal ESP_FAIL") == "fail"
-
-
-def test_qa_paths_skipped() -> None:
-    assert is_qa_device_path("/dev/searaboom-qa-zero-fast")
-    ports = [
-        _port("/dev/searaboom-qa-zero-fast", "AAA"),
-        _port("/dev/ttyACM3", "BBB"),
-    ]
-    ok = eligible_ports(ports, qa_paths=["/dev/searaboom-qa-zero-fast"])
-    assert [p.serial for p in ok] == ["BBB"]
-
-
-def test_qa_serial_skipped_without_symlink() -> None:
-    ports = [
-        _port("/dev/ttyACM3", "D0:CF:13:07:DE:FC"),
-        _port("/dev/ttyACM4", "BOX"),
-    ]
-    ok = eligible_ports(
-        ports,
-        qa_paths=[],
-        qa_serials=["D0:CF:13:07:DE:FC"],
-    )
-    assert [p.serial for p in ok] == ["BOX"]
-
-
-def test_new_ports_after_arm_baseline() -> None:
-    a = _port("/dev/ttyACM0", "A")
-    b = _port("/dev/ttyACM1", "B")
-    assert [p.serial for p in new_ports([a, b], {"A"})] == ["B"]
-
-
-def test_manifest_offset_guard() -> None:
-    meta = {
-        "version": "0.5.20",
-        "files": [
-            {"filename": item.filename, "offset": item.offset}
-            for item in FACTORY_FILES
-        ],
-    }
-    validate_manifest(meta)
-    bad = json.loads(json.dumps(meta))
-    bad["files"][3]["offset"] = 1
-    try:
-        validate_manifest(bad)
-        raise AssertionError("expected offset mismatch")
-    except ValueError as exc:
-        assert "app.bin" in str(exc)
-
-
-def test_fetch_image(tmp_path: Path | None = None) -> None:
-    dest = Path("/tmp/searaboom-factory-fetch-test")
-    dest.mkdir(parents=True, exist_ok=True)
-    blobs = {}
-    meta = {
-        "ready": True,
-        "version": "9.9.9",
-        "files": [
-            {"filename": item.filename, "offset": item.offset, "size": 1}
-            for item in FACTORY_FILES
-        ],
-    }
-    blobs["https://example.test/api/factory"] = json.dumps(meta).encode()
-    for item in FACTORY_FILES:
-        blobs[f"https://example.test/api/factory/{item.filename}"] = b"bin-" + item.key.encode()
-
-    got = fetch_factory_image(
-        "https://example.test",
-        dest,
-        opener=lambda url: blobs[url],
-    )
-    assert got.name == "9.9.9"
-    assert (got / "app.bin").read_bytes() == b"bin-app"
-
-
-def test_session_disarmed_does_not_flash() -> None:
-    flashed = []
-    ports = [_port("/dev/ttyACM5", "NEW")]
-
-    session = FactorySession(
-        image_dir=Path("/tmp"),
-        image_version="0.5.20",
-        list_ports=lambda: ports,
-        flash=lambda *a: flashed.append(a) or 0,
-        serial_cmd=lambda *a: "",
-        wait_port=lambda *a: True,
-        qa_paths=[],
-    )
-    session.tick()
-    assert flashed == []
-    assert session.snapshot()["phase"] == "idle"
-
-
-def test_session_arm_and_flash_pass() -> None:
-    flashed = []
-    ports = [_port("/dev/ttyACM5", "BOX1")]
-
-    def serial_cmd(port, command, wait_s):
-        if command == "ver":
-            return "version=0.5.20 kconfig=0.5.20 board=s3-zero\n"
-        if command == "board":
-            return "board=s3-zero i2s dout=6\n"
-        if command == "touch cal":
-            return "cal: hold +\ncal: hold -\ncal done\ntouch cal ESP_OK\n"
-        return ""
-
-    def flash(port, image_dir, on_line):
-        flashed.append(port)
-        on_line("Writing at 0x00020000... (50 %)")
-        on_line("Writing at 0x00020000... (100 %)")
-        return 0
-
-    session = FactorySession(
-        image_dir=Path("/tmp"),
-        image_version="0.5.20",
-        list_ports=lambda: ports,
-        flash=flash,
-        serial_cmd=serial_cmd,
-        wait_port=lambda *a: True,
-        qa_paths=[],
-        sleep=lambda _s: None,
-    )
-    session.arm(True)
-    session.tick()
-    snap = session.snapshot()
-    assert flashed == ["/dev/ttyACM5"]
-    assert snap["phase"] == "pass"
-    assert snap["progress"] == 100
-    assert all(s["status"] == "pass" for s in snap["confirm"])
-    assert snap["boxes_done"] == 1
-
-
-def test_session_flash_fail() -> None:
-    session = FactorySession(
-        image_dir=Path("/tmp"),
-        image_version="0.5.20",
-        list_ports=lambda: [_port("/dev/ttyACM5", "BOX2")],
-        flash=lambda *a: 1,
-        serial_cmd=lambda *a: "",
-        wait_port=lambda *a: True,
-        qa_paths=[],
-        sleep=lambda _s: None,
-    )
-    session.arm(True)
-    session.tick()
-    snap = session.snapshot()
-    assert snap["phase"] == "fail"
-    assert "esptool" in snap["last_error"] or "esptool" in snap["message"].lower() or snap["last_error"]
-
-
-def test_session_skips_qa_even_if_new() -> None:
-    flashed = []
-    session = FactorySession(
-        image_dir=Path("/tmp"),
-        image_version="0.5.20",
-        list_ports=lambda: [_port("/dev/searaboom-qa-zero-fast", "QA")],
-        flash=lambda *a: flashed.append("nope") or 0,
-        serial_cmd=lambda *a: "",
-        wait_port=lambda *a: True,
-        qa_paths=["/dev/searaboom-qa-zero-fast"],
-        sleep=lambda _s: None,
-    )
-    session.arm(True)
-    session.tick()
-    assert flashed == []
-    assert session.snapshot()["phase"] == "watching"
-
-
-def test_desktop_zip_contains_runner() -> None:
-    data = desktop_zip_bytes()
-    zf = zipfile.ZipFile(io.BytesIO(data))
-    names = zf.namelist()
-    assert "factory_flasher/run.sh" in names
-    assert "factory_flasher/layout.py" in names
-    assert "factory_flasher/static/index.html" in names
-    assert not any("__pycache__" in n for n in names)
-
-
-def test_list_ports_filters_by_vid() -> None:
-    from factory_flasher.core import list_usb_ports
-
-    fake = [
-        SimpleNamespace(
-            device="/dev/ttyACM0",
-            vid=0x303A,
-            pid=1,
-            serial_number="X",
-            manufacturer="Espressif",
-            product="USB JTAG",
-            hwid="USB VID:PID=303A:0001",
-        ),
-        SimpleNamespace(
-            device="/dev/ttyUSB9",
-            vid=0x1234,
-            pid=1,
-            serial_number="nope",
-            manufacturer="Other",
-            product="Hub",
-            hwid="USB VID:PID=1234:0001",
-        ),
-    ]
-    ports = list_usb_ports(lambda: fake)
-    assert [p.device for p in ports] == ["/dev/ttyACM0"]
-
-
 def test_firmware_ignores_old_cal_rev() -> None:
     store_h = (ROOT / "firmware/main/config_store.h").read_text()
     vol = (ROOT / "firmware/main/volume_buttons.c").read_text()
@@ -312,140 +77,97 @@ def test_firmware_ignores_old_cal_rev() -> None:
     assert "rev < SB_TOUCH_SENS_REV" in vol
 
 
-def test_cal_read_early_exit_and_late_success() -> None:
-    t = [0.0]
-    emitted = [False]
-
-    def now() -> float:
-        return t[0]
-
-    def sleep(dt: float) -> None:
-        t[0] += dt
-
-    def read_early() -> str:
-        if t[0] >= 2.0 and not emitted[0]:
-            emitted[0] = True
-            return "cal: hold +\ncal done\ntouch cal ESP_OK\n"
-        return ""
-
-    text = collect_serial_output(
-        read_early,
-        now=now,
-        deadline=CAL_CEILING_S,
-        stop_when=lambda acc: cal_terminal(acc) is not None,
-        idle_sleep=sleep,
-    )
-    assert cal_terminal(text) == "done"
-    assert t[0] < 5
-
-    t[0] = 0.0
-    emitted[0] = False
-
-    def read_late() -> str:
-        if t[0] >= 90.0 and not emitted[0]:
-            emitted[0] = True
-            return "cal: hold -\ncal done\ntouch cal ESP_OK\n"
-        return ""
-
-    text = collect_serial_output(
-        read_late,
-        now=now,
-        deadline=CAL_CEILING_S,
-        stop_when=lambda acc: cal_terminal(acc) is not None,
-        idle_sleep=sleep,
-    )
-    assert cal_terminal(text) == "done"
-    assert t[0] >= 90
-    assert t[0] < CAL_CEILING_S
+def test_udev_copy_matches_scripts() -> None:
+    a = (ROOT / "scripts" / "99-searaboom-esp.rules").read_text()
+    b = (ROOT / "factory_flasher" / "web" / "99-searaboom-esp.rules").read_text()
+    assert a == b
 
 
-def test_calibrate_timeout_does_not_send_second_touch_cal() -> None:
-    cmds: list[str] = []
-
-    def serial_cmd(port, command, wait_s):
-        cmds.append(command)
-        if command == "ver":
-            return "version=0.5.20 kconfig=0.5.20 board=s3-zero\n"
-        if command == "board":
-            return "board=s3-zero i2s dout=6\n"
-        if command == "touch cal":
-            return "cal: hold +\n"
-        return ""
-
-    session = FactorySession(
-        image_dir=Path("/tmp"),
-        image_version="0.5.20",
-        list_ports=lambda: [_port("/dev/ttyACM5", "BOX3")],
-        flash=lambda *a: 0,
-        serial_cmd=serial_cmd,
-        wait_port=lambda *a: True,
-        qa_paths=[],
-        sleep=lambda _s: None,
-    )
-    session.arm(True)
-    session.tick()
-    assert cmds.count("touch cal") == 1
-    assert session.snapshot()["phase"] == "fail"
-    assert session.snapshot()["last_error"] == "cal timeout"
+def test_public_page_offers_binaries_not_zip() -> None:
+    html = (ROOT / "server" / "static" / "index.html").read_text()
+    assert "desktop.zip" not in html
+    assert "./run.sh" not in html
+    assert "/api/factory/flasher" in html
+    assert "Download factory flasher" in html
 
 
-def test_ver_retries_once() -> None:
-    n = {"ver": 0}
-
-    def serial_cmd(port, command, wait_s):
-        if command == "ver":
-            n["ver"] += 1
-            if n["ver"] == 1:
-                return ""
-            return "version=0.5.20 kconfig=0.5.20 board=s3-zero\n"
-        if command == "board":
-            return "board=s3-zero i2s dout=6\n"
-        if command == "touch cal":
-            return "cal done\ntouch cal ESP_OK\n"
-        return ""
-
-    session = FactorySession(
-        image_dir=Path("/tmp"),
-        image_version="0.5.20",
-        list_ports=lambda: [_port("/dev/ttyACM5", "BOX4")],
-        flash=lambda *a: 0,
-        serial_cmd=serial_cmd,
-        wait_port=lambda *a: True,
-        qa_paths=[],
-        sleep=lambda _s: None,
-    )
-    session.arm(True)
-    session.tick()
-    assert n["ver"] == 2
-    assert session.snapshot()["phase"] == "pass"
+def test_python_tree_removed() -> None:
+    gone = [
+        "core.py",
+        "session.py",
+        "server.py",
+        "packaging.py",
+        "__main__.py",
+        "run.sh",
+        "requirements.txt",
+        "layout.py",
+    ]
+    for name in gone:
+        assert not (ROOT / "factory_flasher" / name).exists(), name
 
 
-def test_request_is_local() -> None:
-    assert request_is_local({"Host": "127.0.0.1:8765"})
-    assert request_is_local({"Host": "127.0.0.1:8765", "Origin": "http://127.0.0.1:8765"})
-    assert not request_is_local({"Host": "127.0.0.1:8765", "Origin": "http://evil.example"})
-    assert not request_is_local({"Host": "evil.example"})
+def test_binary_source_does_not_pin_live_firmware() -> None:
+    """Factory PCs always fetch whatever /api/factory is serving."""
+    image_go = (ROOT / "factory_flasher" / "internal" / "image" / "image.go").read_text()
+    main_go = (ROOT / "factory_flasher" / "main.go").read_text()
+    assert 'DefaultFactoryURL = "https://searaboom.goossen.dev"' in image_go
+    assert "image.DefaultFactoryURL" in main_go
+    assert "0.5.20" not in image_go
+    assert "0.5.20" not in main_go
+
+
+def test_flasher_api(tmp_path: Path | None = None) -> None:
+    dest = Path("/tmp/searaboom-flasher-api-test")
+    dest.mkdir(parents=True, exist_ok=True)
+    payload = b"fake-linux-amd64-binary"
+    bin_path = dest / "searaboom-factory-flasher-linux-amd64"
+    bin_path.write_bytes(payload)
+    os.environ["SEARABOOM_FLASHER_DIR"] = str(dest)
+    sys.path.insert(0, str(ROOT / "server"))
+    import app as searaboom_app  # noqa: WPS433
+
+    client = searaboom_app.app.test_client()
+    cat = client.get("/api/factory/flasher").get_json()
+    assert cat["tool"] == "searaboom-factory-flasher"
+    ids = [d["id"] for d in cat["downloads"]]
+    assert ids == [
+        "linux-amd64",
+        "linux-arm64",
+        "windows-amd64",
+        "darwin-amd64",
+        "darwin-arm64",
+    ]
+    linux = next(d for d in cat["downloads"] if d["id"] == "linux-amd64")
+    assert linux["ready"] is True
+    assert linux["sha256"] == hashlib.sha256(payload).hexdigest()
+    win = next(d for d in cat["downloads"] if d["id"] == "windows-amd64")
+    assert win["ready"] is False
+
+    gone = client.get("/api/factory/desktop.zip")
+    assert gone.status_code == 410
+    assert "flasher" in gone.get_json()
+
+    dl = client.get("/api/factory/flasher/linux-amd64")
+    assert dl.status_code == 200
+    assert dl.data == payload
+
+    missing = client.get("/api/factory/flasher/windows-amd64")
+    assert missing.status_code == 404
+
+    fac = client.get("/api/factory").get_json()
+    assert "flasher" in fac
+    assert fac["flasher"]["downloads"][0]["id"] == "linux-amd64"
 
 
 if __name__ == "__main__":
     test_layout_matches_restore_script()
+    test_layout_go_matches_python()
     test_esptool_args_order()
     test_plan_build_paths()
-    test_progress_and_serial_parsers()
-    test_qa_paths_skipped()
-    test_new_ports_after_arm_baseline()
-    test_manifest_offset_guard()
-    test_fetch_image()
-    test_session_disarmed_does_not_flash()
-    test_session_arm_and_flash_pass()
-    test_session_flash_fail()
-    test_session_skips_qa_even_if_new()
-    test_desktop_zip_contains_runner()
-    test_list_ports_filters_by_vid()
     test_firmware_ignores_old_cal_rev()
-    test_cal_read_early_exit_and_late_success()
-    test_calibrate_timeout_does_not_send_second_touch_cal()
-    test_ver_retries_once()
-    test_request_is_local()
-    test_qa_serial_skipped_without_symlink()
+    test_udev_copy_matches_scripts()
+    test_public_page_offers_binaries_not_zip()
+    test_python_tree_removed()
+    test_binary_source_does_not_pin_live_firmware()
+    test_flasher_api()
     print("ok")

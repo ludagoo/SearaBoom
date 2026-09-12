@@ -1,0 +1,6 @@
+# Espressif USB-JTAG/serial (ESP32-S3 etc.) — local flash/monitor without sudo
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", MODE="0666", GROUP="uucp", TAG+="uaccess"
+# Silicon Labs CP210x
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", MODE="0666", GROUP="uucp", TAG+="uaccess"
+# WCH CH340
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", MODE="0666", GROUP="uucp", TAG+="uaccess"
