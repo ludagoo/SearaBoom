@@ -266,6 +266,13 @@ func (s *Session) Arm(armed bool) State {
 // FlashOnce flashes the ESP32-S3 that is already plugged in, then stays
 // disarmed so the next plug-in does not auto-flash.
 func (s *Session) FlashOnce() State {
+	s.mu.Lock()
+	if !s.canStartOnceLocked() {
+		st := copyState(s.state)
+		s.mu.Unlock()
+		return st
+	}
+	s.mu.Unlock()
 	if err := s.RefreshImage(); err != nil {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -274,10 +281,22 @@ func (s *Session) FlashOnce() State {
 		return copyState(s.state)
 	}
 	s.mu.Lock()
+	if !s.canStartOnceLocked() {
+		st := copyState(s.state)
+		s.mu.Unlock()
+		return st
+	}
 	s.wantOnce = true
 	s.mu.Unlock()
 	s.Tick()
 	return s.Snapshot()
+}
+
+func (s *Session) canStartOnceLocked() bool {
+	if s.busy || s.oneshot || s.wantOnce || s.state.Armed {
+		return false
+	}
+	return s.state.Phase == "idle" || s.state.Phase == "watching"
 }
 
 func (s *Session) workOK() bool {
@@ -302,8 +321,27 @@ func (s *Session) Stop() {
 func (s *Session) Tick() {
 	s.mu.Lock()
 	if s.busy {
+		s.wantOnce = false
 		s.mu.Unlock()
 		return
+	}
+	if !s.state.Armed && (s.state.Phase == "pass" || s.state.Phase == "fail") && s.state.Identity != "" {
+		still := false
+		for _, p := range s.eligible() {
+			if p.Identity() == s.state.Identity {
+				still = true
+				break
+			}
+		}
+		if !still {
+			s.state.Phase = "idle"
+			s.state.Port = ""
+			s.state.Identity = ""
+			s.state.Progress = 0
+			s.state.CalPrompt = ""
+			s.state.Confirm = defaultConfirm()
+			s.state.Message = "Disarmed. Arm when you are ready to flash."
+		}
 	}
 	if s.wantOnce && !s.state.Armed {
 		s.wantOnce = false

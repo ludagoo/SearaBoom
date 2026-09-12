@@ -105,6 +105,29 @@ func TestSpaceArmsAndDemoPass(t *testing.T) {
 	}
 }
 
+func TestCapitalFFlashesOnce(t *testing.T) {
+	sess := session.Demo()
+	m := newModel(sess, "dev")
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'F'}})
+	m = next.(model)
+	deadline := time.Now().Add(3 * time.Second)
+	for sess.Snapshot().Phase != "pass" && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if sess.Snapshot().Phase != "pass" || sess.Snapshot().BoxesDone != 1 {
+		t.Fatalf("capital F did not one-shot: %+v", sess.Snapshot())
+	}
+	if sess.Snapshot().Armed {
+		t.Fatal("F must not ARM")
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'F'}})
+	_ = next
+	time.Sleep(200 * time.Millisecond)
+	if sess.Snapshot().BoxesDone != 1 {
+		t.Fatalf("second F after PASS flashed again: %d", sess.Snapshot().BoxesDone)
+	}
+}
+
 func TestQQuits(t *testing.T) {
 	sess := session.Demo()
 	m := newModel(sess, "dev")

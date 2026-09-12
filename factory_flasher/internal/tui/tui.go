@@ -88,8 +88,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "r":
 		m.sess.RequestCalRetry()
-	case "f":
-		if !m.snap.Armed && m.snap.Phase != "flashing" && m.snap.Phase != "calibrate" && m.snap.Phase != "verify" {
+	case "f", "F":
+		if !m.snap.Armed && (m.snap.Phase == "idle" || m.snap.Phase == "watching") {
 			go m.sess.FlashOnce()
 		}
 	}

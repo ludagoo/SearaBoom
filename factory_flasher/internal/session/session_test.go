@@ -105,6 +105,11 @@ func TestFlashOnceDoesNotArmLaterPlugs(t *testing.T) {
 	if len(flashed) != 1 || snap.Phase != "pass" {
 		t.Fatalf("once flashed=%v phase=%s", flashed, snap.Phase)
 	}
+	sess.FlashOnce()
+	sess.Tick()
+	if len(flashed) != 1 || sess.Snapshot().BoxesDone != 1 {
+		t.Fatalf("second FlashOnce after PASS: flashed=%v done=%d", flashed, sess.Snapshot().BoxesDone)
+	}
 	serial = "BOX2"
 	sess.Tick()
 	if len(flashed) != 1 {
