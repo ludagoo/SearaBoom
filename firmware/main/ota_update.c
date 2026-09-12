@@ -79,6 +79,11 @@ static esp_err_t ota_http_append(const char *fw_url, size_t already,
     if (!fw_url || !ota || !written) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (total_size && *total_size > 0 && already >= (size_t)*total_size) {
+        ESP_LOGI(TAG, "OTA already complete %u/%d — skip HTTP",
+                 (unsigned)already, *total_size);
+        return ESP_OK;
+    }
     size_t avail = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (avail < OTA_TLS_MIN_INTERNAL) {
         ESP_LOGW(TAG, "OTA TLS heap low: %u < %d", (unsigned)avail, OTA_TLS_MIN_INTERNAL);
@@ -126,6 +131,15 @@ static esp_err_t ota_http_append(const char *fw_url, size_t already,
         if (clen > 0 && total_size) {
             *total_size = clen;
         }
+    } else if (status == 416) {
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        if (total_size && *total_size > 0 && already >= (size_t)*total_size) {
+            ESP_LOGI(TAG, "OTA Range complete (416) at %u", (unsigned)already);
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "OTA HTTP status=416");
+        return ESP_FAIL;
     } else {
         ESP_LOGW(TAG, "OTA HTTP status=%d", status);
         esp_http_client_close(client);
@@ -208,6 +222,12 @@ static esp_err_t download_firmware(const char *fw_url)
     size_t written = 0;
     int total_size = -1;
     for (int attempt = 0; attempt < OTA_RETRY_MAX; attempt++) {
+        if (total_size > 0 && written >= (size_t)total_size) {
+            ESP_LOGI(TAG, "OTA already complete %u/%d — skip fetch",
+                     (unsigned)written, total_size);
+            err = ESP_OK;
+            break;
+        }
         if (attempt > 0) {
             int wait_ms = 1500 * attempt;
             ESP_LOGW(TAG, "OTA resume attempt %d at %u bytes (wait %d ms)",
