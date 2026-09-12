@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -14,23 +15,29 @@ import (
 
 const pollEvery = 200 * time.Millisecond
 
-var calCopy = map[string]string{
-	"hands-off": "Hands off both pads.",
-	"hold+":     "Hold volume + until it beeps.",
-	"hold-":     "Hold volume − until it beeps.",
-	"done":      "Calibration saved.",
-	"fail":      "Calibration failed. Retry after checking the pads.",
-}
+const (
+	reset      = "\033[0m"
+	bold       = "\033[1m"
+	dim        = "\033[2m"
+	blackGold  = "\033[30;103m" // ARM
+	blackCyan  = "\033[30;106m" // PLUG / HOLD
+	blackYell  = "\033[30;103m" // FLASH
+	blackGreen = "\033[30;102m" // PASS
+	whiteRed   = "\033[97;41m"  // FAIL
+	goldText   = "\033[1;93m"
+)
+
+// AutoFlashWarn is the armed-machine rule. Same sentence on the flash page.
+const AutoFlashWarn = "While ARM'd, any ESP32-S3 plugged into this computer is flashed."
 
 type tickMsg struct{}
 
 type model struct {
-	sess       *session.Session
-	toolVer    string
-	snap       session.State
-	confirmArm bool
-	width      int
-	height     int
+	sess    *session.Session
+	toolVer string
+	snap    session.State
+	width   int
+	height  int
 }
 
 func newModel(sess *session.Session, toolVer string) model {
@@ -73,24 +80,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "q":
 		return m, tea.Quit
-	case " ":
-		if m.snap.Armed {
-			m.sess.Arm(false)
-			m.confirmArm = false
-		} else {
-			m.confirmArm = true
-		}
-	case "y":
-		if m.confirmArm && !m.snap.Armed {
-			m.sess.Arm(true)
-			m.confirmArm = false
-		}
-	case "n", "esc":
-		m.confirmArm = false
+	case " ", "a":
+		m.sess.Arm(!m.snap.Armed)
 	case "d":
 		if m.snap.Armed {
 			m.sess.Arm(false)
-			m.confirmArm = false
 		}
 	case "r":
 		m.sess.RequestCalRetry()
@@ -100,135 +94,171 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-	return Render(m.snap, renderOpts{
-		toolVer:    m.toolVer,
-		confirmArm: m.confirmArm,
-		width:      m.width,
-	})
+	return Render(m.snap, renderOpts{toolVer: m.toolVer, width: m.width})
 }
 
 type renderOpts struct {
-	toolVer    string
-	confirmArm bool
-	width      int
+	toolVer string
+	width   int
+}
+
+type face struct {
+	label string
+	style string
+	hint  string
 }
 
 // Render is the operator screen as plain text (used by the TUI and tests).
 func Render(s session.State, opts renderOpts) string {
 	w := opts.width
-	if w < 48 {
-		w = 48
+	if w < 40 {
+		w = 40
 	}
-	if w > 100 {
-		w = 100
+	if w > 72 {
+		w = 72
 	}
 
+	st := faceFor(s)
 	var b strings.Builder
-	ver := opts.toolVer
-	if ver == "" {
-		ver = "dev"
-	}
-	fmt.Fprintf(&b, "SearaBoom factory flasher  %s\n", ver)
-	fmt.Fprintf(&b, "%s\n\n", imageLine(s))
+	b.WriteString("\n")
+	b.WriteString(banner(st.label, st.style, w))
+	b.WriteString("\n")
+	fmt.Fprintf(&b, "  %s%s%s\n\n", goldText, AutoFlashWarn, reset)
 
-	if opts.confirmArm && !s.Armed {
-		b.WriteString("ARM factory flash?\n")
-		b.WriteString("Re-checks the live USB image, then flashes the box that is\n")
-		b.WriteString("already plugged in (or the next one). QA boxes are skipped.\n\n")
-		b.WriteString("[ Y ] yes    [ N ] no\n")
-		return b.String()
+	if line := statusLine(s); line != "" {
+		fmt.Fprintf(&b, "  %s%s%s\n", dim, line, reset)
 	}
-
-	if s.Armed {
-		b.WriteString("ARMED  — next plug-in flashes.  [ Space / D ] disarm\n")
-	} else {
-		b.WriteString("[ Space ] ARM — flash the next box I plug in\n")
+	if err := errorLine(s); err != "" {
+		fmt.Fprintf(&b, "  %s%s%s%s\n", bold, whiteRed, err, reset)
 	}
-	b.WriteString("[ R ]     retry calibration    [ Q ] quit\n\n")
-
-	phase := s.Phase
-	if s.Port != "" {
-		phase = phase + "  ·  " + s.Port
+	if st.hint != "" {
+		fmt.Fprintf(&b, "  %s\n", st.hint)
 	}
-	fmt.Fprintf(&b, "Phase  %s\n", phase)
-	if s.Message != "" {
-		fmt.Fprintf(&b, "%s\n", s.Message)
-	}
-	b.WriteByte('\n')
-
-	fmt.Fprintf(&b, "[%s]  %d%%\n\n", progressBar(s.Progress, 28), s.Progress)
-
-	switch s.Phase {
-	case "pass":
-		fmt.Fprintf(&b, "PASS  (%d this session)\n\n", s.BoxesDone)
-	case "fail":
-		b.WriteString("FAIL\n")
-		if s.LastError != "" {
-			fmt.Fprintf(&b, "%s\n", s.LastError)
-		}
-		b.WriteByte('\n')
-	}
-
-	if prompt := calLine(s); prompt != "" {
-		fmt.Fprintf(&b, "Cal  %s\n\n", prompt)
-	}
-
-	for _, step := range s.Confirm {
-		mark := "  "
-		switch step.Status {
-		case "pass":
-			mark = "OK"
-		case "fail":
-			mark = "!!"
-		case "active":
-			mark = ">>"
-		}
-		detail := step.Detail
-		if detail != "" {
-			detail = "  —  " + detail
-		}
-		fmt.Fprintf(&b, "  %s  %s%s\n", mark, step.Title, detail)
-	}
-
-	b.WriteString("\nLog\n")
-	log := s.Log
-	if len(log) > 12 {
-		log = log[len(log)-12:]
-	}
-	if len(log) == 0 {
-		b.WriteString("  (waiting)\n")
-	} else {
-		for _, line := range log {
-			fmt.Fprintf(&b, "  %s\n", line)
-		}
-	}
-	_ = w
+	fmt.Fprintf(&b, "  %s\n", keys(s))
 	return b.String()
 }
 
-func imageLine(s session.State) string {
-	if !s.ImageReady {
-		return "No factory image from the live server. ARM will retry."
+func faceFor(s session.State) face {
+	if !s.Armed {
+		hint := "Space  ARM"
+		if !s.ImageReady {
+			hint = "no image — Space retries"
+		}
+		return face{label: "ARM", style: blackGold, hint: hint}
 	}
-	ver := s.ImageVersion
-	if ver == "" {
-		ver = "unknown"
+	switch s.Phase {
+	case "flashing", "verify", "detected":
+		return face{
+			label: "FLASH",
+			style: blackYell,
+			hint:  fmt.Sprintf("%d%%  %s", s.Progress, progressBar(s.Progress, 24)),
+		}
+	case "calibrate":
+		return face{label: calLabel(s), style: blackCyan, hint: calHint(s)}
+	case "pass":
+		n := s.BoxesDone
+		hint := "unplug · next box"
+		if n > 0 {
+			hint = fmt.Sprintf("%d done · unplug · next box", n)
+		}
+		return face{label: "PASS", style: blackGreen, hint: hint}
+	case "fail":
+		return face{label: "FAIL", style: whiteRed, hint: failHint(s)}
+	default:
+		return face{label: "PLUG", style: blackCyan, hint: "plug an ESP32-S3 — it flashes"}
 	}
-	src := s.ImageSource
-	if src == "" {
-		src = s.ImageDir
-	}
-	return fmt.Sprintf("Live USB image %s  ·  ESP32-S3  ·  4MB  ·  %s", ver, src)
 }
 
-func calLine(s session.State) string {
-	if s.Phase != "calibrate" && s.CalPrompt == "" {
+func calLabel(s session.State) string {
+	switch s.CalPrompt {
+	case "hold+":
+		return "HOLD +"
+	case "hold-":
+		return "HOLD −"
+	case "hands-off":
+		return "HANDS OFF"
+	case "fail":
+		return "CAL FAIL"
+	case "done":
+		return "PASS"
+	default:
+		return "CAL"
+	}
+}
+
+func calHint(s session.State) string {
+	switch s.CalPrompt {
+	case "hold+":
+		return "hold volume + until it beeps"
+	case "hold-":
+		return "hold volume − until it beeps"
+	case "hands-off":
+		return "hands off both pads"
+	case "fail":
+		return "R  retry"
+	default:
 		return ""
 	}
-	if text, ok := calCopy[s.CalPrompt]; ok {
-		return text
+}
+
+func failHint(s session.State) string {
+	if s.CalPrompt == "fail" {
+		return "R  retry"
 	}
-	return "Calibration in progress."
+	return "unplug · check cable · Space to ARM"
+}
+
+func statusLine(s session.State) string {
+	ver := s.ImageVersion
+	if ver == "" {
+		ver = "—"
+	}
+	parts := []string{ver}
+	if s.Port != "" {
+		parts = append(parts, s.Port)
+	}
+	if s.Phase == "flashing" || s.Phase == "verify" {
+		parts = append(parts, fmt.Sprintf("%d%%", s.Progress))
+	}
+	return strings.Join(parts, "  ·  ")
+}
+
+func errorLine(s session.State) string {
+	if s.Phase != "fail" && s.CalPrompt != "fail" {
+		return ""
+	}
+	if s.LastError != "" {
+		return s.LastError
+	}
+	if s.Message != "" && s.Phase == "fail" {
+		return s.Message
+	}
+	return ""
+}
+
+func keys(s session.State) string {
+	if s.Armed {
+		return dim + "Space  disarm    Q  quit" + reset
+	}
+	return dim + "Space  ARM    Q  quit" + reset
+}
+
+func banner(label, style string, width int) string {
+	inner := width - 4
+	if inner < 16 {
+		inner = 16
+	}
+	label = strings.TrimSpace(label)
+	n := utf8.RuneCountInString(label)
+	if n > inner {
+		inner = n
+	}
+	left := (inner - n) / 2
+	right := inner - n - left
+	blank := style + strings.Repeat(" ", inner) + reset
+	mid := style + strings.Repeat(" ", left) + label + strings.Repeat(" ", right) + reset
+	indent := "  "
+	return indent + blank + "\n" + indent + blank + "\n" + indent + mid + "\n" + indent + blank + "\n" + indent + blank + "\n"
 }
 
 func progressBar(pct, width int) string {
@@ -242,5 +272,5 @@ func progressBar(pct, width int) string {
 		width = 8
 	}
 	fill := width * pct / 100
-	return strings.Repeat("#", fill) + strings.Repeat("-", width-fill)
+	return strings.Repeat("█", fill) + strings.Repeat("░", width-fill)
 }

@@ -22,26 +22,58 @@ func TestRenderHasNoBrowserPath(t *testing.T) {
 	if !strings.Contains(out, "ARM") {
 		t.Fatalf("missing ARM:\n%s", out)
 	}
+	if !strings.Contains(out, AutoFlashWarn) {
+		t.Fatalf("missing auto-flash warning:\n%s", out)
+	}
+	if strings.Contains(out, "Writing at") || strings.Contains(out, "\nLog\n") {
+		t.Fatalf("log dump is the main UI:\n%s", out)
+	}
 }
 
-func TestSpaceThenYArmsAndDemoPass(t *testing.T) {
+func TestBigStates(t *testing.T) {
+	cases := []struct {
+		phase string
+		armed bool
+		want  string
+	}{
+		{phase: "idle", armed: false, want: "ARM"},
+		{phase: "watching", armed: true, want: "PLUG"},
+		{phase: "flashing", armed: true, want: "FLASH"},
+		{phase: "pass", armed: true, want: "PASS"},
+		{phase: "fail", armed: true, want: "FAIL"},
+	}
+	for _, tc := range cases {
+		st := session.State{Phase: tc.phase, Armed: tc.armed, ImageReady: true, ImageVersion: "0.0.0"}
+		if tc.phase == "fail" {
+			st.LastError = "cable loose"
+		}
+		out := Render(st, renderOpts{width: 60})
+		if !strings.Contains(out, tc.want) {
+			t.Fatalf("%s: want %s in\n%s", tc.phase, tc.want, out)
+		}
+		if !strings.Contains(out, AutoFlashWarn) {
+			t.Fatalf("%s: missing auto-flash warning:\n%s", tc.phase, out)
+		}
+		if tc.phase == "fail" && !strings.Contains(out, "cable loose") {
+			t.Fatalf("fail hid error:\n%s", out)
+		}
+		if strings.Contains(out, "0.5.20") {
+			t.Fatal("pinned")
+		}
+	}
+}
+
+func TestSpaceArmsAndDemoPass(t *testing.T) {
 	sess := session.Demo()
 	m := newModel(sess, "dev")
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
 	m = next.(model)
-	if !m.confirmArm {
-		t.Fatal("space should ask to confirm ARM")
-	}
-	if strings.Contains(m.View(), "0.5.20") {
-		t.Fatal("confirm view pinned firmware")
-	}
-	if !strings.Contains(m.View(), "ARM factory flash") {
-		t.Fatalf("confirm:\n%s", m.View())
-	}
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
-	m = next.(model)
 	if !sess.Snapshot().Armed {
-		t.Fatal("Y should ARM")
+		t.Fatal("Space should ARM")
+	}
+	out := Render(sess.Snapshot(), renderOpts{width: 60})
+	if !strings.Contains(out, "PLUG") {
+		t.Fatalf("armed should be PLUG:\n%s", out)
 	}
 	sess.Tick()
 	deadline := time.Now().Add(3 * time.Second)
@@ -52,12 +84,15 @@ func TestSpaceThenYArmsAndDemoPass(t *testing.T) {
 	if snap.Phase != "pass" || snap.BoxesDone != 1 {
 		t.Fatalf("demo walk %+v", snap)
 	}
-	out := Render(snap, renderOpts{toolVer: "dev", width: 80})
+	out = Render(snap, renderOpts{toolVer: "dev", width: 80})
 	if !strings.Contains(out, "PASS") {
 		t.Fatalf("pass view:\n%s", out)
 	}
 	if !strings.Contains(out, "0.0.0") {
 		t.Fatalf("demo version missing:\n%s", out)
+	}
+	if strings.Contains(out, "Writing at") {
+		t.Fatalf("pass view dumped log:\n%s", out)
 	}
 }
 

@@ -45,11 +45,9 @@ people should paste a one-liner above.
 
 ## Operator loop
 
-1. **ARM** (Space, then Y). ARM re-checks the live server. One box already
-   plugged in is flashed; otherwise the next plug-in flashes.
-2. Progress, then `ver` → `board` → hold volume **+** then **−** (`touch cal`).
-3. **PASS** → unplug → plug the next box. Stay armed for a batch.
-4. Disarm (Space or D) when done. Q quits.
+1. **ARM** (Space). While armed, **any ESP32-S3 plugged into this computer is flashed**.
+2. Big screen: ARM → PLUG → FLASH → PASS / FAIL. After write: hold volume **+** then **−**.
+3. **PASS** → unplug → next box. Stay armed for a batch. Space disarms. Q quits.
 
 Dedicated QA nodes (`/dev/searaboom-qa-*` and `qa-boxes.json`) are skipped.
 

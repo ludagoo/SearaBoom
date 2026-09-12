@@ -88,15 +88,20 @@ def test_public_page_offers_curl_install_not_zip() -> None:
     assert "desktop.zip" not in html
     assert "./run.sh" not in html
     assert "127.0.0.1:8765" not in html
+    assert "esp-web-tools" not in html
+    assert "web-tools.json" not in html
+    assert "WebSerial" not in html
+    assert "Open this page in Chrome" not in html
+    assert "Flash a box" not in html
     assert "/api/factory/flasher" in html
     assert "curl -fsSL -o searaboom-factory-flasher-linux-amd64" in html
-    assert "curl -fsSL -o searaboom-factory-flasher-linux-arm64" in html
     assert "chmod +x searaboom-factory-flasher-linux-amd64" in html
-    assert "chmod +x searaboom-factory-flasher-linux-arm64" in html
-    assert "curl.exe -fsSL -o searaboom-factory-flasher-windows-amd64.exe" in html
-    assert "Factory install is a" in html
-    assert "curl one-liner" in html
-    assert html.find("curl -fsSL") < html.find("Flash a box")
+    assert html.count("<pre") == 1
+    assert "guessFlasherId" in html
+    assert "linux-arm64" in html
+    assert "windows-amd64" in html
+    assert "any ESP32-S3 plugged into this computer is flashed" in html
+    assert "esp-web-install" not in html
 
 
 def test_python_tree_removed() -> None:
