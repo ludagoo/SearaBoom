@@ -200,15 +200,43 @@
       if (arm) arm.textContent = linuxOneLiner("linux-arm64", origin);
     }
     fillLinuxOneLiners();
+    function copyText(text) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text).catch(() => copyTextFallback(text));
+      }
+      return copyTextFallback(text);
+    }
+    function copyTextFallback(text) {
+      return new Promise((resolve, reject) => {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.top = "0";
+        ta.style.left = "0";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        let ok = false;
+        try {
+          ok = document.execCommand("copy");
+        } finally {
+          ta.remove();
+        }
+        if (ok) resolve();
+        else reject(new Error("copy failed"));
+      });
+    }
     document.querySelectorAll("[data-copy]").forEach((btn) => {
       btn.addEventListener("click", async () => {
         const id = btn.getAttribute("data-copy");
-        const cmd = document.getElementById(id)?.textContent || "";
+        const cmd = (document.getElementById(id)?.textContent || "").trim();
         try {
-          await navigator.clipboard.writeText(cmd.trim());
+          await copyText(cmd);
           btn.textContent = "Copied";
         } catch {
-          btn.textContent = "Copy failed";
+          btn.textContent = "Copy failed — select the command and Ctrl+C";
         }
       });
     });
