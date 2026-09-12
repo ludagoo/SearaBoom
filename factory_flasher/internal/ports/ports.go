@@ -21,13 +21,29 @@ type Port struct {
 }
 
 func (p Port) Identity() string {
-	if p.Serial != "" {
+	if p.HasStableIdentity() {
 		return p.Serial
 	}
-	if p.HWID != "" {
-		return p.HWID
-	}
 	return p.Device
+}
+
+// HasStableIdentity is true when Serial is a USB serial number, not a
+// callout/dialin path. Path-only ids must not go in session doneIDs:
+// the next chassis on the same cable often keeps the same /dev name.
+func (p Port) HasStableIdentity() bool {
+	s := strings.TrimSpace(p.Serial)
+	if s == "" {
+		return false
+	}
+	return !looksLikeDevicePath(s)
+}
+
+func looksLikeDevicePath(s string) bool {
+	low := strings.ToLower(s)
+	return strings.HasPrefix(low, "/dev/") ||
+		strings.HasPrefix(low, "cu.") ||
+		strings.HasPrefix(low, "tty.") ||
+		strings.HasPrefix(strings.ToUpper(s), "COM")
 }
 
 type Lister func() ([]Port, error)
@@ -158,7 +174,89 @@ func parseHexID(s string) int {
 	return int(n)
 }
 
+// IsBSDDialin is the macOS /dev/tty.* twin of /dev/cu.* (same ESP).
+func IsBSDDialin(device string) bool {
+	_, dialin, ok := bsdTwinKey(device)
+	return ok && dialin
+}
+
+func bsdTwinKey(device string) (key string, dialin bool, ok bool) {
+	base := filepath.Base(device)
+	switch {
+	case strings.HasPrefix(base, "tty."):
+		return base[len("tty."):], true, true
+	case strings.HasPrefix(base, "cu."):
+		return base[len("cu."):], false, true
+	default:
+		return "", false, false
+	}
+}
+
+// CollapseBSDTwins keeps one node per ESP on macOS: prefer cu.*, drop tty.*.
+func CollapseBSDTwins(in []Port) []Port {
+	type pair struct {
+		callout *Port
+		dialin  *Port
+	}
+	order := make([]string, 0, len(in))
+	groups := map[string]*pair{}
+	var others []Port
+	for _, raw := range in {
+		p := raw
+		key, dialin, isTwin := bsdTwinKey(p.Device)
+		if !isTwin {
+			others = append(others, p)
+			continue
+		}
+		g, ok := groups[key]
+		if !ok {
+			g = &pair{}
+			groups[key] = g
+			order = append(order, key)
+		}
+		if dialin {
+			g.dialin = &p
+		} else {
+			g.callout = &p
+		}
+	}
+	out := make([]Port, 0, len(order)+len(others))
+	for _, key := range order {
+		g := groups[key]
+		chosen := g.callout
+		if chosen == nil {
+			chosen = g.dialin
+		}
+		if chosen != nil && g.dialin != nil && chosen != g.dialin {
+			mergePort(chosen, *g.dialin)
+		}
+		if chosen != nil {
+			out = append(out, *chosen)
+		}
+	}
+	return append(out, others...)
+}
+
+func mergePort(dst *Port, src Port) {
+	if dst.Serial == "" {
+		dst.Serial = src.Serial
+	}
+	if dst.VID == 0 {
+		dst.VID = src.VID
+	}
+	if dst.PID == 0 {
+		dst.PID = src.PID
+	}
+	if dst.Manufacturer == "" {
+		dst.Manufacturer = src.Manufacturer
+	}
+	if dst.Product == "" {
+		dst.Product = src.Product
+	}
+}
+
 func Eligible(in []Port, qaPaths []string, qaSerials []string) []Port {
+	in = CollapseBSDTwins(in)
 	blocked := map[string]struct{}{}
 	blockedSerials := map[string]struct{}{}
 	if qaPaths == nil {

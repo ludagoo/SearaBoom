@@ -341,7 +341,7 @@ func (s *Session) runBox(target ports.Port) {
 		s.busy = false
 		s.busyID = ""
 		s.baseline[target.Identity()] = struct{}{}
-		if s.state.Phase == "pass" {
+		if s.state.Phase == "pass" && target.HasStableIdentity() {
 			s.doneIDs[target.Identity()] = struct{}{}
 		}
 		s.mu.Unlock()

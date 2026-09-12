@@ -30,7 +30,7 @@ func List() ([]Port, error) {
 			out = append(out, p)
 		}
 	}
-	return out, nil
+	return CollapseBSDTwins(out), nil
 }
 
 func existsNamedPort(device string) bool {

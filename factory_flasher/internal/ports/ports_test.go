@@ -53,3 +53,47 @@ func TestNormUSBSerial(t *testing.T) {
 		t.Fatal(NormUSBSerial("D0:CF:13:07:DE:FC"))
 	}
 }
+
+func TestOneESPCalloutAndDialinIsOneIdentity(t *testing.T) {
+	twins := []Port{
+		{Device: "/dev/cu.usbmodem1101", VID: 0x303A, Product: "USB JTAG"},
+		{Device: "/dev/tty.usbmodem1101", VID: 0x303A, Product: "USB JTAG"},
+	}
+	got := CollapseBSDTwins(twins)
+	if len(got) != 1 {
+		t.Fatalf("want 1 port, got %+v", got)
+	}
+	if got[0].Device != "/dev/cu.usbmodem1101" {
+		t.Fatalf("prefer cu: %+v", got[0])
+	}
+	if got[0].Identity() != "/dev/cu.usbmodem1101" {
+		t.Fatalf("path-only identity %s", got[0].Identity())
+	}
+	if got[0].HasStableIdentity() {
+		t.Fatal("empty serial is not a stable identity")
+	}
+
+	twins[0].Serial = "54:32:04:AA:BB:CC"
+	got = CollapseBSDTwins(twins)
+	if len(got) != 1 || got[0].Identity() != "54:32:04:AA:BB:CC" {
+		t.Fatalf("usb serial identity %+v", got)
+	}
+	ok := Eligible(twins, []string{}, nil)
+	if len(ok) != 1 || ok[0].Device != "/dev/cu.usbmodem1101" {
+		t.Fatalf("eligible twins %+v", ok)
+	}
+}
+
+func TestIdentityDoesNotUsePathAsStable(t *testing.T) {
+	p := Port{Device: "/dev/cu.usbmodem1101", HWID: "/dev/cu.usbmodem1101", VID: 0x303A}
+	if p.HasStableIdentity() {
+		t.Fatal("hwid path is not stable")
+	}
+	if p.Identity() != "/dev/cu.usbmodem1101" {
+		t.Fatalf("identity %s", p.Identity())
+	}
+	p.Serial = "CHIP1"
+	if !p.HasStableIdentity() || p.Identity() != "CHIP1" {
+		t.Fatalf("serial identity %+v", p)
+	}
+}
