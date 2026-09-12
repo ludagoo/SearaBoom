@@ -25,19 +25,30 @@ Secret **names** (values never committed):
 - Tunnel `credentials-file` JSON
 - Optional later: `~/.config/searaboom/secure_boot_signing_key.pem` + `ota_signing_pubkey.pem` (signed-OTA PR; live `main` Flask does not load them). Do not create `signing_key_backed_up`.
 
+`SEARABOOM_CONFIG_DIR` is honored by `./scripts/searaboom-host` (check/serve/tunnel). The systemd templates always load `%h/.config/searaboom/%i.env` and `%h/.config/searaboom/origin-app/env` (instance file wins).
+
 ## Prod vs test on one machine
 
 | | **prod** (`main`) | **test** (PR worktree) |
 |--|-------------------|-------------------------|
-| Checkout | long-lived clone on `main` | `git worktree` of the PR branch |
-| Port | `18080` (Mini today) | another port, e.g. `18081` |
+| Checkout | long-lived clone on `main` | `git worktree` of the PR branch — **not** the live clone |
+| Port | `18080` (Mini today) | another port, **not** `18080` (e.g. `18081`) |
 | Bind | `0.0.0.0` | `127.0.0.1` is enough |
 | Public URL / tunnel hostname | `searaboom.goossen.dev` only after a planned cut | **must not** be `searaboom.goossen.dev` |
+| Tunnel | a **new** named tunnel + new creds JSON | another **new** tunnel; never the live UUID/name `searaboom` and never `Work/SearaBoom/tunnel/*.json` |
 | systemd | `searaboom-server@prod` / `searaboom-tunnel@prod` | `…@test` |
 | Origin webhook | live URL only | `SEARABOOM_REQUIRE_ORIGIN=0`; do not retarget the Origin App |
 | USB QA boxes | stay with Mini until QA moves | do not point `/hw-test` here |
 
-`scripts/searaboom-host check --instance test` **exits 1** if `SEARABOOM_PUBLIC_URL` or the tunnel ingress hostname is `searaboom.goossen.dev`. It also refuses `install --instance prod` while the Mini live units are active.
+`scripts/searaboom-host check --instance test` **exits 1** if:
+
+- `SEARABOOM_PUBLIC_URL` or tunnel ingress is `searaboom.goossen.dev`
+- `tunnel:` / `SEARABOOM_TUNNEL_NAME` is the live name `searaboom` or UUID `e70a4d09-968d-4dac-b0a2-6a39e009da6b`
+- `credentials-file` is the live JSON (path under the live clone `tunnel/`, that UUID filename, or JSON `TunnelID`/`TunnelName` matching live) — even with a different ingress hostname. A second connector on the live tunnel can **404** the live host.
+- `SEARABOOM_ROOT` is the live clone (systemd `WorkingDirectory` of `searaboom-server.service`)
+- `SEARABOOM_PORT` is `18080` or already bound
+
+`install --instance prod` refuses if the Mini live units are **active or enabled** (stopped-but-enabled still starts on next login and would double-bind 18080).
 
 ## New machine (prod, not live DNS)
 
@@ -45,8 +56,8 @@ Secret **names** (values never committed):
 2. Install `cloudflared`. On Arch: `pacman -S cloudflared`. User lingering: `loginctl enable-linger $USER`.
 3. `./scripts/setup_host.sh` if this host will USB-flash (udev + `uucp`). IDF 5.3 + ADF are for **builds** and Mini-local `POST /api/factory/flash`, not for serving OTA.
 4. `./scripts/setup_origin_app.sh` if this host should take QA webhooks. Keep the Origin App **webhook URL** on Mini until cutover.
-5. Create a **new** named tunnel and a **new** hostname. Copy `deploy/tunnel.yml.example`. Force `protocol: http2` (QUIC/7844 is blocked on the Mini network).
-6. Copy `deploy/prod.env.example` → `~/.config/searaboom/prod.env`. Set `SEARABOOM_ROOT`, token, tunnel paths, Origin names. `chmod 600`.
+5. Create a **new** named tunnel (not `searaboom`) and a **new** hostname. Copy `deploy/tunnel.yml.example`. Force `protocol: http2` (QUIC/7844 is blocked on the Mini network). Do not reuse Mini's `tunnel/*.json`.
+6. Copy `deploy/prod.env.example` → `~/.config/searaboom/prod.env`. Set `SEARABOOM_ROOT`, token, **new** tunnel name/paths, Origin names. `chmod 600`.
 7. `./scripts/searaboom-host check --instance prod`
 8. `./scripts/searaboom-host install --instance prod --enable` then `systemctl --user start searaboom-server@prod searaboom-tunnel@prod`
 9. Confirm `curl -fsS http://127.0.0.1:18080/healthz` and the **new** hostname. Leave the live CNAME on Mini.
@@ -62,7 +73,7 @@ python3 -m venv /home/lucas/Work/SearaBoom-wt-pr/server/.venv
 /home/lucas/Work/SearaBoom-wt-pr/server/.venv/bin/pip install -r /home/lucas/Work/SearaBoom-wt-pr/server/requirements.txt
 ```
 
-Create a **separate** Cloudflare tunnel + hostname (not `searaboom.goossen.dev`). `deploy/test.env.example` → `~/.config/searaboom/test.env`. Then:
+Create a **separate** Cloudflare tunnel + hostname (not `searaboom.goossen.dev`, not tunnel name `searaboom`). `deploy/test.env.example` → `~/.config/searaboom/test.env`. Then:
 
 ```bash
 ./scripts/searaboom-host check --instance test
@@ -81,7 +92,7 @@ Do not `systemctl restart searaboom-server` / `searaboom-tunnel` (those are Mini
 ./scripts/searaboom-host install --instance test [--enable]
 ```
 
-Check fails closed if the venv, `cloudflared` (tunnel role), required env names, Origin key file (prod), or tunnel credentials file are missing. Tunnel creds must not be group/world-readable. The development admin-token default is refused unless `SEARABOOM_ALLOW_DEV_TOKEN=1`.
+Check fails closed if the venv (server role), `cloudflared` (tunnel role), required env names, Origin key file (prod), or tunnel credentials file are missing. Tunnel creds must not be group/world-readable. The development admin-token default is refused unless `SEARABOOM_ALLOW_DEV_TOKEN=1`. `--role tunnel` does not require the Flask venv.
 
 Legacy wrappers `scripts/run_server.sh` and `scripts/run_tunnel.sh` still exist for ad-hoc Mini use; they do **not** enforce this layout.
 

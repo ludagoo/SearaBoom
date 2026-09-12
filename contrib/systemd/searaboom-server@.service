@@ -6,6 +6,8 @@ After=network-online.target
 [Service]
 Type=simple
 Environment=SEARABOOM_INSTANCE=%i
+# origin-app/env first; %i.env overrides. CLI SEARABOOM_CONFIG_DIR is not used here.
+EnvironmentFile=-%h/.config/searaboom/origin-app/env
 EnvironmentFile=-%h/.config/searaboom/%i.env
 Restart=on-failure
 # WorkingDirectory cannot read EnvironmentFile; the script cds itself.
