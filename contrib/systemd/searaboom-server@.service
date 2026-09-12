@@ -1,0 +1,17 @@
+[Unit]
+Description=SearaBoom OTA management server (%i)
+After=network-online.target
+# Do not Wants= the Mini live unit searaboom-server.service.
+
+[Service]
+Type=simple
+Environment=SEARABOOM_INSTANCE=%i
+# origin-app/env first; %i.env overrides. CLI SEARABOOM_CONFIG_DIR is not used here.
+EnvironmentFile=-%h/.config/searaboom/origin-app/env
+EnvironmentFile=-%h/.config/searaboom/%i.env
+Restart=on-failure
+# WorkingDirectory cannot read EnvironmentFile; the script cds itself.
+ExecStart=/bin/bash -c 'set -euo pipefail; ROOT="${SEARABOOM_ROOT:?set SEARABOOM_ROOT in ~/.config/searaboom/%i.env}"; exec "$ROOT/scripts/searaboom-host" serve --instance %i'
+
+[Install]
+WantedBy=default.target
