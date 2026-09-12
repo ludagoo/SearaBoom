@@ -162,8 +162,24 @@ def verify_webhook(headers: dict, body: bytes) -> bool:
     return False
 
 
+def rfc3339(dt: datetime | None = None) -> str:
+    """UTC RFC 3339 for google.protobuf.Timestamp JSON (Z, 6 fractional digits).
+
+    Python's datetime.isoformat() emits ``+00:00``, which Origin rejects:
+    ``cannot decode google.protobuf.Timestamp from JSON: invalid RFC 3339 string``.
+    protojson wants a Z-normalized string with 0, 3, 6, or 9 fractional digits.
+    """
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    elif dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond:06d}Z"
+
+
 def iso_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return rfc3339()
 
 
 def post_check(
