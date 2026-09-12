@@ -18,7 +18,9 @@
 static const char *TAG = "volume_buttons";
 
 /* channel_sens is a press threshold: higher = firmer press needed.
- * Boot cal is off. 0.1 was the pre-cal default; a bit firmer here. */
+ * Boot does not auto-run calibrate() (field OTA must not prompt).
+ * Factory USB wipes NVS cal; the desktop flasher then runs `touch cal`.
+ * 0.1 was the pre-cal default; a bit firmer here when nothing is stored. */
 #define SB_TOUCH_SENS 0.13f
 /* Cal: abs(smooth-idle)/idle vs frozen idle (not live benchmark). */
 #define SB_TOUCH_CAL_SEE 0.008f
@@ -195,9 +197,12 @@ esp_err_t volume_buttons_init(volume_btn_cb_t cb, volume_gesture_cb_t gesture, v
         return err;
     }
 
-    /* Ignore stored pad cal for now; use a fixed threshold on both pads. */
-    s_sens_up = SB_TOUCH_SENS;
-    s_sens_dn = SB_TOUCH_SENS;
+    /* Use factory-saved pad cal when present. Do not set s_need_cal or call
+     * volume_buttons_calibrate() from boot — that would prompt after OTA. */
+    if (!config_store_load_touch_sens(&s_sens_up, &s_sens_dn, NULL)) {
+        s_sens_up = SB_TOUCH_SENS;
+        s_sens_dn = SB_TOUCH_SENS;
+    }
     s_need_cal = false;
 
     err = make_button(board_hw_vol_up_gpio(), +1, s_sens_up, &s_btn[0]);

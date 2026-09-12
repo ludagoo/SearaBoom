@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SearaBoom factory flasher</title>
+  <style>
+    :root {
+      --bg: #052C31;
+      --panel: #007985;
+      --ink: #f4fbfb;
+      --muted: #9ec8ce;
+      --gold: #EC9F17;
+      --fail: #ff8a7a;
+      --pass: #8dffb0;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", Helvetica, Arial, sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+      padding: 1.5rem 1rem 2.5rem;
+    }
+    main { max-width: 720px; margin: 0 auto; }
+    h1 { margin: 0 0 .2rem; }
+    p.lead { color: var(--muted); margin: 0 0 1.1rem; }
+    .card {
+      background: var(--panel);
+      border-radius: 12px;
+      padding: 1rem 1.15rem;
+      margin-bottom: 1rem;
+    }
+    .meta { color: var(--muted); font-size: .92rem; }
+    .meta strong { color: var(--ink); }
+    .arm {
+      display: flex;
+      gap: .85rem;
+      align-items: center;
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 1.05rem;
+    }
+    .arm input { width: 1.3rem; height: 1.3rem; accent-color: var(--gold); }
+    .arm.hot { color: var(--gold); }
+    .phase {
+      font-size: 1.15rem;
+      font-weight: 700;
+      margin: .2rem 0 .55rem;
+    }
+    .bar {
+      height: 14px;
+      border-radius: 999px;
+      background: rgba(0,0,0,.28);
+      overflow: hidden;
+    }
+    .bar > span {
+      display: block;
+      height: 100%;
+      width: 0%;
+      background: var(--gold);
+      transition: width .15s linear;
+    }
+    ol.steps { margin: .4rem 0 0; padding-left: 1.2rem; line-height: 1.55; }
+    .steps li.pass { color: var(--pass); }
+    .steps li.fail { color: var(--fail); }
+    .steps li.active { color: var(--gold); font-weight: 700; }
+    .cal {
+      margin-top: .75rem;
+      padding: .7rem .8rem;
+      border-radius: 10px;
+      background: rgba(0,0,0,.22);
+      font-size: 1.05rem;
+    }
+    button {
+      border: 0;
+      border-radius: 10px;
+      padding: .7rem 1.1rem;
+      font-weight: 700;
+      cursor: pointer;
+      background: var(--gold);
+      color: var(--bg);
+    }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    pre.log {
+      margin: .5rem 0 0;
+      max-height: 220px;
+      overflow: auto;
+      background: rgba(0,0,0,.28);
+      border-radius: 8px;
+      padding: .7rem .8rem;
+      font-size: .82rem;
+      white-space: pre-wrap;
+    }
+    .pass-banner { color: var(--pass); font-weight: 800; font-size: 1.2rem; }
+    .fail-banner { color: var(--fail); font-weight: 800; font-size: 1.2rem; }
+    .warn { color: #ffd6a8; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>SearaBoom factory flasher</h1>
+    <p class="lead">esptool reset (DTR/RTS). No BOOT button. Chrome WebSerial is not used.</p>
+
+    <div class="card">
+      <div class="meta" id="image">Loading factory image…</div>
+    </div>
+
+    <div class="card">
+      <label class="arm" id="arm-label">
+        <input type="checkbox" id="arm" />
+        <span>ARM — flash the next box I plug in</span>
+      </label>
+      <p class="meta" style="margin:.55rem 0 0">
+        Confirm you are ready, then plug USB. Dedicated QA boxes (<code>/dev/searaboom-qa-*</code>) are skipped.
+      </p>
+    </div>
+
+    <div class="card">
+      <div class="phase" id="phase">idle</div>
+      <div class="meta" id="message"></div>
+      <div class="bar" aria-hidden="true"><span id="bar"></span></div>
+      <div id="result"></div>
+      <div class="cal" id="cal" hidden></div>
+      <ol class="steps" id="steps"></ol>
+      <p style="margin:.8rem 0 0">
+        <button type="button" id="retry-cal" hidden>Retry calibration</button>
+      </p>
+    </div>
+
+    <div class="card">
+      <div class="meta"><strong>Log</strong></div>
+      <pre class="log" id="log"></pre>
+    </div>
+  </main>
+  <script>
+    const arm = document.getElementById("arm");
+    const armLabel = document.getElementById("arm-label");
+    const phaseEl = document.getElementById("phase");
+    const messageEl = document.getElementById("message");
+    const bar = document.getElementById("bar");
+    const imageEl = document.getElementById("image");
+    const stepsEl = document.getElementById("steps");
+    const logEl = document.getElementById("log");
+    const calEl = document.getElementById("cal");
+    const resultEl = document.getElementById("result");
+    const retry = document.getElementById("retry-cal");
+    let lastArmed = false;
+
+    const calCopy = {
+      "hands-off": "Hands off both pads.",
+      "hold+": "Hold volume + until it beeps.",
+      "hold-": "Hold volume − until it beeps.",
+      "done": "Calibration saved.",
+      "fail": "Calibration failed. Retry after checking the pads.",
+    };
+
+    function render(s) {
+      const ver = s.image_version || "unknown";
+      imageEl.innerHTML = s.image_ready
+        ? `USB image <strong>${ver}</strong> · ESP32-S3 · 4MB · ${s.image_dir || ""}`
+        : `<span class="warn">No factory image.</span>`;
+      phaseEl.textContent = s.phase + (s.port ? ` · ${s.port}` : "");
+      messageEl.textContent = s.message || "";
+      bar.style.width = `${s.progress || 0}%`;
+      arm.checked = !!s.armed;
+      armLabel.classList.toggle("hot", !!s.armed);
+      lastArmed = !!s.armed;
+      stepsEl.innerHTML = "";
+      for (const step of (s.confirm || [])) {
+        const li = document.createElement("li");
+        li.textContent = `${step.title}${step.detail ? " — " + step.detail : ""}`;
+        li.className = step.status || "";
+        stepsEl.appendChild(li);
+      }
+      const prompt = s.cal_prompt;
+      if (s.phase === "calibrate" || prompt) {
+        calEl.hidden = false;
+        calEl.textContent = calCopy[prompt] || "Calibration in progress.";
+      } else {
+        calEl.hidden = true;
+      }
+      retry.hidden = !(s.phase === "calibrate" && prompt === "fail") && !(s.phase === "fail" && (s.confirm || []).some(x => x.id === "cal" && x.status === "fail"));
+      resultEl.className = "";
+      resultEl.textContent = "";
+      if (s.phase === "pass") {
+        resultEl.className = "pass-banner";
+        resultEl.textContent = `PASS  (${s.boxes_done} this session)`;
+      } else if (s.phase === "fail") {
+        resultEl.className = "fail-banner";
+        resultEl.textContent = "FAIL";
+      }
+      logEl.textContent = (s.log || []).join("\n");
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    async function refresh() {
+      const r = await fetch("/api/state");
+      render(await r.json());
+    }
+
+    arm.addEventListener("change", async () => {
+      if (arm.checked) {
+        const ok = window.confirm(
+          "ARM factory flash?\n\nThe next SearaBoom you plug in will be erased and rewritten with the USB factory image. Dedicated QA boxes are skipped."
+        );
+        if (!ok) {
+          arm.checked = lastArmed;
+          return;
+        }
+      }
+      const r = await fetch("/api/arm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ armed: arm.checked }),
+      });
+      render(await r.json());
+    });
+
+    retry.addEventListener("click", async () => {
+      const r = await fetch("/api/cal/retry", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      render(await r.json());
+    });
+
+    refresh();
+    setInterval(refresh, 400);
+  </script>
+</body>
+</html>
