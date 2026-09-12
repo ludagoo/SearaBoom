@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import io
+import json
 import os
 import sys
 import tempfile
@@ -10,18 +12,6 @@ os.environ["SEARABOOM_LOGS_DIR"] = str(TMP)
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "server"))
 import app as sb  # noqa: E402
-
-
-def test_parse_byte_range() -> None:
-    assert sb.parse_byte_range(None, 100) is None
-    assert sb.parse_byte_range("bytes=0-9", 100) == (0, 9)
-    assert sb.parse_byte_range("bytes=50-", 100) == (50, 99)
-    assert sb.parse_byte_range("bytes=-10", 100) == (90, 99)
-    try:
-        sb.parse_byte_range("bytes=100-110", 100)
-        raise AssertionError("expected ValueError")
-    except ValueError:
-        pass
 
 
 def test_ingest_old_and_new() -> None:
@@ -83,11 +73,100 @@ def test_ingest_old_and_new() -> None:
     assert any(line.startswith("log_gap") for line in lines)
 
 
+def test_crash_reset_current_envelope_only() -> None:
+    sb.devices_registry.clear()
+    sb.device_logs.clear()
+    sb.device_seen.clear()
+    c = sb.app.test_client()
+    r = c.post("/api/logs", json={
+        "device_id": "aa:bb:cc:dd:ee:01",
+        "reset": "PANIC",
+        "uptime_ms": 90000,
+        "crashes": 1,
+        "seq": 1,
+        "text": "E (1) searaboom: panic boot",
+    })
+    assert r.status_code == 200, r.data
+    rec = sb.devices_registry["aa:bb:cc:dd:ee:01"]
+    assert rec["crash_count"] == 1
+
+    r = c.post("/api/logs", json={
+        "device_id": "aa:bb:cc:dd:ee:01",
+        "uptime_ms": 5000,
+        "seq": 2,
+        "text": "",
+    })
+    assert r.status_code == 200, r.data
+    rec = sb.devices_registry["aa:bb:cc:dd:ee:01"]
+    assert rec["crash_count"] == 1
+
+
+def test_crash_loop_via_crashes_field() -> None:
+    sb.devices_registry.clear()
+    sb.device_logs.clear()
+    sb.device_seen.clear()
+    c = sb.app.test_client()
+    r = c.post("/api/logs", json={
+        "device_id": "aa:bb:cc:dd:ee:02",
+        "reset": "PANIC",
+        "uptime_ms": 9000,
+        "crashes": 1,
+        "seq": 1,
+        "text": "E (9) searaboom: loop 1",
+    })
+    assert r.status_code == 200, r.data
+    r = c.post("/api/logs", json={
+        "device_id": "aa:bb:cc:dd:ee:02",
+        "reset": "PANIC",
+        "uptime_ms": 10500,
+        "crashes": 2,
+        "seq": 2,
+        "text": "E (10) searaboom: loop 2",
+    })
+    assert r.status_code == 200, r.data
+    rec = sb.devices_registry["aa:bb:cc:dd:ee:02"]
+    assert rec["crash_count"] == 2
+    assert rec["crashes"] == 2
+
+
 def test_bad_json() -> None:
     c = sb.app.test_client()
     r = c.post("/api/logs", data="{nope", content_type="application/json")
     assert r.status_code == 400
     assert r.get_json()["error"] == "invalid json"
+
+
+def test_logs_payload_capped() -> None:
+    c = sb.app.test_client()
+    blob = json.dumps({"device_id": "aa:bb:cc:dd:ee:03", "text": "x" * (70 * 1024)})
+    r = c.post("/api/logs", data=blob, content_type="application/json")
+    assert r.status_code == 413
+    assert r.get_json()["error"] == "payload too large"
+
+
+def test_firmware_upload_not_capped() -> None:
+    tmp = Path(tempfile.mkdtemp(prefix="searaboom-fwup-"))
+    old_fw = sb.FW_DIR
+    old_meta = sb.META_PATH
+    sb.FW_DIR = tmp
+    sb.META_PATH = tmp / "latest.json"
+    try:
+        c = sb.app.test_client()
+        r = c.post(
+            "/api/firmware/upload",
+            data={
+                "version": "9.9.9",
+                "firmware": (io.BytesIO(b"x" * (300 * 1024)), "fw.bin"),
+            },
+            headers={"X-Admin-Token": sb.ADMIN_TOKEN},
+        )
+        assert r.status_code == 200, r.data
+        body = r.get_json()
+        assert body["ok"] is True
+        assert (tmp / "searaboom-v9.9.9.bin").stat().st_size == 300 * 1024
+    finally:
+        sb.FW_DIR = old_fw
+        sb.META_PATH = old_meta
 
 
 def test_firmware_range() -> None:
@@ -109,13 +188,18 @@ def test_firmware_range() -> None:
         assert r.headers.get("Content-Range") == "bytes 2-5/10"
         r = c.get("/api/firmware/download/tiny.bin", headers={"Range": "bytes=99-100"})
         assert r.status_code == 416
+        r = c.get("/api/firmware/download/tiny.bin", headers={"Range": "bytes=0-3,5-6"})
+        assert r.status_code == 416
     finally:
         sb.FW_DIR = old
 
 
 if __name__ == "__main__":
-    test_parse_byte_range()
     test_ingest_old_and_new()
+    test_crash_reset_current_envelope_only()
+    test_crash_loop_via_crashes_field()
     test_bad_json()
+    test_logs_payload_capped()
+    test_firmware_upload_not_capped()
     test_firmware_range()
     print("ok")

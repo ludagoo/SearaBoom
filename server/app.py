@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from flask import Flask, Response, jsonify, request, send_from_directory, send_file, stream_with_context
+from flask import Flask, Response, jsonify, request, send_from_directory, stream_with_context
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parent
@@ -80,7 +80,6 @@ except ZoneInfoNotFoundError:
     FORTALEZA_TZ = timezone(timedelta(hours=-3))
 
 app = Flask(__name__, static_folder=str(STATIC_DIR))
-app.config["MAX_CONTENT_LENGTH"] = LOG_MAX_BODY
 lock = threading.Lock()
 log_lock = threading.RLock()
 flash_lock = threading.Lock()
@@ -428,48 +427,6 @@ def parse_ip(raw: str | None) -> str:
     except ValueError:
         return ""
     return host
-
-
-def parse_byte_range(header: str | None, size: int) -> tuple[int, int] | None:
-    """Return inclusive (start, end), or None for the full file.
-
-    Raises ValueError if the range cannot be satisfied.
-    """
-    if size < 0:
-        raise ValueError("unsatisfiable")
-    if not header:
-        return None
-    raw = header.strip()
-    if not raw:
-        return None
-    if not raw.lower().startswith("bytes="):
-        return None
-    spec = raw.split("=", 1)[1].strip()
-    if not spec:
-        return None
-    if "," in spec:
-        spec = spec.split(",", 1)[0].strip()
-    if spec.startswith("-"):
-        suffix_s = spec[1:]
-        if not suffix_s:
-            raise ValueError("unsatisfiable")
-        suffix = int(suffix_s)
-        if suffix <= 0 or size == 0:
-            raise ValueError("unsatisfiable")
-        start = max(0, size - suffix)
-        return start, size - 1
-    if "-" not in spec:
-        raise ValueError("unsatisfiable")
-    start_s, end_s = spec.split("-", 1)
-    start = int(start_s)
-    if start < 0 or start >= size:
-        raise ValueError("unsatisfiable")
-    end = int(end_s) if end_s else size - 1
-    if end >= size:
-        end = size - 1
-    if end < start:
-        raise ValueError("unsatisfiable")
-    return start, end
 
 
 def ip_ok_for_geo(ip: str) -> bool:
@@ -1197,8 +1154,11 @@ def update_registry(device_id: str, data: dict, ip: str, now: float, n_new_lines
     new_up = coerce_nonneg_int(data.get("uptime_ms"), None)
     old_up = coerce_nonneg_int(rec.get("uptime_ms"), None)
     boot_changed = new_up is not None and (old_up is None or new_up + 2000 < old_up)
-    reset_val = data.get("reset") if "reset" in data else rec.get("reset")
-    if boot_changed and isinstance(reset_val, str) and reset_val in CRASH_RESETS:
+    new_crashes = coerce_nonneg_int(data.get("crashes"), None) if "crashes" in data else None
+    old_crashes = coerce_nonneg_int(rec.get("crashes"), None)
+    crashes_up = new_crashes is not None and (old_crashes is None or new_crashes > old_crashes)
+    reset_val = data.get("reset") if "reset" in data else None
+    if isinstance(reset_val, str) and reset_val in CRASH_RESETS and (boot_changed or crashes_up):
         rec["last_crash_at"] = utc_iso(now)
         rec["last_crash_reset"] = reset_val
         rec["crash_count"] = int(rec.get("crash_count") or 0) + 1
@@ -1212,17 +1172,16 @@ def update_registry(device_id: str, data: dict, ip: str, now: float, n_new_lines
             if not isinstance(val, str):
                 val = "" if val is None else str(val)
             val = "".join(ch for ch in val.strip() if ch >= " " and ch not in "\"\\<>")[:40]
-        elif key in ("heap", "heap_min", "heap_int", "crashes", "uptime_ms", "rssi", "seq"):
-            coerced = coerce_nonneg_int(val, None)
-            if coerced is None and key != "rssi":
+        elif key == "rssi":
+            try:
+                val = int(val)
+            except (TypeError, ValueError):
                 continue
-            if key == "rssi":
-                try:
-                    val = int(val)
-                except (TypeError, ValueError):
-                    continue
-            else:
-                val = coerced
+        elif key in ("heap", "heap_min", "heap_int", "crashes", "uptime_ms", "seq"):
+            coerced = coerce_nonneg_int(val, None)
+            if coerced is None:
+                continue
+            val = coerced
         rec[key] = val
     ensure_session_state(rec)
     listen_delta = 0
@@ -1690,42 +1649,7 @@ def firmware_check():
 @app.get("/api/firmware/download/<path:filename>")
 def firmware_download(filename: str):
     safe = Path(filename).name
-    path = FW_DIR / safe
-    try:
-        resolved = path.resolve()
-        if resolved.parent != FW_DIR.resolve() or not resolved.is_file():
-            return jsonify({"error": "not found"}), 404
-    except OSError:
-        return jsonify({"error": "not found"}), 404
-    size = resolved.stat().st_size
-    try:
-        rng = parse_byte_range(request.headers.get("Range"), size)
-    except (TypeError, ValueError):
-        resp = Response(status=416)
-        resp.headers["Content-Range"] = f"bytes */{size}"
-        resp.headers["Accept-Ranges"] = "bytes"
-        return resp
-    if rng is None:
-        resp = send_file(
-            resolved,
-            as_attachment=True,
-            mimetype="application/octet-stream",
-            download_name=safe,
-            conditional=False,
-        )
-        resp.headers["Accept-Ranges"] = "bytes"
-        return resp
-    start, end = rng
-    length = end - start + 1
-    with resolved.open("rb") as f:
-        f.seek(start)
-        data = f.read(length)
-    resp = Response(data, status=206, mimetype="application/octet-stream")
-    resp.headers["Content-Range"] = f"bytes {start}-{end}/{size}"
-    resp.headers["Accept-Ranges"] = "bytes"
-    resp.headers["Content-Length"] = str(length)
-    resp.headers["Content-Disposition"] = f'attachment; filename="{safe}"'
-    return resp
+    return send_from_directory(FW_DIR, safe, as_attachment=True, mimetype="application/octet-stream")
 
 
 @app.post("/api/firmware/upload")
@@ -1758,8 +1682,15 @@ def firmware_upload():
     return jsonify({"ok": True, "firmware": meta})
 
 
+@app.before_request
+def limit_logs_ingest_body():
+    if request.method == "POST" and request.path == "/api/logs":
+        request.max_content_length = LOG_MAX_BODY
+
+
 @app.post("/api/logs")
 def logs_ingest():
+    request.max_content_length = LOG_MAX_BODY
     if request.content_length and request.content_length > LOG_MAX_BODY:
         return jsonify({"error": "payload too large"}), 413
     raw = request.get_data(cache=True, as_text=True) or ""
@@ -1777,8 +1708,6 @@ def logs_ingest():
     text = data.get("text") or ""
     if not isinstance(text, str):
         text = str(text)
-    if len(text) > LOG_MAX_BODY:
-        return jsonify({"error": "payload too large"}), 413
     now = time.time()
     ip = client_ip()
     seq = data.get("seq") if "seq" in data else None
@@ -1805,14 +1734,15 @@ def logs_ingest():
         if entries:
             path = device_log_path(device_id)
             try:
+                LOGS_DIR.mkdir(parents=True, exist_ok=True)
                 with path.open("a", encoding="utf-8") as f:
                     for entry in entries:
-                        device_logs[device_id].append(entry)
                         f.write(json.dumps(entry, separators=(",", ":")) + "\n")
-                        publish_log_event(entry)
-                    f.flush()
-            except OSError:
-                return jsonify({"error": "log persist failed", "device_id": device_id}), 503
+            except OSError as err:
+                app.logger.warning("log persist failed device=%s: %s", device_id, err)
+            for entry in entries:
+                device_logs[device_id].append(entry)
+                publish_log_event(entry)
         schedule_save_devices()
     maybe_geolocate(device_id, ip)
     if city:
@@ -2148,6 +2078,11 @@ def log_acks_compute_fingerprint():
         "is_acked": is_acked,
         "ack": ack_info,
     })
+
+
+@app.errorhandler(413)
+def payload_too_large(_e):
+    return jsonify({"error": "payload too large"}), 413
 
 
 @app.errorhandler(404)
