@@ -83,6 +83,8 @@ def test_ensure_signing_key_script() -> None:
         first = (cfg / "secure_boot_signing_key.pem").read_bytes()
         subprocess.check_output([str(script)], env=env, text=True)
         assert (cfg / "secure_boot_signing_key.pem").read_bytes() == first
+        assert not (cfg / "signing_key_backed_up").exists()
+        assert not (home / ".config" / "searaboom" / "signing_key_backed_up").exists()
 
 
 def test_upload_rejects_unsigned() -> None:

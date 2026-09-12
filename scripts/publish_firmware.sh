@@ -2,6 +2,7 @@
 # Publish an already-built firmware/build as OTA and USB factory (same version).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+python3 "$ROOT/scripts/signing_key_backup.py" --require
 VER="${1:?usage: publish_firmware.sh X.Y.Z}"
 BIN="$ROOT/firmware/build/searaboom.bin"
 TOKEN="${SEARABOOM_ADMIN_TOKEN:-searaboom-dev}"

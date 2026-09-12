@@ -49,4 +49,5 @@ fi
 
 openssl rsa -in "$CFG_KEY" -pubout -out "$CFG_PUB" 2>/dev/null
 chmod 644 "$CFG_PUB" 2>/dev/null || true
+# Never create signing_key_backed_up. Only Lucas does that after the key is stored.
 echo "$FW_KEY"

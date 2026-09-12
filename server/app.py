@@ -29,6 +29,8 @@ from fw_signature import SignedFirmwareError, require_signed_app
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parent
+sys.path.insert(0, str(REPO / "scripts"))
+from signing_key_backup import SigningKeyBackupError, require_backup  # noqa: E402
 FW_DIR = ROOT / "firmware"
 META_PATH = FW_DIR / "latest.json"
 FACTORY_DIR = FW_DIR / "factory"
@@ -131,9 +133,14 @@ def save_meta(meta: dict) -> None:
 
 def require_signed_upload(data: bytes, what: str) -> dict:
     try:
-        return require_signed_app(data)
+        info = require_signed_app(data)
     except SignedFirmwareError as exc:
         raise ValueError(f"{what} must be a Secure Boot V2 signed app image: {exc}") from exc
+    try:
+        require_backup()
+    except SigningKeyBackupError as exc:
+        raise PermissionError(str(exc)) from exc
+    return info
 
 
 def read_repo_version() -> str:
@@ -1439,6 +1446,8 @@ def factory_upload():
         require_signed_upload(saved["app"], "factory app")
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
     with lock:
         for item in FACTORY_PLAN:
             (dest_dir / item["filename"]).write_bytes(saved[item["key"]])
@@ -1547,6 +1556,8 @@ def firmware_upload():
         require_signed_upload(payload, "firmware")
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
     with lock:
         dest.write_bytes(payload)
         digest = hashlib.sha256(dest.read_bytes()).hexdigest()

@@ -5,3 +5,4 @@
 - Firmware/device PRs: push and wait for **USB box (s3-zero)** and **USB box (s3-supermini)**. Rerun: comment `/hw-test`. Loud: `/hw-test listen` (only when Lucas says the room is OK). Hands: `/hw-test hands`.
 - Local bring-up: a box that is **not** in `~/.config/searaboom/qa-boxes.json`.
 - Publish from `main` only when Lucas asks: `./scripts/dev_ota.sh`.
+- Never create `~/.config/searaboom/signing_key_backed_up`. Only Lucas creates that file after the signing key is stored offline. Until it exists, refuse signed USB flash and OTA/factory publish (`docs/SIGNED_FIRMWARE.md`). No `--force`.

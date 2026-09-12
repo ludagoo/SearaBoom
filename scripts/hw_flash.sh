@@ -30,6 +30,7 @@ source "$IDF_PATH/export.sh" >/dev/null
 "$ROOT/scripts/ensure_signing_key.sh" >/dev/null
 cd "$ROOT/firmware"
 idf.py build
+python3 "$ROOT/scripts/signing_key_backup.py" --require
 idf.py -p "$PORT" flash
 
 for _ in $(seq 1 40); do

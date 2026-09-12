@@ -3,6 +3,7 @@
 # Does not publish OTA. Prefer ./scripts/publish_firmware.sh so OTA and USB match.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+python3 "$ROOT/scripts/signing_key_backup.py" --require
 BUILD="$ROOT/firmware/build"
 DEST="$ROOT/server/firmware/factory"
 VER="${1:-}"

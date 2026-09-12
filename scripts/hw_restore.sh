@@ -25,6 +25,13 @@ for f in bootloader.bin partition-table.bin ota_data_initial.bin app.bin storage
     exit 3
   fi
 done
+CHECK_PY="${ROOT}/server/.venv/bin/python"
+if [[ ! -x "$CHECK_PY" ]]; then
+  CHECK_PY=python3
+fi
+if "$CHECK_PY" "$ROOT/server/fw_signature.py" --check "$DEST/app.bin" >/dev/null 2>&1; then
+  python3 "$ROOT/scripts/signing_key_backup.py" --require
+fi
 exec 9>"$LOCK"
 if ! flock -n 9; then
   echo "box $BOX busy ($LOCK)" >&2

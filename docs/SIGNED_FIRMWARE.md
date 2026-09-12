@@ -1,5 +1,25 @@
 # Signed firmware (OTA + recovery)
 
+**No signed USB flash and no OTA/factory publish until Lucas says the key is stored.**
+
+Build/compile may generate or use `~/.config/searaboom/secure_boot_signing_key.pem`.
+That is not permission to flash or publish.
+
+After the key is copied offline, **Lucas** (not an agent) creates this marker:
+
+```bash
+touch ~/.config/searaboom/signing_key_backed_up
+```
+
+Until that file exists as a regular file:
+
+- `scripts/dev_ota.sh`, `publish_firmware.sh`, and `snapshot_factory.sh` exit
+- `scripts/hw_flash.sh` and `idf.py flash` (signed images) fail
+- factory USB publish of signed images fails
+- agents must never create the marker (no `--force`, no env bypass)
+
+See the gate in `scripts/signing_key_backup.py`.
+
 ESP32-S3 + ESP-IDF 5.3.2. This tree uses Espressif **signed app verification
 without hardware Secure Boot**: `CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT`.
 Boxes reject OTA images that are unsigned or signed with the wrong RSA-3072
@@ -31,10 +51,11 @@ The private key is **not** in git.
 
 `scripts/ensure_signing_key.sh` (also run from `firmware/CMakeLists.txt`) will
 **generate** an RSA-3072 key in `~/.config/searaboom/` if none exists so USB QA
-and local `idf.py build` work. That generated key becomes the one field units
-trust after the **first signed OTA publish**.
+and local `idf.py build` work. **Do not flash or publish** that image until
+Lucas has stored the key and created `~/.config/searaboom/signing_key_backed_up`.
+Agents must never create that marker.
 
-**Before the first signed release from `main`:**
+**Before the first signed flash or release from `main`:**
 
 ```bash
 # Either keep the generated key and back it up offline:
@@ -44,6 +65,9 @@ cp ~/.config/searaboom/secure_boot_signing_key.pem /offline/searaboom-ota-key.pe
 espsecure.py generate_signing_key --version 2 --scheme rsa3072 /offline/searaboom-ota-key.pem
 cp /offline/searaboom-ota-key.pem ~/.config/searaboom/secure_boot_signing_key.pem
 ./scripts/ensure_signing_key.sh
+
+# Only Lucas, after the copy is stored:
+touch ~/.config/searaboom/signing_key_backed_up
 ```
 
 Optional: pin the public key so the **server** also rejects a different key
