@@ -4,18 +4,21 @@ file(READ "${CMAKE_CURRENT_LIST_DIR}/VERSION" PROJECT_VER)
 string(STRIP "${PROJECT_VER}" PROJECT_VER)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/VERSION")
 
-# Signed OTA needs firmware/secure_boot_signing_key.pem at configure.
-# Do not mint a trust anchor here — cmake must not call ensure_signing_key.sh.
-set(_sb_key "${CMAKE_CURRENT_LIST_DIR}/secure_boot_signing_key.pem")
-if(NOT EXISTS "${_sb_key}")
+# Link-only: symlink the existing config key. Does not pass --generate (no mint).
+execute_process(
+    COMMAND "${CMAKE_CURRENT_LIST_DIR}/../scripts/ensure_signing_key.sh"
+    RESULT_VARIABLE _sb_key_rc
+    OUTPUT_VARIABLE _sb_key_out
+    ERROR_VARIABLE _sb_key_err
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT _sb_key_rc EQUAL 0)
     message(FATAL_ERROR
-        "Missing ${_sb_key}.\n"
-        "A build must not generate the fleet signing key. Once, if you intend to keep it:\n"
+        "secure boot signing key (link-only, no mint):\n${_sb_key_err}\n"
+        "If you intend to create a new key once:\n"
         "  ${CMAKE_CURRENT_LIST_DIR}/../scripts/ensure_signing_key.sh --generate\n"
-        "If ~/.config/searaboom/secure_boot_signing_key.pem already exists, run the script\n"
-        "without --generate to symlink the firmware path. See docs/SIGNED_FIRMWARE.md")
+        "See docs/SIGNED_FIRMWARE.md")
 endif()
-message(STATUS "Firmware signing key: ${_sb_key}")
+message(STATUS "Firmware signing key: ${_sb_key_out}")
 
 include($ENV{ADF_PATH}/CMakeLists.txt)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)

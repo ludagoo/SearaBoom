@@ -5,8 +5,8 @@
 # SEARABOOM_SIGNING_KEY or firmware/*.pem must not replace that file or rewrite
 # the server pin (ota_signing_pubkey.pem) to match a different key.
 #
-# Does not mint a trust anchor unless invoked with --generate. cmake / idf.py
-# build only consume the firmware path; they must not call this script.
+# Does not mint a trust anchor unless invoked with --generate. cmake and
+# hw_flash.sh call this without --generate (symlink or exit 1).
 set -euo pipefail
 
 GENERATE=0

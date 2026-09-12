@@ -47,7 +47,9 @@ def _cmd_and_paths(ev: dict) -> tuple[str, list[str]]:
     tool_in = ev.get("toolInput") or ev.get("tool_input") or {}
     if not isinstance(tool_in, dict):
         tool_in = {}
-    cmd = str(tool_in.get("command") or tool_in.get("contents") or "")
+    # Do not treat file-body `contents` as a command: docs mention the marker
+    # name and a Write/StrReplace of those files must still be allowed.
+    cmd = str(tool_in.get("command") or "")
     paths = []
     for key in ("path", "target_file", "file_path", "target_notebook"):
         raw = tool_in.get(key)

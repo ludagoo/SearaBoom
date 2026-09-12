@@ -4,7 +4,8 @@
 Marker (Lucas creates this himself; agents must never create it):
   ~/.config/searaboom/signing_key_backed_up
 
-No --force. No environment bypass. Tests set HOME to a temp dir.
+No --force. Tests set HOME to a temp dir (Path.home() follows HOME).
+Policy forbids using that as a bypass.
 """
 from __future__ import annotations
 

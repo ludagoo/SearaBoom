@@ -27,8 +27,8 @@ export IDF_PATH="${IDF_PATH:-$HOME/esp/esp-idf}"
 export ADF_PATH="${ADF_PATH:-$HOME/esp/esp-adf}"
 # shellcheck disable=SC1091
 source "$IDF_PATH/export.sh" >/dev/null
-# Signing key is not minted here. cmake requires firmware/secure_boot_signing_key.pem
-# (see scripts/ensure_signing_key.sh --generate). Flash stays gated below.
+# Link-only: symlink the existing config key into this worktree. Does not mint.
+"$ROOT/scripts/ensure_signing_key.sh"
 cd "$ROOT/firmware"
 idf.py build
 python3 "$ROOT/scripts/signing_key_backup.py" --require

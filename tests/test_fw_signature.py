@@ -172,6 +172,21 @@ def test_ensure_signing_key_firmware_pem_does_not_promote() -> None:
         assert not (cfg / "ota_signing_pubkey.pem").exists()
 
 
+def test_hw_flash_and_cmake_link_without_generate() -> None:
+    root = Path(__file__).resolve().parents[1]
+    flash = (root / "scripts" / "hw_flash.sh").read_text()
+    cmake = (root / "firmware" / "CMakeLists.txt").read_text()
+    invoked = False
+    for line in flash.splitlines():
+        if "ensure_signing_key.sh" in line and not line.lstrip().startswith("#"):
+            assert "--generate" not in line
+            invoked = True
+    assert invoked
+    invoke = cmake.split("execute_process", 1)[1].split("if(", 1)[0]
+    assert "ensure_signing_key.sh" in invoke
+    assert "--generate" not in invoke
+
+
 def test_upload_rejects_unsigned() -> None:
     from app import app  # noqa: WPS433
 
@@ -195,5 +210,6 @@ if __name__ == "__main__":
     test_ensure_signing_key_does_not_clobber_config_key()
     test_ensure_signing_key_stray_env_does_not_write_config()
     test_ensure_signing_key_firmware_pem_does_not_promote()
+    test_hw_flash_and_cmake_link_without_generate()
     test_upload_rejects_unsigned()
     print("ok")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed signing-key backup gate (no --force, no env bypass)."""
+"""Fail-closed signing-key backup gate (no --force; tests set HOME)."""
 from __future__ import annotations
 
 import json
@@ -189,6 +189,20 @@ def test_hook_denies_creating_marker() -> None:
             env,
         )
         assert out["decision"] == "deny"
+        out = _run_hook(
+            {
+                "toolName": "Write",
+                "toolInput": {
+                    "path": str(Path(td) / "docs" / "SIGNED_FIRMWARE.md"),
+                    "contents": (
+                        "After backup, Lucas creates ~/.config/searaboom/"
+                        "signing_key_backed_up\n"
+                    ),
+                },
+            },
+            env,
+        )
+        assert out["decision"] == "allow"
 
 
 def test_hook_denies_flash_without_marker() -> None:

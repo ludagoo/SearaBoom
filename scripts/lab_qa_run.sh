@@ -20,7 +20,9 @@ cleanup() {
   local box
   if [[ "$JOB" != "soak" ]]; then
     for box in "${BOXES[@]+"${BOXES[@]}"}"; do
-      "$ROOT/scripts/hw_restore.sh" --box "$box" >/dev/null 2>&1 || true
+      if ! restore_out="$("$ROOT/scripts/hw_restore.sh" --box "$box" 2>&1)"; then
+        echo "hw_restore.sh --box $box failed (box may still be on PR firmware): $restore_out" >&2
+      fi
     done
   fi
   if [[ -n "$RESULT" && -f "$RESULT" ]]; then

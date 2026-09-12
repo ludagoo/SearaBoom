@@ -17,7 +17,7 @@ Until that file exists as a regular file:
 - `scripts/dev_ota.sh`, `publish_firmware.sh`, and `snapshot_factory.sh` exit
 - `scripts/hw_flash.sh` and `idf.py flash` (signed images) fail
 - factory USB publish of signed images fails
-- agents must never create the marker (no `--force`, no env bypass)
+- agents must never create the marker (no `--force`; policy forbids env tricks)
 
 See the gate in `scripts/signing_key_backup.py`.
 
@@ -52,8 +52,9 @@ The private key is **not** in git.
    differs from that path, `ensure_signing_key.sh` **exits**. It will not copy
    the env file (or a stray `firmware/*.pem`) over the config key.
 3. Firmware build expects `firmware/secure_boot_signing_key.pem` (gitignored
-   symlink/copy). `firmware/CMakeLists.txt` fails configure if that path is
-   missing; it does **not** generate a key.
+   symlink/copy). `hw_flash.sh` and `firmware/CMakeLists.txt` call
+   `scripts/ensure_signing_key.sh` **without** `--generate` so a fresh worktree
+   gets the symlink. That does **not** mint a key; missing config key → exit 1.
 
 `scripts/ensure_signing_key.sh --generate` mints an RSA-3072 key in
 `~/.config/searaboom/` **once**, when you intend to keep it. USB QA and local
@@ -65,6 +66,10 @@ marker.
 **Before the first signed flash or release from `main`:**
 
 ```bash
+# Link firmware/secure_boot_signing_key.pem in this checkout (no mint).
+# Needed on a fresh clone/worktree; the pem is gitignored.
+./scripts/ensure_signing_key.sh
+
 # Either keep the generated key and back it up offline:
 cp ~/.config/searaboom/secure_boot_signing_key.pem /offline/searaboom-ota-key.pem
 

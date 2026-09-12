@@ -16,8 +16,8 @@ Never `idf.py -p /dev/ttyACM0`. Never a tty that is not a mapped QA box.
 
 Toolbox (from the worktree, or `$SEARABOOM_LAB_ROOT` if set):
 
-- `scripts/hw_flash.sh --box <id>` — build + USB flash. Never publishes. Fails until Lucas has created `~/.config/searaboom/signing_key_backed_up`.
-- `scripts/hw_restore.sh --box <id>` — factory image back onto that box.
+- `scripts/hw_flash.sh --box <id>` — link-only `ensure_signing_key.sh` (no mint), then build + USB flash. Never publishes. Flash fails until Lucas has created `~/.config/searaboom/signing_key_backed_up`.
+- `scripts/hw_restore.sh --box <id>` — factory image back onto that box. Fails (and the launcher logs it) if the factory app is signed and the backup marker is absent.
 - `scripts/serial_cmd.sh --box <id> '<cmd>' [wait]`
 - `scripts/audiotest.sh --box <id>`
 - `python3 scripts/qa_boxes.py status`
