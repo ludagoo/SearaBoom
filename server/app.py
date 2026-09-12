@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from flask import Flask, Response, jsonify, request, send_from_directory, stream_with_context
+from flask import Flask, Response, jsonify, request, send_from_directory, send_file, stream_with_context
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parent
@@ -46,12 +46,16 @@ PORT = int(os.environ.get("SEARABOOM_PORT", "8080"))
 PUBLIC_URL = os.environ.get("SEARABOOM_PUBLIC_URL", "https://searaboom.goossen.dev").rstrip("/")
 
 LOG_LINES_PER_DEVICE = 2000
-LOGS_DIR = ROOT / "logs"
+LOGS_DIR = Path(os.environ.get("SEARABOOM_LOGS_DIR", str(ROOT / "logs")))
 DEVICES_PATH = LOGS_DIR / "devices.json"
 GEOCODE_PATH = LOGS_DIR / "geocode.json"
 LOG_ACKS_PATH = LOGS_DIR / "log_acks.json"
 GEO_TTL_S = 24 * 3600
 ONLINE_WINDOW_S = 120
+LOG_MAX_BODY = 64 * 1024
+CRASH_RESETS = frozenset({
+    "PANIC", "INT_WDT", "TASK_WDT", "WDT", "BROWNOUT", "CPU_LOCKUP", "PWR_GLITCH",
+})
 PLAYING_WINDOW_S = 180
 DEVICES_SAVE_DEBOUNCE_S = 1.0
 ACKS_SAVE_DEBOUNCE_S = 1.0
@@ -76,6 +80,7 @@ except ZoneInfoNotFoundError:
     FORTALEZA_TZ = timezone(timedelta(hours=-3))
 
 app = Flask(__name__, static_folder=str(STATIC_DIR))
+app.config["MAX_CONTENT_LENGTH"] = LOG_MAX_BODY
 lock = threading.Lock()
 log_lock = threading.RLock()
 flash_lock = threading.Lock()
@@ -423,6 +428,48 @@ def parse_ip(raw: str | None) -> str:
     except ValueError:
         return ""
     return host
+
+
+def parse_byte_range(header: str | None, size: int) -> tuple[int, int] | None:
+    """Return inclusive (start, end), or None for the full file.
+
+    Raises ValueError if the range cannot be satisfied.
+    """
+    if size < 0:
+        raise ValueError("unsatisfiable")
+    if not header:
+        return None
+    raw = header.strip()
+    if not raw:
+        return None
+    if not raw.lower().startswith("bytes="):
+        return None
+    spec = raw.split("=", 1)[1].strip()
+    if not spec:
+        return None
+    if "," in spec:
+        spec = spec.split(",", 1)[0].strip()
+    if spec.startswith("-"):
+        suffix_s = spec[1:]
+        if not suffix_s:
+            raise ValueError("unsatisfiable")
+        suffix = int(suffix_s)
+        if suffix <= 0 or size == 0:
+            raise ValueError("unsatisfiable")
+        start = max(0, size - suffix)
+        return start, size - 1
+    if "-" not in spec:
+        raise ValueError("unsatisfiable")
+    start_s, end_s = spec.split("-", 1)
+    start = int(start_s)
+    if start < 0 or start >= size:
+        raise ValueError("unsatisfiable")
+    end = int(end_s) if end_s else size - 1
+    if end >= size:
+        end = size - 1
+    if end < start:
+        raise ValueError("unsatisfiable")
+    return start, end
 
 
 def ip_ok_for_geo(ip: str) -> bool:
@@ -1146,7 +1193,18 @@ def update_registry(device_id: str, data: dict, ip: str, now: float, n_new_lines
     rec["lines"] = int(rec.get("lines") or 0) + n_new_lines
     if ip:
         rec["ip"] = ip
-    for key in ("fw", "reset", "uptime_ms", "heap", "rssi", "station", "seq", "name", "city"):
+
+    new_up = coerce_nonneg_int(data.get("uptime_ms"), None)
+    old_up = coerce_nonneg_int(rec.get("uptime_ms"), None)
+    boot_changed = new_up is not None and (old_up is None or new_up + 2000 < old_up)
+    reset_val = data.get("reset") if "reset" in data else rec.get("reset")
+    if boot_changed and isinstance(reset_val, str) and reset_val in CRASH_RESETS:
+        rec["last_crash_at"] = utc_iso(now)
+        rec["last_crash_reset"] = reset_val
+        rec["crash_count"] = int(rec.get("crash_count") or 0) + 1
+
+    for key in ("fw", "reset", "uptime_ms", "heap", "heap_min", "heap_int",
+                "crashes", "rssi", "station", "seq", "name", "city"):
         if key not in data:
             continue
         val = data[key]
@@ -1154,6 +1212,17 @@ def update_registry(device_id: str, data: dict, ip: str, now: float, n_new_lines
             if not isinstance(val, str):
                 val = "" if val is None else str(val)
             val = "".join(ch for ch in val.strip() if ch >= " " and ch not in "\"\\<>")[:40]
+        elif key in ("heap", "heap_min", "heap_int", "crashes", "uptime_ms", "rssi", "seq"):
+            coerced = coerce_nonneg_int(val, None)
+            if coerced is None and key != "rssi":
+                continue
+            if key == "rssi":
+                try:
+                    val = int(val)
+                except (TypeError, ValueError):
+                    continue
+            else:
+                val = coerced
         rec[key] = val
     ensure_session_state(rec)
     listen_delta = 0
@@ -1621,7 +1690,42 @@ def firmware_check():
 @app.get("/api/firmware/download/<path:filename>")
 def firmware_download(filename: str):
     safe = Path(filename).name
-    return send_from_directory(FW_DIR, safe, as_attachment=True, mimetype="application/octet-stream")
+    path = FW_DIR / safe
+    try:
+        resolved = path.resolve()
+        if resolved.parent != FW_DIR.resolve() or not resolved.is_file():
+            return jsonify({"error": "not found"}), 404
+    except OSError:
+        return jsonify({"error": "not found"}), 404
+    size = resolved.stat().st_size
+    try:
+        rng = parse_byte_range(request.headers.get("Range"), size)
+    except (TypeError, ValueError):
+        resp = Response(status=416)
+        resp.headers["Content-Range"] = f"bytes */{size}"
+        resp.headers["Accept-Ranges"] = "bytes"
+        return resp
+    if rng is None:
+        resp = send_file(
+            resolved,
+            as_attachment=True,
+            mimetype="application/octet-stream",
+            download_name=safe,
+            conditional=False,
+        )
+        resp.headers["Accept-Ranges"] = "bytes"
+        return resp
+    start, end = rng
+    length = end - start + 1
+    with resolved.open("rb") as f:
+        f.seek(start)
+        data = f.read(length)
+    resp = Response(data, status=206, mimetype="application/octet-stream")
+    resp.headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+    resp.headers["Accept-Ranges"] = "bytes"
+    resp.headers["Content-Length"] = str(length)
+    resp.headers["Content-Disposition"] = f'attachment; filename="{safe}"'
+    return resp
 
 
 @app.post("/api/firmware/upload")
@@ -1656,13 +1760,25 @@ def firmware_upload():
 
 @app.post("/api/logs")
 def logs_ingest():
-    data = request.get_json(silent=True) or {}
-    if not isinstance(data, dict):
+    if request.content_length and request.content_length > LOG_MAX_BODY:
+        return jsonify({"error": "payload too large"}), 413
+    raw = request.get_data(cache=True, as_text=True) or ""
+    if not raw.strip():
         data = {}
+    else:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return jsonify({"error": "invalid json"}), 400
+        if not isinstance(parsed, dict):
+            return jsonify({"error": "invalid json"}), 400
+        data = parsed
     device_id = str(data.get("device_id") or "unknown").strip().lower()
     text = data.get("text") or ""
     if not isinstance(text, str):
         text = str(text)
+    if len(text) > LOG_MAX_BODY:
+        return jsonify({"error": "payload too large"}), 413
     now = time.time()
     ip = client_ip()
     seq = data.get("seq") if "seq" in data else None
@@ -1688,16 +1804,25 @@ def logs_ingest():
         city = (rec.get("city") or "").strip()
         if entries:
             path = device_log_path(device_id)
-            with path.open("a", encoding="utf-8") as f:
-                for entry in entries:
-                    device_logs[device_id].append(entry)
-                    f.write(json.dumps(entry, separators=(",", ":")) + "\n")
-                    publish_log_event(entry)
+            try:
+                with path.open("a", encoding="utf-8") as f:
+                    for entry in entries:
+                        device_logs[device_id].append(entry)
+                        f.write(json.dumps(entry, separators=(",", ":")) + "\n")
+                        publish_log_event(entry)
+                    f.flush()
+            except OSError:
+                return jsonify({"error": "log persist failed", "device_id": device_id}), 503
         schedule_save_devices()
     maybe_geolocate(device_id, ip)
     if city:
         maybe_geocode_city(city)
-    return jsonify({"ok": True, "accepted": n_text, "device_id": device_id})
+    return jsonify({
+        "ok": True,
+        "accepted": n_text,
+        "device_id": device_id,
+        "seq": rec.get("seq"),
+    })
 
 
 @app.get("/api/logs")
