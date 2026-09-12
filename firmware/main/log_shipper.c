@@ -704,8 +704,12 @@ static bool ship_chunk(void)
     s_last_http = status;
     bool ok = (err == ESP_OK && status >= 200 && status < 300);
     if (!ok) {
-        if (err == ESP_ERR_ESP_TLS_CONNECTION_FAILED || err == ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST) {
-            ESP_LOGW(TAG, "ship fail TLS handshake err=%s heap_int=%u http=%d",
+        /* IDF 5.3.2 has no ESP_ERR_ESP_TLS_CONNECTION_FAILED.
+         * esp_http_client_perform maps any transport connect failure
+         * (DNS, TCP refused, timeout, TLS handshake) to ESP_ERR_HTTP_CONNECT.
+         * Handshake-specific esp-tls codes are not perform() returns. */
+        if (err == ESP_ERR_HTTP_CONNECT) {
+            ESP_LOGW(TAG, "ship fail connect err=%s heap_int=%u http=%d",
                      esp_err_to_name(err),
                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                      status);
