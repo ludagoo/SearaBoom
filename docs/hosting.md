@@ -62,7 +62,7 @@ Secret **names** (values never committed):
 8. `./scripts/searaboom-host install --instance prod --enable` then `systemctl --user start searaboom-server@prod searaboom-tunnel@prod`
 9. Confirm `curl -fsS http://127.0.0.1:18080/healthz` and the **new** hostname. Leave the live CNAME on Mini.
 
-USB factory for testers is the public flash page (WebSerial in **their** browser, bins from Flask). Mini-local admin flash is `POST /api/factory/flash` and needs a box on `SEARABOOM_SERIAL_PORT`.
+USB factory for testers is the single-binary flasher from the public flash page (`/api/factory/flasher/`; firmware fetched live from Flask). Chrome WebSerial on that page is a fallback. Mini-local admin flash is `POST /api/factory/flash` and needs a box on `SEARABOOM_SERIAL_PORT`.
 
 ## Test instance beside Mini prod
 

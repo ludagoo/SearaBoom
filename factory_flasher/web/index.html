@@ -101,7 +101,7 @@
 <body>
   <main>
     <h1>SearaBoom factory flasher</h1>
-    <p class="lead">esptool reset (DTR/RTS). No BOOT button. Chrome WebSerial is not used.</p>
+    <p class="lead">One program. DTR/RTS reset — no BOOT button, no WebSerial. Firmware is whatever the live factory server is serving right now.</p>
 
     <div class="card">
       <div class="meta" id="image">Loading factory image…</div>
@@ -113,7 +113,7 @@
         <span>ARM — flash the next box I plug in</span>
       </label>
       <p class="meta" style="margin:.55rem 0 0">
-        Confirm you are ready, then plug USB. Dedicated QA boxes (<code>/dev/searaboom-qa-*</code>) are skipped.
+        Confirm you are ready, then plug USB. ARM re-checks the live server for a newer image. Dedicated QA boxes (<code>/dev/searaboom-qa-*</code>) are skipped.
       </p>
     </div>
 
@@ -158,9 +158,10 @@
 
     function render(s) {
       const ver = s.image_version || "unknown";
+      const src = s.image_source || "";
       imageEl.innerHTML = s.image_ready
-        ? `USB image <strong>${ver}</strong> · ESP32-S3 · 4MB · ${s.image_dir || ""}`
-        : `<span class="warn">No factory image.</span>`;
+        ? `Live USB image <strong>${ver}</strong> · ESP32-S3 · 4MB · ${src || s.image_dir || ""}`
+        : `<span class="warn">No factory image from the live server.</span>`;
       phaseEl.textContent = s.phase + (s.port ? ` · ${s.port}` : "");
       messageEl.textContent = s.message || "";
       bar.style.width = `${s.progress || 0}%`;
@@ -203,7 +204,7 @@
     arm.addEventListener("change", async () => {
       if (arm.checked) {
         const ok = window.confirm(
-          "ARM factory flash?\n\nIf one SearaBoom is already plugged in, it will be flashed now. Otherwise the next box you plug in is erased and rewritten with the USB factory image. Dedicated QA boxes are skipped."
+          "ARM factory flash?\n\nThis checks the live factory server for the current USB image, then flashes the box that is already plugged in (or the next one you plug in). Dedicated QA boxes are skipped."
         );
         if (!ok) {
           arm.checked = lastArmed;

@@ -65,7 +65,7 @@
     .meta { color: var(--muted); font-size: .92rem; }
     .meta strong { color: var(--ink); }
     ol { margin: .4rem 0 0; padding-left: 1.2rem; line-height: 1.55; }
-    button.flash {
+    button.flash, a.flash {
       border: 0;
       border-radius: 10px;
       padding: .9rem 1.25rem;
@@ -74,8 +74,11 @@
       cursor: pointer;
       background: var(--gold);
       color: var(--bg);
+      text-decoration: none;
+      display: inline-block;
     }
     button.flash:disabled { opacity: .45; cursor: not-allowed; }
+    a.flash:visited { color: var(--bg); }
     a { color: var(--gold); }
     footer { margin-top: 1.25rem; color: var(--muted); font-size: .88rem; }
     .unsupported { color: #ffd6a8; display: block; margin-top: .8rem; }
@@ -106,10 +109,15 @@
     <div class="card">
       <div class="meta" id="status">Loading image…</div>
       <ol>
-        <li>Download the <a href="/api/factory/desktop.zip">desktop flasher</a> and run <code>./run.sh</code> (esptool, no BOOT button).</li>
-        <li>Arm the app, then plug the box in over USB. It flashes itself.</li>
+        <li>Download the factory flasher for this computer — one file, no Python, no zip of scripts.</li>
+        <li>Run it. ARM once. Plug a box in. It flashes the <strong>live</strong> USB image from this server.</li>
         <li>After write: confirm version/board, then hold volume + then − to calibrate pads.</li>
       </ol>
+      <p style="margin:1rem 0 0">
+        <a class="flash" id="flasher-dl" href="/api/factory/flasher">Download factory flasher</a>
+      </p>
+      <p class="meta" id="flasher-hint" style="margin:.7rem 0 0"></p>
+      <p class="meta" id="flasher-others" style="margin:.4rem 0 0"></p>
     </div>
     <p class="lead" style="margin-top:-.4rem">Chrome WebSerial often fails and asks for BOOT. Prefer the desktop program. Chrome remains a fallback below.</p>
     <div class="card" id="need-chrome" hidden>
@@ -162,16 +170,51 @@
         document.getElementById("copy-cmd").textContent = "Copy failed";
       }
     });
+    function guessFlasherId() {
+      const ua = navigator.userAgent || "";
+      const plat = (navigator.platform || "").toLowerCase();
+      const arch = ((navigator.userAgentData && navigator.userAgentData.architecture) || "").toLowerCase();
+      const blob = `${ua} ${plat} ${arch}`;
+      const isWin = /Win/i.test(ua);
+      const isMac = /Mac/i.test(ua) && !/iPhone|iPad/i.test(ua);
+      const arm = /arm64|aarch64|apple silicon/i.test(blob) || (isMac && /arm/i.test(plat));
+      if (isWin) return "windows-amd64";
+      if (isMac) return arm ? "darwin-arm64" : "darwin-amd64";
+      return arm ? "linux-arm64" : "linux-amd64";
+    }
+    function howToRun(id, filename) {
+      if (id.startsWith("windows")) return `Save ${filename} and run it.`;
+      if (id.startsWith("darwin")) return `chmod +x ${filename} && ./${filename}  (if macOS blocks it: right-click → Open)`;
+      return `chmod +x ${filename} && ./${filename}  (Linux USB once: ./${filename} --linux-serial)`;
+    }
     fetch("/api/factory")
       .then((r) => r.json())
       .then((d) => {
         const el = document.getElementById("status");
         if (!d.ready) {
           el.textContent = "No factory image on the server yet.";
-          return;
+        } else {
+          const ota = d.ota_version ? ` · OTA <strong>${d.ota_version}</strong>` : "";
+          el.innerHTML = `Live USB image <strong>${d.version}</strong>${ota} · ESP32-S3 · 4MB`;
         }
-        const ota = d.ota_version ? ` · OTA <strong>${d.ota_version}</strong>` : "";
-        el.innerHTML = `USB image <strong>${d.version}</strong>${ota} · ESP32-S3 · 4MB`;
+        const fl = d.flasher || {};
+        const downloads = fl.downloads || [];
+        const want = guessFlasherId();
+        const match = downloads.find((x) => x.id === want) || downloads[0];
+        const btn = document.getElementById("flasher-dl");
+        const hint = document.getElementById("flasher-hint");
+        const others = document.getElementById("flasher-others");
+        if (match) {
+          btn.href = match.url;
+          btn.textContent = match.ready
+            ? `Download ${match.label}`
+            : `Download ${match.label} (not built on this server yet)`;
+          hint.textContent = howToRun(match.id, match.filename);
+        }
+        others.innerHTML = downloads
+          .filter((x) => x.id !== (match && match.id))
+          .map((x) => `<a href="${x.url}">${x.label}</a>`)
+          .join(" · ");
       })
       .catch((e) => {
         document.getElementById("status").textContent = e.message;

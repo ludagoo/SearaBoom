@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Freeze the current firmware/build as the USB factory image (local files only).
-# Offsets/filenames must match factory_flasher/layout.py.
+# Offsets/filenames must match server/factory_layout.py and factory_flasher/internal/layout.
 # Does not publish OTA. Prefer ./scripts/publish_firmware.sh so OTA and USB match.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

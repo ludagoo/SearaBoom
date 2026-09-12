@@ -1,7 +1,8 @@
 """USB factory flash layout.
 
 Must stay aligned with firmware/build/flasher_args.json, scripts/hw_restore.sh,
-and scripts/snapshot_factory.sh. The desktop flasher and the server both import this.
+scripts/snapshot_factory.sh, and factory_flasher/internal/layout (Go desktop
+flasher). The OTA server uses this for /api/factory and admin USB flash.
 """
 from __future__ import annotations
 
