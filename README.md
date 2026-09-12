@@ -33,7 +33,7 @@ A release ships the **same** version to OTA and USB factory.
 | USB factory only | `./scripts/snapshot_factory.sh` | Rare |
 | PR hardware QA | push the PR; lab webhook runs Grok on the QA fleet | automatic on firmware paths |
 
-`dev_ota.sh` bumps the **patch** digit, builds, and publishes that build as both OTA latest and USB factory. Firmware after `0.1.0` applies any newer X.Y.Z on boot. Do not `idf.py flash` dedicated QA boxes.
+`dev_ota.sh` bumps the **patch** digit, builds, and publishes that build as both OTA latest and USB factory. Firmware after `0.1.0` applies any newer X.Y.Z on boot. Do not `idf.py flash` dedicated QA boxes. OTA images must be signed (`docs/SIGNED_FIRMWARE.md`); USB factory remains the unbrick path.
 
 Factory flash (new boxes): https://searaboom.goossen.dev/  
 OTA + logs: https://searaboom.goossen.dev/admin

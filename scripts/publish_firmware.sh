@@ -8,6 +8,12 @@ TOKEN="${SEARABOOM_ADMIN_TOKEN:-searaboom-dev}"
 URL="${SEARABOOM_PUBLIC_URL:-https://searaboom.goossen.dev}"
 test -f "$BIN"
 
+PY="$ROOT/server/.venv/bin/python"
+if [[ ! -x "$PY" ]]; then
+  PY="${PYTHON:-python3}"
+fi
+"$PY" "$ROOT/server/fw_signature.py" --check "$BIN"
+
 curl -fsS -X POST "$URL/api/firmware/upload" \
   -H "X-Admin-Token: $TOKEN" \
   -F "version=$VER" \

@@ -27,6 +27,7 @@ export IDF_PATH="${IDF_PATH:-$HOME/esp/esp-idf}"
 export ADF_PATH="${ADF_PATH:-$HOME/esp/esp-adf}"
 # shellcheck disable=SC1091
 source "$IDF_PATH/export.sh" >/dev/null
+"$ROOT/scripts/ensure_signing_key.sh" >/dev/null
 cd "$ROOT/firmware"
 idf.py build
 idf.py -p "$PORT" flash

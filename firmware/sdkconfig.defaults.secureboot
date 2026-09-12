@@ -1,0 +1,19 @@
+# NOT loaded by IDF unless you copy these lines into sdkconfig.defaults.
+# Hardware Secure Boot V2 burns eFuses on first boot. Irreversible.
+# Do not enable on QA boxes. See docs/SIGNED_FIRMWARE.md.
+#
+# After this is on a production unit:
+#   - ROM verifies the signed bootloader; bootloader verifies the signed app.
+#   - USB/UART download stays fully enabled (unbrick with a signed factory image).
+#   - Do not enable Secure Download Mode or disable ROM download — that bricks recovery.
+#   - Do not enable flash encryption until a flash-encryption key is escrowed.
+
+CONFIG_SECURE_BOOT=y
+CONFIG_SECURE_BOOT_V2_ENABLED=y
+CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME=y
+CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y
+CONFIG_SECURE_BOOT_SIGNING_KEY="secure_boot_signing_key.pem"
+CONFIG_SECURE_INSECURE_ALLOW_DL_MODE=y
+# CONFIG_SECURE_DISABLE_ROM_DL_MODE is not set
+# CONFIG_SECURE_ENABLE_SECURE_ROM_DL_MODE is not set
+# CONFIG_SECURE_FLASH_ENC_ENABLED is not set

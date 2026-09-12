@@ -37,6 +37,8 @@ Do **not** point the public flash page at `firmware/build/`. Factory files live 
 
 Version source of truth: `firmware/VERSION` (also `CONFIG_SEARABOOM_FW_VERSION` in `firmware/sdkconfig.defaults`).
 
+Signed OTA: `idf.py build` signs with `~/.config/searaboom/secure_boot_signing_key.pem` (see `docs/SIGNED_FIRMWARE.md`). Do not commit the private key. Do not enable `firmware/sdkconfig.defaults.secureboot` on QA boxes.
+
 OTA + logs: https://searaboom.goossen.dev/admin  
 Lab fleet: `GET /api/lab/status`  
 After a release, `GET /api/status` — `firmware.version` and `factory.version` should match.

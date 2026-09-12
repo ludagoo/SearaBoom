@@ -25,6 +25,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import Flask, Response, jsonify, request, send_from_directory, stream_with_context
 
+from fw_signature import SignedFirmwareError, require_signed_app
+
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parent
 FW_DIR = ROOT / "firmware"
@@ -125,6 +127,13 @@ def load_meta() -> dict:
 
 def save_meta(meta: dict) -> None:
     META_PATH.write_text(json.dumps(meta, indent=2) + "\n")
+
+
+def require_signed_upload(data: bytes, what: str) -> dict:
+    try:
+        return require_signed_app(data)
+    except SignedFirmwareError as exc:
+        raise ValueError(f"{what} must be a Secure Boot V2 signed app image: {exc}") from exc
 
 
 def read_repo_version() -> str:
@@ -1423,9 +1432,16 @@ def factory_upload():
         return jsonify({"error": "missing files", "missing": missing}), 400
     dest_dir = FACTORY_DIR if slot == "live" else FACTORY_NEXT_DIR
     dest_dir.mkdir(parents=True, exist_ok=True)
+    saved: dict[str, bytes] = {}
+    for item in FACTORY_PLAN:
+        saved[item["key"]] = request.files[item["key"]].read()
+    try:
+        require_signed_upload(saved["app"], "factory app")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     with lock:
         for item in FACTORY_PLAN:
-            request.files[item["key"]].save(dest_dir / item["filename"])
+            (dest_dir / item["filename"]).write_bytes(saved[item["key"]])
         write_factory_meta(dest_dir, version)
     return jsonify({
         "ok": True,
@@ -1526,8 +1542,13 @@ def firmware_upload():
 
     filename = f"searaboom-v{version}.bin"
     dest = FW_DIR / filename
+    payload = f.read()
+    try:
+        require_signed_upload(payload, "firmware")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     with lock:
-        f.save(dest)
+        dest.write_bytes(payload)
         digest = hashlib.sha256(dest.read_bytes()).hexdigest()
         meta = {
             "version": version,

@@ -4,6 +4,20 @@ file(READ "${CMAKE_CURRENT_LIST_DIR}/VERSION" PROJECT_VER)
 string(STRIP "${PROJECT_VER}" PROJECT_VER)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/VERSION")
 
+# Signed OTA (CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT) needs the RSA-3072
+# PEM at firmware/secure_boot_signing_key.pem during configure. Generate or
+# link it; never commit the private key.
+execute_process(
+    COMMAND "${CMAKE_CURRENT_LIST_DIR}/../scripts/ensure_signing_key.sh"
+    RESULT_VARIABLE _sb_key_rc
+    OUTPUT_VARIABLE _sb_key_out
+    ERROR_VARIABLE _sb_key_err
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT _sb_key_rc EQUAL 0)
+    message(FATAL_ERROR "secure boot signing key: ${_sb_key_err}")
+endif()
+message(STATUS "Firmware signing key: ${_sb_key_out}")
+
 include($ENV{ADF_PATH}/CMakeLists.txt)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
