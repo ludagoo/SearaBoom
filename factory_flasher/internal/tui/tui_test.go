@@ -22,8 +22,11 @@ func TestRenderHasNoBrowserPath(t *testing.T) {
 	if !strings.Contains(out, "ARM") {
 		t.Fatalf("missing ARM:\n%s", out)
 	}
-	if !strings.Contains(out, AutoFlashWarn) {
-		t.Fatalf("missing auto-flash warning:\n%s", out)
+	if strings.Contains(out, AutoFlashWarn) {
+		t.Fatalf("warning should only show while ARM'd:\n%s", out)
+	}
+	if !strings.Contains(out, "F  flash") {
+		t.Fatalf("missing one-shot flash:\n%s", out)
 	}
 	if strings.Contains(out, "Writing at") || strings.Contains(out, "\nLog\n") {
 		t.Fatalf("log dump is the main UI:\n%s", out)
@@ -51,8 +54,11 @@ func TestBigStates(t *testing.T) {
 		if !strings.Contains(out, tc.want) {
 			t.Fatalf("%s: want %s in\n%s", tc.phase, tc.want, out)
 		}
-		if !strings.Contains(out, AutoFlashWarn) {
-			t.Fatalf("%s: missing auto-flash warning:\n%s", tc.phase, out)
+		if tc.armed && !strings.Contains(out, AutoFlashWarn) {
+			t.Fatalf("%s: missing auto-flash warning while armed:\n%s", tc.phase, out)
+		}
+		if !tc.armed && strings.Contains(out, AutoFlashWarn) {
+			t.Fatalf("%s: warning while disarmed:\n%s", tc.phase, out)
 		}
 		if tc.phase == "fail" && !strings.Contains(out, "cable loose") {
 			t.Fatalf("fail hid error:\n%s", out)
@@ -74,6 +80,9 @@ func TestSpaceArmsAndDemoPass(t *testing.T) {
 	out := Render(sess.Snapshot(), renderOpts{width: 60})
 	if !strings.Contains(out, "PLUG") {
 		t.Fatalf("armed should be PLUG:\n%s", out)
+	}
+	if !strings.Contains(out, AutoFlashWarn) {
+		t.Fatalf("armed should warn:\n%s", out)
 	}
 	sess.Tick()
 	deadline := time.Now().Add(3 * time.Second)

@@ -100,7 +100,10 @@ def test_public_page_offers_curl_install_not_zip() -> None:
     assert "guessFlasherId" in html
     assert "linux-arm64" in html
     assert "windows-amd64" in html
-    assert "any ESP32-S3 plugged into this computer is flashed" in html
+    assert 'id="os"' in html
+    assert "Linux x86_64" in html
+    assert "any ESP32-S3 plugged into this computer is flashed" not in html
+    assert "While ARM" not in html
     assert "esp-web-install" not in html
 
 

@@ -69,6 +69,8 @@ type Session struct {
 	busy        bool
 	busyID      string
 	stop        bool
+	oneshot     bool
+	wantOnce    bool
 	calRetry    chan struct{}
 	portByIdent map[string]ports.Port
 }
@@ -261,6 +263,27 @@ func (s *Session) Arm(armed bool) State {
 	return copyState(s.state)
 }
 
+// FlashOnce flashes the ESP32-S3 that is already plugged in, then stays
+// disarmed so the next plug-in does not auto-flash.
+func (s *Session) FlashOnce() State {
+	if err := s.RefreshImage(); err != nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.state.LastError = err.Error()
+		s.state.Message = "No factory image. " + err.Error()
+		return copyState(s.state)
+	}
+	s.mu.Lock()
+	s.wantOnce = true
+	s.mu.Unlock()
+	s.Tick()
+	return s.Snapshot()
+}
+
+func (s *Session) workOK() bool {
+	return s.state.Armed || s.oneshot
+}
+
 func (s *Session) RequestCalRetry() State {
 	select {
 	case s.calRetry <- struct{}{}:
@@ -278,7 +301,16 @@ func (s *Session) Stop() {
 
 func (s *Session) Tick() {
 	s.mu.Lock()
-	if s.busy || !s.state.Armed {
+	if s.busy {
+		s.mu.Unlock()
+		return
+	}
+	if s.wantOnce && !s.state.Armed {
+		s.wantOnce = false
+		s.startOnceLocked()
+		return
+	}
+	if !s.state.Armed {
 		s.mu.Unlock()
 		return
 	}
@@ -333,6 +365,46 @@ func (s *Session) Tick() {
 	s.logf("detected " + target.Device + " id=" + target.Identity())
 	s.mu.Unlock()
 	s.runBox(target)
+}
+
+// startOnceLocked runs with s.mu held and unlocks before return.
+func (s *Session) startOnceLocked() {
+	if !s.state.ImageReady {
+		s.state.Message = "No factory image."
+		s.mu.Unlock()
+		return
+	}
+	already := s.eligible()
+	switch len(already) {
+	case 0:
+		s.state.Message = "No ESP32-S3 plugged in."
+		s.state.LastError = ""
+		s.mu.Unlock()
+		return
+	case 1:
+		target := already[0]
+		s.oneshot = true
+		s.busy = true
+		s.busyID = target.Identity()
+		s.state.Phase = "detected"
+		s.state.Port = target.Device
+		s.state.Identity = target.Identity()
+		s.state.Progress = 0
+		s.state.LastError = ""
+		s.state.Confirm = defaultConfirm()
+		s.state.CalPrompt = ""
+		s.state.Message = "Flashing " + target.Device + " once."
+		s.logf("one-shot " + target.Device + " id=" + target.Identity())
+		s.mu.Unlock()
+		s.runBox(target)
+		s.mu.Lock()
+		s.oneshot = false
+		s.mu.Unlock()
+		return
+	default:
+		s.state.Message = "Unplug extra boxes, then flash one."
+		s.mu.Unlock()
+	}
 }
 
 func (s *Session) runBox(target ports.Port) {
@@ -550,7 +622,7 @@ func (s *Session) verify(device string) {
 func (s *Session) calibrate(device string) {
 	for !s.stop {
 		s.mu.Lock()
-		if !s.state.Armed {
+		if !s.workOK() {
 			s.state.Phase = "fail"
 			s.state.Message = "Disarmed during calibration."
 			s.mu.Unlock()
@@ -601,9 +673,9 @@ func (s *Session) calibrate(device string) {
 			default:
 			}
 			s.mu.Lock()
-			armed := s.state.Armed
+			ok := s.workOK()
 			s.mu.Unlock()
-			if !armed {
+			if !ok {
 				s.mu.Lock()
 				s.state.Phase = "fail"
 				s.state.Message = "Disarmed during calibration."

@@ -27,7 +27,7 @@ const (
 	goldText   = "\033[1;93m"
 )
 
-// AutoFlashWarn is the armed-machine rule. Same sentence on the flash page.
+// AutoFlashWarn is shown only while ARM'd.
 const AutoFlashWarn = "While ARM'd, any ESP32-S3 plugged into this computer is flashed."
 
 type tickMsg struct{}
@@ -88,6 +88,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "r":
 		m.sess.RequestCalRetry()
+	case "f":
+		if !m.snap.Armed && m.snap.Phase != "flashing" && m.snap.Phase != "calibrate" && m.snap.Phase != "verify" {
+			go m.sess.FlashOnce()
+		}
 	}
 	m.snap = m.sess.Snapshot()
 	return m, nil
@@ -123,7 +127,9 @@ func Render(s session.State, opts renderOpts) string {
 	b.WriteString("\n")
 	b.WriteString(banner(st.label, st.style, w))
 	b.WriteString("\n")
-	fmt.Fprintf(&b, "  %s%s%s\n\n", goldText, AutoFlashWarn, reset)
+	if s.Armed {
+		fmt.Fprintf(&b, "  %s%s%s\n\n", goldText, AutoFlashWarn, reset)
+	}
 
 	if line := statusLine(s); line != "" {
 		fmt.Fprintf(&b, "  %s%s%s\n", dim, line, reset)
@@ -139,13 +145,6 @@ func Render(s session.State, opts renderOpts) string {
 }
 
 func faceFor(s session.State) face {
-	if !s.Armed {
-		hint := "Space  ARM"
-		if !s.ImageReady {
-			hint = "no image — Space retries"
-		}
-		return face{label: "ARM", style: blackGold, hint: hint}
-	}
 	switch s.Phase {
 	case "flashing", "verify", "detected":
 		return face{
@@ -157,16 +156,25 @@ func faceFor(s session.State) face {
 		return face{label: calLabel(s), style: blackCyan, hint: calHint(s)}
 	case "pass":
 		n := s.BoxesDone
-		hint := "unplug · next box"
+		hint := "unplug"
+		if s.Armed {
+			hint = "unplug · next box"
+		}
 		if n > 0 {
-			hint = fmt.Sprintf("%d done · unplug · next box", n)
+			hint = fmt.Sprintf("%d done · %s", n, hint)
 		}
 		return face{label: "PASS", style: blackGreen, hint: hint}
 	case "fail":
 		return face{label: "FAIL", style: whiteRed, hint: failHint(s)}
-	default:
-		return face{label: "PLUG", style: blackCyan, hint: "plug an ESP32-S3 — it flashes"}
 	}
+	if !s.Armed {
+		hint := "Space  ARM batch    F  flash this box"
+		if !s.ImageReady {
+			hint = "no image — Space retries"
+		}
+		return face{label: "ARM", style: blackGold, hint: hint}
+	}
+	return face{label: "PLUG", style: blackCyan, hint: "plug an ESP32-S3 — it flashes"}
 }
 
 func calLabel(s session.State) string {
@@ -205,7 +213,10 @@ func failHint(s session.State) string {
 	if s.CalPrompt == "fail" {
 		return "R  retry"
 	}
-	return "unplug · check cable · Space to ARM"
+	if s.Armed {
+		return "unplug · check cable · Space to disarm"
+	}
+	return "unplug · check cable · F flash again"
 }
 
 func statusLine(s session.State) string {
@@ -240,7 +251,7 @@ func keys(s session.State) string {
 	if s.Armed {
 		return dim + "Space  disarm    Q  quit" + reset
 	}
-	return dim + "Space  ARM    Q  quit" + reset
+	return dim + "Space  ARM    F  flash this box    Q  quit" + reset
 }
 
 func banner(label, style string, width int) string {

@@ -45,9 +45,9 @@ people should paste a one-liner above.
 
 ## Operator loop
 
-1. **ARM** (Space). While armed, **any ESP32-S3 plugged into this computer is flashed**.
-2. Big screen: ARM → PLUG → FLASH → PASS / FAIL. After write: hold volume **+** then **−**.
-3. **PASS** → unplug → next box. Stay armed for a batch. Space disarms. Q quits.
+1. **F** flashes the box that is plugged in now (does not ARM; later plugs stay idle).
+2. **Space** ARMs a batch — while armed, any ESP32-S3 plugged in is flashed.
+3. Big screen: ARM → PLUG → FLASH → PASS / FAIL. Hold volume **+** then **−** when asked.
 
 Dedicated QA nodes (`/dev/searaboom-qa-*` and `qa-boxes.json`) are skipped.
 
