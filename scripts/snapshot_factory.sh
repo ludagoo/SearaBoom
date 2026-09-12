@@ -4,8 +4,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 python3 "$ROOT/scripts/signing_key_backup.py" --require
-BUILD="$ROOT/firmware/build"
-DEST="$ROOT/server/firmware/factory"
+BUILD="${SEARABOOM_FIRMWARE_BUILD:-$ROOT/firmware/build}"
+DEST="${SEARABOOM_FACTORY_DIR:-$ROOT/server/firmware/factory}"
 VER="${1:-}"
 if [[ -z "$VER" ]]; then
   VER="$(tr -d '[:space:]' < "$ROOT/firmware/VERSION")"
@@ -22,6 +22,12 @@ for f in "$BOOT" "$PART" "$OTAD" "$APP" "$STOR"; do
     exit 1
   fi
 done
+
+PY="$ROOT/server/.venv/bin/python"
+if [[ ! -x "$PY" ]]; then
+  PY="${PYTHON:-python3}"
+fi
+"$PY" "$ROOT/server/fw_signature.py" --check "$APP"
 
 mkdir -p "$DEST"
 cp "$BOOT" "$DEST/bootloader.bin"

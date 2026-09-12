@@ -37,7 +37,7 @@ Do **not** point the public flash page at `firmware/build/`. Factory files live 
 
 Version source of truth: `firmware/VERSION` (also `CONFIG_SEARABOOM_FW_VERSION` in `firmware/sdkconfig.defaults`).
 
-Signed OTA: `idf.py build` signs with `~/.config/searaboom/secure_boot_signing_key.pem` (see `docs/SIGNED_FIRMWARE.md`). Do not commit the private key. Do not enable `firmware/sdkconfig.defaults.secureboot` on QA boxes.
+Signed OTA: `idf.py build` signs with `firmware/secure_boot_signing_key.pem` (usually a symlink to `~/.config/searaboom/secure_boot_signing_key.pem`; see `docs/SIGNED_FIRMWARE.md`). cmake does not mint that key. Do not commit the private key. Do not enable `firmware/sdkconfig.defaults.secureboot` on QA boxes.
 
 **Signed flash/publish gate:** agents must never create `~/.config/searaboom/signing_key_backed_up`. Until Lucas creates that marker after storing the key, `dev_ota.sh`, `publish_firmware.sh`, `snapshot_factory.sh`, `hw_flash.sh`, and `idf.py flash` of signed images must fail. There is no `--force` and no env bypass.
 

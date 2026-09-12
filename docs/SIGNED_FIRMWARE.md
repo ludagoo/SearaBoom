@@ -2,8 +2,9 @@
 
 **No signed USB flash and no OTA/factory publish until Lucas says the key is stored.**
 
-Build/compile may generate or use `~/.config/searaboom/secure_boot_signing_key.pem`.
-That is not permission to flash or publish.
+Build/compile may use `~/.config/searaboom/secure_boot_signing_key.pem` if it
+already exists. A build does **not** mint that key. That is not permission to
+flash or publish.
 
 After the key is copied offline, **Lucas** (not an agent) creates this marker:
 
@@ -46,14 +47,20 @@ IDF documents this as [Signed App Verification Without Hardware Secure Boot](htt
 The private key is **not** in git.
 
 1. Preferred path: `~/.config/searaboom/secure_boot_signing_key.pem`
-2. Override: `SEARABOOM_SIGNING_KEY=/path/to/key.pem`
-3. Firmware build expects `firmware/secure_boot_signing_key.pem` (gitignored symlink/copy)
+2. `SEARABOOM_SIGNING_KEY=/path/to/key.pem` is only for pointing the **firmware
+   symlink** at an existing file. If the config private key already exists and
+   differs from that path, `ensure_signing_key.sh` **exits**. It will not copy
+   the env file (or a stray `firmware/*.pem`) over the config key.
+3. Firmware build expects `firmware/secure_boot_signing_key.pem` (gitignored
+   symlink/copy). `firmware/CMakeLists.txt` fails configure if that path is
+   missing; it does **not** generate a key.
 
-`scripts/ensure_signing_key.sh` (also run from `firmware/CMakeLists.txt`) will
-**generate** an RSA-3072 key in `~/.config/searaboom/` if none exists so USB QA
-and local `idf.py build` work. **Do not flash or publish** that image until
-Lucas has stored the key and created `~/.config/searaboom/signing_key_backed_up`.
-Agents must never create that marker.
+`scripts/ensure_signing_key.sh --generate` mints an RSA-3072 key in
+`~/.config/searaboom/` **once**, when you intend to keep it. USB QA and local
+`idf.py build` then consume the firmware symlink. **Do not flash or publish**
+that image until Lucas has stored the key and created
+`~/.config/searaboom/signing_key_backed_up`. Agents must never create that
+marker.
 
 **Before the first signed flash or release from `main`:**
 
@@ -61,7 +68,8 @@ Agents must never create that marker.
 # Either keep the generated key and back it up offline:
 cp ~/.config/searaboom/secure_boot_signing_key.pem /offline/searaboom-ota-key.pem
 
-# Or replace it with a key made on an air-gapped machine:
+# Or replace it with a key made on an air-gapped machine (Lucas only, after
+# backing up whatever is already at the config path):
 espsecure.py generate_signing_key --version 2 --scheme rsa3072 /offline/searaboom-ota-key.pem
 cp /offline/searaboom-ota-key.pem ~/.config/searaboom/secure_boot_signing_key.pem
 ./scripts/ensure_signing_key.sh
@@ -70,15 +78,27 @@ cp /offline/searaboom-ota-key.pem ~/.config/searaboom/secure_boot_signing_key.pe
 touch ~/.config/searaboom/signing_key_backed_up
 ```
 
-Optional: pin the public key so the **server** also rejects a different key
-(takes effect after a server restart, which this PR does not do):
+### Server pin (not optional on this host)
+
+`ensure_signing_key.sh` writes `~/.config/searaboom/ota_signing_pubkey.pem`
+whenever the config **private** key exists. That path is the server default
+(`SEARABOOM_OTA_PUBKEY`, else `PUBKEY_DEFAULT`). After the next server restart,
+uploads must match that pin.
+
+This pin does **not** protect against a clobbered private key: if the private
+key were replaced and the pubkey regenerated from it, the pin would follow.
+That is why `ensure_signing_key.sh` must never overwrite the config private key.
+
+To copy the pin offline (runnable; two arguments):
 
 ```bash
-cp ~/.config/searaboom/ota_signing_pubkey.pem  # written by ensure_signing_key.sh
-# or: export SEARABOOM_OTA_PUBKEY=/path/to/ota_signing_pubkey.pem
+cp ~/.config/searaboom/ota_signing_pubkey.pem /offline/searaboom-ota-pubkey.pem
+# optional override after restart:
+# export SEARABOOM_OTA_PUBKEY=/offline/searaboom-ota-pubkey.pem
 ```
 
-`./scripts/publish_firmware.sh` refuses an unsigned `searaboom.bin`.
+`./scripts/publish_firmware.sh` and `./scripts/snapshot_factory.sh` both run
+`fw_signature.py --check` on the app image and refuse unsigned copies.
 Do not publish from a PR. Do not bump `firmware/VERSION` except at release.
 
 ## Unbrick (today — signed OTA only)
@@ -89,9 +109,20 @@ Download mode is not disabled. Recovery is the same USB factory path:
 2. Flash the **signed** factory image from https://searaboom.goossen.dev/ (Chrome/Edge).
 3. Or `idf.py -p /dev/ttyACM0 flash` of a locally signed build on a **non-QA** box.
 
-An unsigned factory image still boots until hardware Secure Boot is burned. After
-this firmware is on a box, **OTA** of unsigned or foreign-key images fails
-(`ESP_ERR_OTA_VALIDATE_FAILED`). USB can still overwrite flash.
+Unsigned images built **without** this config (current field firmware) still boot.
+An image built **with** `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT` but
+**no signature block** hits `check_signature_on_update_check()` → `abort()` and
+boot-loops. USB can still overwrite flash. After a signed image is on a box,
+**OTA** of unsigned or foreign-key images fails (`ESP_ERR_OTA_VALIDATE_FAILED`).
+
+## Key rotation (not supported)
+
+IDF trusts **block 0** of the running app only ("Only the first position of
+signature blocks is used"). `server/fw_signature.py` also parses block 0 only.
+A transitional dual-signed image would need the **old** key in block 0 for the
+box to accept it, and a pinned server would still reject a new-key-only image.
+Do not rotate the OTA key without a dedicated dual-signed step; this tree does
+not implement that.
 
 ## Unbrick after hardware Secure Boot (later, production only)
 
@@ -106,6 +137,9 @@ Do this only on a throwaway or production box you intend to lock, **never** on
    `CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y`).
 4. USB-flash the signed bootloader, partition table, otadata, app, storage.
 5. First boot burns `SECURE_BOOT_EN` and the key digest. Power must not drop.
+   The bootloader also **revokes unused digest slots** unless
+   `SECURE_BOOT_ALLOW_UNUSED_DIGEST_SLOTS` (under `SECURE_BOOT_INSECURE`) is set.
+   After that there is **no key rotation on that unit**.
 6. Confirm with `espefuse.py --port PORT summary` (`SECURE_BOOT_EN`, digest
    slots). Leave `DIS_DOWNLOAD_MODE` and `ENABLE_SECURITY_DOWNLOAD` **unburned**.
 

@@ -63,28 +63,113 @@ def test_sign_and_verify() -> None:
         raise AssertionError("wrong key must fail")
 
 
+def _ensure_env(td: str) -> tuple[dict, Path, Path]:
+    home = Path(td) / "home"
+    cfg = home / ".config" / "searaboom"
+    fw = Path(td) / "firmware"
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["SEARABOOM_CONFIG_DIR"] = str(cfg)
+    env["SEARABOOM_FIRMWARE_DIR"] = str(fw)
+    env.pop("SEARABOOM_SIGNING_KEY", None)
+    return env, cfg, fw
+
+
 def test_ensure_signing_key_script() -> None:
     root = Path(__file__).resolve().parents[1]
     script = root / "scripts" / "ensure_signing_key.sh"
     with tempfile.TemporaryDirectory() as td:
-        home = Path(td) / "home"
-        cfg = home / ".config" / "searaboom"
-        env = os.environ.copy()
-        env["HOME"] = str(home)
-        env["SEARABOOM_CONFIG_DIR"] = str(cfg)
-        env["SEARABOOM_FIRMWARE_DIR"] = str(Path(td) / "firmware")
-        env.pop("SEARABOOM_SIGNING_KEY", None)
+        env, cfg, _fw = _ensure_env(td)
+        missing = subprocess.run([str(script)], env=env, capture_output=True, text=True)
+        assert missing.returncode == 1
+        assert "--generate" in missing.stderr
 
-        out = subprocess.check_output([str(script)], env=env, text=True).strip()
+        out = subprocess.check_output([str(script), "--generate"], env=env, text=True).strip()
         key = Path(out)
         assert key.is_file() or key.is_symlink()
         assert (cfg / "secure_boot_signing_key.pem").is_file()
         assert (cfg / "ota_signing_pubkey.pem").is_file()
         first = (cfg / "secure_boot_signing_key.pem").read_bytes()
+        first_pub = (cfg / "ota_signing_pubkey.pem").read_bytes()
         subprocess.check_output([str(script)], env=env, text=True)
+        subprocess.check_output([str(script), "--generate"], env=env, text=True)
         assert (cfg / "secure_boot_signing_key.pem").read_bytes() == first
+        assert (cfg / "ota_signing_pubkey.pem").read_bytes() == first_pub
         assert not (cfg / "signing_key_backed_up").exists()
-        assert not (home / ".config" / "searaboom" / "signing_key_backed_up").exists()
+        assert not (Path(td) / "home" / ".config" / "searaboom" / "signing_key_backed_up").exists()
+
+
+def test_ensure_signing_key_does_not_clobber_config_key() -> None:
+    root = Path(__file__).resolve().parents[1]
+    script = root / "scripts" / "ensure_signing_key.sh"
+    with tempfile.TemporaryDirectory() as td:
+        env, cfg, fw = _ensure_env(td)
+        subprocess.check_output([str(script), "--generate"], env=env, text=True)
+        original = (cfg / "secure_boot_signing_key.pem").read_bytes()
+        original_pub = (cfg / "ota_signing_pubkey.pem").read_bytes()
+
+        other = Path(td) / "other.pem"
+        subprocess.check_call(
+            ["openssl", "genrsa", "-out", str(other), "3072"],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        env["SEARABOOM_SIGNING_KEY"] = str(other)
+        rc = subprocess.run([str(script)], env=env, capture_output=True, text=True)
+        assert rc.returncode == 1, rc.stderr
+        assert "differs" in rc.stderr
+        assert (cfg / "secure_boot_signing_key.pem").read_bytes() == original
+        assert (cfg / "ota_signing_pubkey.pem").read_bytes() == original_pub
+
+        env.pop("SEARABOOM_SIGNING_KEY", None)
+        stray = fw / "secure_boot_signing_key.pem"
+        if stray.exists() or stray.is_symlink():
+            stray.unlink()
+        other.replace(stray)
+        rc = subprocess.run([str(script)], env=env, capture_output=True, text=True)
+        assert rc.returncode == 1, rc.stderr
+        assert (cfg / "secure_boot_signing_key.pem").read_bytes() == original
+        assert (cfg / "ota_signing_pubkey.pem").read_bytes() == original_pub
+
+
+def test_ensure_signing_key_stray_env_does_not_write_config() -> None:
+    root = Path(__file__).resolve().parents[1]
+    script = root / "scripts" / "ensure_signing_key.sh"
+    with tempfile.TemporaryDirectory() as td:
+        env, cfg, fw = _ensure_env(td)
+        other = Path(td) / "other.pem"
+        subprocess.check_call(
+            ["openssl", "genrsa", "-out", str(other), "3072"],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        env["SEARABOOM_SIGNING_KEY"] = str(other)
+        out = subprocess.check_output([str(script)], env=env, text=True).strip()
+        assert Path(out) == fw / "secure_boot_signing_key.pem"
+        assert not (cfg / "secure_boot_signing_key.pem").exists()
+        assert not (cfg / "ota_signing_pubkey.pem").exists()
+        assert not (cfg / "signing_key_backed_up").exists()
+
+
+def test_ensure_signing_key_firmware_pem_does_not_promote() -> None:
+    root = Path(__file__).resolve().parents[1]
+    script = root / "scripts" / "ensure_signing_key.sh"
+    with tempfile.TemporaryDirectory() as td:
+        env, cfg, fw = _ensure_env(td)
+        fw.mkdir(parents=True)
+        stray = fw / "secure_boot_signing_key.pem"
+        subprocess.check_call(
+            ["openssl", "genrsa", "-out", str(stray), "3072"],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        out = subprocess.check_output([str(script)], env=env, text=True).strip()
+        assert Path(out) == stray
+        assert not (cfg / "secure_boot_signing_key.pem").exists()
+        assert not (cfg / "ota_signing_pubkey.pem").exists()
 
 
 def test_upload_rejects_unsigned() -> None:
@@ -107,5 +192,8 @@ if __name__ == "__main__":
     test_unsigned_rejected()
     test_sign_and_verify()
     test_ensure_signing_key_script()
+    test_ensure_signing_key_does_not_clobber_config_key()
+    test_ensure_signing_key_stray_env_does_not_write_config()
+    test_ensure_signing_key_firmware_pem_does_not_promote()
     test_upload_rejects_unsigned()
     print("ok")

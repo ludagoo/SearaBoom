@@ -7,6 +7,9 @@
 #   - USB/UART download stays fully enabled (unbrick with a signed factory image).
 #   - Do not enable Secure Download Mode or disable ROM download — that bricks recovery.
 #   - Do not enable flash encryption until a flash-encryption key is escrowed.
+#   - First boot burns SECURE_BOOT_EN and the key digest, then revokes unused
+#     digest slots (unless SECURE_BOOT_ALLOW_UNUSED_DIGEST_SLOTS, which is under
+#     SECURE_BOOT_INSECURE). After that there is no key rotation on that unit.
 
 CONFIG_SECURE_BOOT=y
 CONFIG_SECURE_BOOT_V2_ENABLED=y
