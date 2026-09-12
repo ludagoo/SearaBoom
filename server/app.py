@@ -27,6 +27,11 @@ from flask import Flask, Response, jsonify, request, send_from_directory, stream
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parent
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+from factory_flasher.layout import esptool_write_args, factory_plan, file_map
+from factory_flasher.packaging import desktop_zip_bytes
+
 FW_DIR = ROOT / "firmware"
 META_PATH = FW_DIR / "latest.json"
 FACTORY_DIR = FW_DIR / "factory"
@@ -97,18 +102,7 @@ STATIC_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # USB factory flash layout (must match firmware/build/flasher_args.json).
-FACTORY_PLAN = [
-    {"key": "bootloader", "offset": 0x0, "filename": "bootloader.bin",
-     "build": BUILD_DIR / "bootloader" / "bootloader.bin"},
-    {"key": "partitions", "offset": 0x8000, "filename": "partition-table.bin",
-     "build": BUILD_DIR / "partition_table" / "partition-table.bin"},
-    {"key": "otadata", "offset": 0xF000, "filename": "ota_data_initial.bin",
-     "build": BUILD_DIR / "ota_data_initial.bin"},
-    {"key": "app", "offset": 0x20000, "filename": "app.bin",
-     "build": BUILD_DIR / "searaboom.bin"},
-    {"key": "storage", "offset": 0x3A0000, "filename": "storage.bin",
-     "build": BUILD_DIR / "storage.bin"},
-]
+FACTORY_PLAN = factory_plan(BUILD_DIR)
 
 
 def load_meta() -> dict:
@@ -253,24 +247,7 @@ def esptool_python() -> Path:
 def factory_flash_cmd() -> list[str]:
     py = esptool_python()
     port = serial_port()
-    cmd = [
-        str(py), "-u", "-m", "esptool",
-        "--chip", "esp32s3",
-        "-p", port,
-        "-b", "460800",
-        "--before", "default_reset",
-        "--after", "hard_reset",
-        "write_flash",
-        "--flash_mode", "dio",
-        "--flash_freq", "80m",
-        "--flash_size", "4MB",
-    ]
-    for item in FACTORY_PLAN:
-        path = factory_file_path(item)
-        if not path:
-            raise FileNotFoundError(item["filename"])
-        cmd.extend([hex(item["offset"]), str(path)])
-    return cmd
+    return [str(py), "-u", "-m", "esptool", *esptool_write_args(port, file_map(FACTORY_DIR))]
 
 
 def version_tuple(v: str) -> tuple[int, int, int]:
@@ -1351,6 +1328,19 @@ def factory_web_tools():
             {"chipFamily": "ESP32-S3", "serialType": "uart", "parts": parts},
         ],
     })
+
+
+@app.get("/api/factory/desktop.zip")
+def factory_desktop_zip():
+    data = desktop_zip_bytes()
+    return Response(
+        data,
+        mimetype="application/zip",
+        headers={
+            "Content-Disposition": "attachment; filename=searaboom-factory-flasher.zip",
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @app.get("/api/factory/<path:filename>")

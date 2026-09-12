@@ -106,14 +106,17 @@
     <div class="card">
       <div class="meta" id="status">Loading image…</div>
       <ol>
-        <li>Plug the box into this computer over USB.</li>
-        <li>Click flash and pick <strong>USB JTAG/serial debug unit</strong>.</li>
+        <li>Download the <a href="/api/factory/desktop.zip">desktop flasher</a> and run <code>./run.sh</code> (esptool, no BOOT button).</li>
+        <li>Arm the app, then plug the box in over USB. It flashes itself.</li>
+        <li>After write: confirm version/board, then hold volume + then − to calibrate pads.</li>
       </ol>
     </div>
+    <p class="lead" style="margin-top:-.4rem">Chrome WebSerial often fails and asks for BOOT. Prefer the desktop program. Chrome remains a fallback below.</p>
     <div class="card" id="need-chrome" hidden>
       <div class="meta"><strong>Open this page in Chrome.</strong></div>
       <p class="lead" style="margin: .5rem 0 0">USB flashing only works in Google Chrome (or Chromium / Edge). Copy the address and paste it there.</p>
     </div>
+    <p class="lead">Fallback if you cannot run the desktop flasher. Pick <strong>USB JTAG/serial debug unit</strong>. Linux may still block the port.</p>
     <esp-web-install-button id="installer" manifest="/api/factory/web-tools.json">
       <button class="flash" slot="activate" type="button">Flash a box</button>
       <span class="unsupported" slot="unsupported">Use Chrome or Edge on a computer. This browser cannot talk to USB serial.</span>

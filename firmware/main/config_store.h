@@ -21,8 +21,10 @@ bool config_store_consume_fw_change(const char *version);
 bool config_store_has_wifi(const sb_config_t *cfg);
 esp_err_t config_store_clear_wifi(void);
 /* Per-pad touch sensitivity (fraction of idle). False if never calibrated.
- * tsens_rev: 1 = 40% of peak (0.5.16), 2 = 80% of peak. */
-#define SB_TOUCH_SENS_REV 2
+ * tsens_rev: 1 = 40% of peak (0.5.16), 2 = 80% of peak (0.5.18).
+ * 3 = factory-flasher `touch cal` on this firmware. Older revs are ignored
+ * so field OTA keeps the fixed SB_TOUCH_SENS graze fix from 0.5.20. */
+#define SB_TOUCH_SENS_REV 3
 bool config_store_load_touch_sens(float *up, float *dn, uint8_t *rev);
 esp_err_t config_store_save_touch_sens(float up, float dn);
 /* USB factory rewrites SPIFFS, not NVS. First boot after that flash sees
