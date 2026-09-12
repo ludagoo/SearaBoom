@@ -21,4 +21,9 @@ void ota_update_kick(ota_policy_t policy);
 /* True while an update is in progress so UI clips do not start. */
 bool ota_update_is_busy(void);
 
+/* Skip boot/periodic OTA after repeated crashes *during* a download.
+ * Serial `ota` (DEV) still runs. Cleared after 120 s healthy. */
+bool ota_update_skip_boot(void);
+void ota_update_mark_healthy(void);
+
 #endif

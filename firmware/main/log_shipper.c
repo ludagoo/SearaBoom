@@ -17,7 +17,6 @@
 #include "esp_spiffs.h"
 #include "esp_heap_caps.h"
 #include "esp_attr.h"
-#include "esp_task_wdt.h"
 #include "log_shipper.h"
 #include "config_store.h"
 #include "listen_stats.h"
@@ -775,9 +774,6 @@ static bool ship_chunk(void)
     esp_http_client_set_header(client, "Content-Type", "application/json");
     esp_http_client_set_header(client, "User-Agent", "SearaBoom-LogShipper/1");
     esp_http_client_set_post_field(client, s_payload, strlen(s_payload));
-    if (esp_task_wdt_status(NULL) == ESP_OK) {
-        esp_task_wdt_reset();
-    }
     esp_err_t err = esp_http_client_perform(client);
     int status = esp_http_client_get_status_code(client);
     s_last_http = status;
@@ -832,9 +828,6 @@ static bool can_post(void)
 static void shipper_task(void *arg)
 {
     (void)arg;
-    if (esp_task_wdt_add(NULL) != ESP_OK) {
-        ESP_LOGW(TAG, "shipper WDT add failed");
-    }
     int64_t last_ship_ms = 0;
     int64_t last_spill_ms = 0;
     int64_t backoff_until_ms = 0;
@@ -842,9 +835,6 @@ static void shipper_task(void *arg)
 
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(LOG_TICK_MS));
-        if (esp_task_wdt_status(NULL) == ESP_OK) {
-            esp_task_wdt_reset();
-        }
         int64_t now = esp_timer_get_time() / 1000;
 
         drain_spill_to_flash();
@@ -887,9 +877,6 @@ static void shipper_task(void *arg)
 
         int sent = 0;
         while (sent < 3 && prepare_chunk()) {
-            if (esp_task_wdt_status(NULL) == ESP_OK) {
-                esp_task_wdt_reset();
-            }
             if (!ship_chunk()) {
                 revert_chunk();
                 backoff_until_ms = esp_timer_get_time() / 1000 + LOG_FAIL_BACKOFF_MS;

@@ -31,8 +31,9 @@ static volatile bool s_sta_retry = true;
 static volatile bool s_sta_got_ip;
 static volatile bool s_wifi_need_reconnect;
 static volatile int s_wifi_disc_reason;
-static int s_wifi_fails;
-static int64_t s_wifi_retry_at_ms;
+static volatile int s_wifi_fails;
+static volatile int64_t s_wifi_retry_at_ms;
+static esp_timer_handle_t s_wifi_retry_timer;
 static bool s_healthy_marked;
 #define WIFI_OK_BIT BIT0
 #define WIFI_BACKOFF_MAX_MS 30000
@@ -113,6 +114,47 @@ static void handle_pad_gesture(int taps)
     }
 }
 
+static void wifi_retry_timer_cb(void *arg)
+{
+    (void)arg;
+    s_wifi_retry_at_ms = 0;
+    wifi_reconnect_tick();
+}
+
+static void wifi_retry_timer_init(void)
+{
+    if (s_wifi_retry_timer) {
+        return;
+    }
+    const esp_timer_create_args_t args = {
+        .callback = wifi_retry_timer_cb,
+        .name = "wifi_retry",
+    };
+    if (esp_timer_create(&args, &s_wifi_retry_timer) != ESP_OK) {
+        ESP_LOGW(TAG, "wifi retry timer create failed");
+        s_wifi_retry_timer = NULL;
+    }
+}
+
+static void wifi_retry_timer_stop(void)
+{
+    if (s_wifi_retry_timer) {
+        esp_timer_stop(s_wifi_retry_timer);
+    }
+}
+
+static void wifi_retry_timer_arm(int backoff_ms)
+{
+    if (!s_wifi_retry_timer) {
+        return;
+    }
+    if (backoff_ms < 1) {
+        backoff_ms = 1;
+    }
+    esp_timer_stop(s_wifi_retry_timer);
+    esp_timer_start_once(s_wifi_retry_timer, (uint64_t)backoff_ms * 1000);
+}
+
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
@@ -121,9 +163,12 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         int reason = disc ? (int)disc->reason : 0;
         s_sta_got_ip = false;
         s_wifi_disc_reason = reason;
-        radio_player_on_sta_lost();
+        if (s_sta_retry) {
+            radio_player_on_sta_lost();
+        }
         log_shipper_wifi_down();
         if (!s_sta_retry) {
+            wifi_retry_timer_stop();
             return;
         }
         s_wifi_fails++;
@@ -137,6 +182,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         }
         s_wifi_retry_at_ms = (esp_timer_get_time() / 1000) + backoff_ms;
         s_wifi_need_reconnect = true;
+        wifi_retry_timer_arm(backoff_ms);
         ESP_LOGW(TAG, "WiFi disconnected reason=%d fail=%d backoff_ms=%d",
                  reason, s_wifi_fails, backoff_ms);
         return;
@@ -165,6 +211,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         s_sta_got_ip = true;
         s_wifi_fails = 0;
         s_wifi_need_reconnect = false;
+        wifi_retry_timer_stop();
         radio_player_on_sta_got_ip();
         log_shipper_wifi_up();
         if (s_wifi_events) {
@@ -195,6 +242,7 @@ void wifi_reconnect_tick(void)
         ESP_LOGW(TAG, "WiFi connect: %s", esp_err_to_name(err));
         s_wifi_retry_at_ms = now + 2000;
         s_wifi_need_reconnect = true;
+        wifi_retry_timer_arm(2000);
     }
 }
 
@@ -208,6 +256,8 @@ esp_err_t wifi_sta_join(const sb_config_t *cfg)
     s_sta_retry = true;
     s_wifi_fails = 0;
     s_wifi_need_reconnect = false;
+    wifi_retry_timer_init();
+    wifi_retry_timer_stop();
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi));
     return esp_wifi_connect();
 }
@@ -217,6 +267,7 @@ void wifi_set_sta_retry(bool on)
     s_sta_retry = on;
     if (!on) {
         s_wifi_need_reconnect = false;
+        wifi_retry_timer_stop();
         esp_wifi_disconnect();
     }
 }
@@ -235,6 +286,7 @@ static bool wifi_connect_or_setup(void)
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event, NULL));
+    wifi_retry_timer_init();
 
     if (!config_store_has_wifi(&s_cfg)) {
         ESP_LOGW(TAG, "No WiFi SSID saved -> setup AP");
@@ -262,6 +314,7 @@ static bool wifi_connect_or_setup(void)
         if (esp_task_wdt_status(NULL) == ESP_OK) {
             esp_task_wdt_reset();
         }
+        wifi_reconnect_tick();
         bits = xEventGroupWaitBits(s_wifi_events, WIFI_OK_BIT, pdFALSE, pdTRUE,
                                    pdMS_TO_TICKS(1000));
         if (bits & WIFI_OK_BIT) {
@@ -359,6 +412,7 @@ void app_main(void)
         wifi_reconnect_tick();
         if (!s_healthy_marked && (esp_timer_get_time() / 1000) >= WIFI_HEALTHY_MS) {
             log_shipper_mark_healthy();
+            ota_update_mark_healthy();
             s_healthy_marked = true;
         }
         led_status_tick();
@@ -400,9 +454,8 @@ void app_main(void)
         }
         int64_t now = esp_timer_get_time() / 1000;
         if (!ota_started && (now - live_at_ms) > 15000 && radio_player_has_music_info()) {
-            if (log_shipper_crash_loop()) {
-                ESP_LOGW(TAG, "crash loop count=%u — skipping boot OTA",
-                         (unsigned)log_shipper_crash_count());
+            if (ota_update_skip_boot()) {
+                ESP_LOGW(TAG, "OTA in-flight crash loop — skipping boot OTA");
             } else {
                 ESP_LOGI(TAG, "WiFi OK, checking OTA after stream");
                 ota_update_kick(OTA_POLICY_STABLE);
