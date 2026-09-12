@@ -31,10 +31,10 @@ Disarm when you are done. Dedicated QA nodes (`/dev/searaboom-qa-*`) are never f
 
 ## Firmware calibration
 
-USB factory still wipes pad cal (`/spiffs/usb_factory`). The flasher runs `touch cal`
-so the new values are stored in NVS. Firmware **loads stored cal if present** and
-otherwise keeps the fixed pad threshold. It does **not** auto-start calibration on
-boot, including after field OTA.
+USB factory still wipes pad cal (`/spiffs/usb_factory`). The flasher runs `touch cal`,
+which stores NVS values at `tsens_rev` 3. Firmware **loads stored cal only when
+`rev >= 3`**. Older field cal (rev 1/2) is ignored so OTA keeps the 0.5.20 fixed
+threshold. It does **not** auto-start calibration on boot.
 
 ## Linux serial access
 

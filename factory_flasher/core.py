@@ -39,11 +39,12 @@ QA_CONFIG = Path(
 PROGRESS_RE = re.compile(r"\((\d+)\s*%\)")
 VER_RE = re.compile(r"version=([0-9]+\.[0-9]+\.[0-9]+)")
 BOARD_RE = re.compile(r"board=([^\s]+)")
-CAL_HOLD_PLUS = re.compile(r"cal:\s*hold\s*\+", re.I)
-CAL_HOLD_MINUS = re.compile(r"cal:\s*hold\s*-", re.I)
-CAL_HANDS_OFF = re.compile(r"cal:\s*hands off", re.I)
-CAL_DONE = re.compile(r"cal done|touch cal ESP_OK", re.I)
-CAL_FAIL = re.compile(r"cal fail|touch cal ESP_FAIL", re.I)
+CAL_HOLD_PLUS = re.compile(r"^cal:\s*hold\s*\+", re.I)
+CAL_HOLD_MINUS = re.compile(r"^cal:\s*hold\s*-", re.I)
+CAL_HANDS_OFF = re.compile(r"^cal:\s*hands off", re.I)
+CAL_DONE = re.compile(r"^cal done|touch cal ESP_OK", re.I)
+CAL_FAIL = re.compile(r"^cal fail|touch cal ESP_FAIL", re.I)
+CAL_CEILING_S = 110.0
 
 FlashLineCb = Callable[[str], None]
 
@@ -83,7 +84,15 @@ def parse_board_line(line: str) -> str | None:
 
 
 def cal_prompt_from_line(line: str) -> str | None:
-    text = line or ""
+    raw = line or ""
+    if "\n" in raw:
+        last = None
+        for part in raw.splitlines():
+            p = cal_prompt_from_line(part)
+            if p:
+                last = p
+        return last
+    text = raw.strip()
     if CAL_FAIL.search(text):
         return "fail"
     if CAL_DONE.search(text):
@@ -95,6 +104,34 @@ def cal_prompt_from_line(line: str) -> str | None:
     if CAL_HANDS_OFF.search(text):
         return "hands-off"
     return None
+
+
+def cal_terminal(text: str) -> str | None:
+    last = None
+    for part in (text or "").splitlines():
+        prompt = cal_prompt_from_line(part)
+        if prompt in ("done", "fail"):
+            last = prompt
+    return last
+
+
+def norm_usb_serial(serial: str) -> str:
+    return (serial or "").replace(":", "").replace("-", "").lower()
+
+
+def qa_usb_serials() -> set[str]:
+    found: set[str] = set()
+    if not QA_CONFIG.is_file():
+        return found
+    try:
+        data = json.loads(QA_CONFIG.read_text())
+    except (OSError, json.JSONDecodeError):
+        return found
+    for rec in (data.get("boxes") or {}).values():
+        serial = (rec.get("usb_serial") or "").strip()
+        if serial:
+            found.add(norm_usb_serial(serial))
+    return found
 
 
 def is_qa_device_path(device: str) -> bool:
@@ -174,9 +211,15 @@ def eligible_ports(
     ports: Iterable[UsbPort],
     *,
     qa_paths: Iterable[str] | None = None,
+    qa_serials: Iterable[str] | None = None,
 ) -> list[UsbPort]:
     blocked: set[str] = set()
-    source = list(qa_paths) if qa_paths is not None else list(qa_device_paths())
+    if qa_paths is None:
+        source = list(qa_device_paths())
+        blocked_serials = qa_usb_serials()
+    else:
+        source = list(qa_paths)
+        blocked_serials = {norm_usb_serial(s) for s in (qa_serials or []) if s}
     for raw in source:
         blocked.add(raw)
         try:
@@ -194,6 +237,8 @@ def eligible_ports(
         except OSError:
             real = port.device
         if port.device in blocked or real in blocked:
+            continue
+        if port.serial and norm_usb_serial(port.serial) in blocked_serials:
             continue
         out.append(port)
     return out
@@ -326,12 +371,42 @@ def wait_for_port(device: str, timeout_s: float = 10.0) -> bool:
     return Path(device).exists()
 
 
+def collect_serial_output(
+    read_chunk: Callable[[], str],
+    *,
+    now: Callable[[], float],
+    deadline: float,
+    stop_when: Callable[[str], bool] | None = None,
+    on_line: FlashLineCb | None = None,
+    idle_sleep: Callable[[float], None] | None = None,
+    idle_s: float = 0.05,
+) -> str:
+    """Read until stop_when(acc) or deadline. Returns early on a terminal line."""
+    sleep = idle_sleep or time.sleep
+    acc = ""
+    while now() < deadline:
+        chunk = read_chunk() or ""
+        if chunk:
+            acc += chunk
+            if on_line:
+                for line in chunk.splitlines():
+                    on_line(line)
+            if stop_when and stop_when(acc):
+                break
+        else:
+            if now() >= deadline:
+                break
+            sleep(idle_s)
+    return acc
+
+
 def serial_command(
     port: str,
     command: str,
     wait_s: float = 1.5,
     *,
     on_line: FlashLineCb | None = None,
+    stop_when: Callable[[str], bool] | None = None,
     exchange: Callable[[str, str, float], str] | None = None,
 ) -> str:
     if exchange is not None:
@@ -348,16 +423,21 @@ def serial_command(
         ser.reset_input_buffer()
         ser.write((command + "\n").encode())
         ser.flush()
-        end = time.time() + wait_s
-        chunks: list[str] = []
-        while time.time() < end:
+
+        def read_chunk() -> str:
             data = ser.read(4096)
-            if data:
-                text = data.decode("utf-8", "replace")
-                chunks.append(text)
-                if on_line:
-                    for line in text.splitlines():
-                        on_line(line)
-        return "".join(chunks)
+            if not data:
+                return ""
+            return data.decode("utf-8", "replace")
+
+        return collect_serial_output(
+            read_chunk,
+            now=time.time,
+            deadline=time.time() + wait_s,
+            stop_when=stop_when,
+            on_line=on_line,
+            idle_sleep=lambda _s: None,
+            idle_s=0.0,
+        )
     finally:
         ser.close()

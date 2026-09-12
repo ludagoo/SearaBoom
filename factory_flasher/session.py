@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Callable
 
 from factory_flasher.core import (
+    CAL_CEILING_S,
     UsbPort,
     cal_prompt_from_line,
+    cal_terminal,
     eligible_ports,
     flash_port,
     list_usb_ports,
@@ -84,10 +86,6 @@ def default_confirm() -> list[ConfirmStep]:
     ]
 
 
-def CAL_DONE_OK(text: str) -> bool:
-    return cal_prompt_from_line(text) == "done" or "touch cal ESP_OK" in (text or "")
-
-
 class FactorySession:
     def __init__(
         self,
@@ -99,6 +97,7 @@ class FactorySession:
         serial_cmd: Callable[..., str] | None = None,
         wait_port: Callable[[str, float], bool] | None = None,
         qa_paths: list[str] | None = None,
+        qa_serials: list[str] | None = None,
         sleep: Callable[[float], None] = time.sleep,
         now: Callable[[], float] = time.time,
     ) -> None:
@@ -108,6 +107,7 @@ class FactorySession:
         self._serial_cmd = serial_cmd
         self._wait_port = wait_port or wait_for_port
         self._qa_paths = qa_paths
+        self._qa_serials = qa_serials
         self._sleep = sleep
         self._now = now
         self._lock = threading.Lock()
@@ -140,6 +140,17 @@ class FactorySession:
         for key, value in kwargs.items():
             setattr(self._state, key, value)
 
+    def _eligible(self) -> list[UsbPort]:
+        return eligible_ports(
+            self._list_ports(),
+            qa_paths=self._qa_paths,
+            qa_serials=self._qa_serials,
+        )
+
+    def _phase(self) -> str:
+        with self._lock:
+            return self._state.phase
+
     def arm(self, armed: bool) -> dict:
         with self._lock:
             if armed and not self._state.image_ready:
@@ -147,7 +158,7 @@ class FactorySession:
                 return self._state.to_dict()
             self._state.armed = bool(armed)
             if armed:
-                ports = eligible_ports(self._list_ports(), qa_paths=self._qa_paths)
+                ports = self._eligible()
                 self._baseline = {p.identity for p in ports}
                 already = [p for p in ports if p.identity not in self._done_ids]
                 self._state.phase = "watching"
@@ -191,7 +202,7 @@ class FactorySession:
                 return
             if self._state.phase in ("flashing", "verify", "calibrate"):
                 return
-            ports = eligible_ports(self._list_ports(), qa_paths=self._qa_paths)
+            ports = self._eligible()
             fresh = [
                 p
                 for p in new_ports(ports, self._baseline)
@@ -275,7 +286,6 @@ class FactorySession:
         with self._lock:
             self._set(phase="verify", progress=100, message="Flash wrote. Checking boot…")
             self._log("esptool ok — waiting for serial")
-        self._sleep(2.0)
         if not self._wait_port(device, 12.0):
             with self._lock:
                 self._set(
@@ -284,8 +294,9 @@ class FactorySession:
                     message="Flash wrote but the USB serial port did not come back.",
                 )
             return
+        self._sleep(2.0)
         self._verify(device)
-        if self._state.phase == "fail":
+        if self._phase() == "fail":
             return
         self._calibrate(device)
         with self._lock:
@@ -304,7 +315,13 @@ class FactorySession:
                     message="Confirmation failed. See steps below.",
                 )
 
-    def _serial(self, port: str, command: str, wait_s: float) -> str:
+    def _serial(
+        self,
+        port: str,
+        command: str,
+        wait_s: float,
+        stop_when: Callable[[str], bool] | None = None,
+    ) -> str:
         lines: list[str] = []
 
         def on_line(line: str) -> None:
@@ -320,7 +337,9 @@ class FactorySession:
             for line in text.splitlines():
                 on_line(line)
             return text
-        return serial_command(port, command, wait_s, on_line=on_line)
+        return serial_command(
+            port, command, wait_s, on_line=on_line, stop_when=stop_when
+        )
 
     def _mark(self, step_id: str, status: str, detail: str) -> None:
         for step in self._state.confirm:
@@ -339,6 +358,12 @@ class FactorySession:
         for line in text.splitlines():
             version = version or parse_version_line(line)
             board = board or parse_board_line(line)
+        if not version:
+            self._sleep(0.8)
+            text = self._serial(device, "ver", 2.0)
+            for line in text.splitlines():
+                version = version or parse_version_line(line)
+                board = board or parse_board_line(line)
         with self._lock:
             if version:
                 match = (not expect) or version == expect
@@ -379,19 +404,34 @@ class FactorySession:
                 )
                 self._mark("cal", "active", "hands off, then hold + then −")
                 self._cal_retry.clear()
-            text = self._serial(device, "touch cal", 50.0)
-            prompt = None
-            for line in text.splitlines():
-                prompt = cal_prompt_from_line(line) or prompt
+            text = self._serial(
+                device,
+                "touch cal",
+                CAL_CEILING_S,
+                stop_when=lambda acc: cal_terminal(acc) is not None,
+            )
+            terminal = cal_terminal(text)
             with self._lock:
-                if prompt == "done" or CAL_DONE_OK(text):
+                if terminal == "done":
                     self._mark("cal", "pass", "touch cal ESP_OK")
                     self._state.cal_prompt = "done"
                     return
-                self._mark("cal", "fail", "touch cal failed — retry or check pads")
-                self._state.cal_prompt = "fail"
-                self._state.message = "Calibration failed. Fix the pads and retry, or disarm."
-            # wait for retry or unplug / disarm
+                if terminal == "fail":
+                    self._mark("cal", "fail", "touch cal failed — retry or check pads")
+                    self._state.cal_prompt = "fail"
+                    self._state.message = (
+                        "Calibration failed. Fix the pads and retry, or disarm."
+                    )
+                else:
+                    self._mark("cal", "fail", "no touch cal result before timeout")
+                    self._state.cal_prompt = "fail"
+                    self._set(
+                        phase="fail",
+                        last_error="cal timeout",
+                        message="Calibration timed out. Unplug and try again — do not retry while the box is still beeping.",
+                    )
+                    return
+            # Firmware already finished (ESP_FAIL). Retry is safe.
             deadline = self._now() + 120.0
             while not self._stop and self._now() < deadline:
                 if self._cal_retry.is_set():

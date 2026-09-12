@@ -197,9 +197,12 @@ esp_err_t volume_buttons_init(volume_btn_cb_t cb, volume_gesture_cb_t gesture, v
         return err;
     }
 
-    /* Use factory-saved pad cal when present. Do not set s_need_cal or call
-     * volume_buttons_calibrate() from boot — that would prompt after OTA. */
-    if (!config_store_load_touch_sens(&s_sens_up, &s_sens_dn, NULL)) {
+    /* Factory `touch cal` writes SB_TOUCH_SENS_REV (3). Ignore older NVS
+     * values so field OTA keeps the 0.5.20 fixed-threshold graze fix.
+     * Do not set s_need_cal or call volume_buttons_calibrate() from boot. */
+    uint8_t rev = 0;
+    if (!config_store_load_touch_sens(&s_sens_up, &s_sens_dn, &rev)
+        || rev < SB_TOUCH_SENS_REV) {
         s_sens_up = SB_TOUCH_SENS;
         s_sens_dn = SB_TOUCH_SENS;
     }

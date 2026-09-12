@@ -11,6 +11,26 @@ from urllib.parse import urlparse
 from factory_flasher.session import FactorySession
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def request_is_local(headers) -> bool:
+    host_hdr = (headers.get("Host") or "").strip()
+    if host_hdr.startswith("["):
+        hostname = host_hdr[1:].split("]", 1)[0]
+    elif host_hdr.count(":") == 1:
+        hostname = host_hdr.rsplit(":", 1)[0]
+    else:
+        hostname = host_hdr
+    if hostname.lower() not in LOCAL_HOSTS:
+        return False
+    origin = (headers.get("Origin") or "").strip()
+    if not origin:
+        return True
+    parsed = urlparse(origin)
+    if parsed.scheme not in ("http", "https"):
+        return False
+    return (parsed.hostname or "").lower() in LOCAL_HOSTS
 
 
 def _read_static(name: str) -> tuple[bytes, str]:
@@ -72,6 +92,9 @@ def make_handler(session: FactorySession):
                 return
             if not isinstance(data, dict):
                 data = {}
+            if path in ("/api/arm", "/api/cal/retry") and not request_is_local(self.headers):
+                self._json(403, {"error": "local origin only"})
+                return
             if path == "/api/arm":
                 armed = bool(data.get("armed"))
                 self._json(200, session.arm(armed))

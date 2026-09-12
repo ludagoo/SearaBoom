@@ -12,7 +12,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from factory_flasher.core import (  # noqa: E402
+    CAL_CEILING_S,
     UsbPort,
+    cal_prompt_from_line,
+    cal_terminal,
+    collect_serial_output,
     eligible_ports,
     esptool_write_args,
     fetch_factory_image,
@@ -21,11 +25,11 @@ from factory_flasher.core import (  # noqa: E402
     parse_board_line,
     parse_progress_line,
     parse_version_line,
-    cal_prompt_from_line,
     validate_manifest,
 )
 from factory_flasher.layout import FACTORY_FILES, factory_plan, offset_hex  # noqa: E402
 from factory_flasher.packaging import desktop_zip_bytes  # noqa: E402
+from factory_flasher.server import request_is_local  # noqa: E402
 from factory_flasher.session import FactorySession  # noqa: E402
 
 
@@ -93,6 +97,10 @@ def test_progress_and_serial_parsers() -> None:
     assert cal_prompt_from_line("cal: hold -") == "hold-"
     assert cal_prompt_from_line("touch cal ESP_OK") == "done"
     assert cal_prompt_from_line("cal fail: no +") == "fail"
+    assert cal_prompt_from_line("touch cal: hold + then -") is None
+    assert cal_terminal("touch cal: hold + then -\ncal: hands off\n") is None
+    assert cal_terminal("cal: hold +\ncal done\ntouch cal ESP_OK") == "done"
+    assert cal_terminal("cal fail: no +\ntouch cal ESP_FAIL") == "fail"
 
 
 def test_qa_paths_skipped() -> None:
@@ -103,6 +111,19 @@ def test_qa_paths_skipped() -> None:
     ]
     ok = eligible_ports(ports, qa_paths=["/dev/searaboom-qa-zero-fast"])
     assert [p.serial for p in ok] == ["BBB"]
+
+
+def test_qa_serial_skipped_without_symlink() -> None:
+    ports = [
+        _port("/dev/ttyACM3", "D0:CF:13:07:DE:FC"),
+        _port("/dev/ttyACM4", "BOX"),
+    ]
+    ok = eligible_ports(
+        ports,
+        qa_paths=[],
+        qa_serials=["D0:CF:13:07:DE:FC"],
+    )
+    assert [p.serial for p in ok] == ["BOX"]
 
 
 def test_new_ports_after_arm_baseline() -> None:
@@ -284,6 +305,128 @@ def test_list_ports_filters_by_vid() -> None:
     assert [p.device for p in ports] == ["/dev/ttyACM0"]
 
 
+def test_firmware_ignores_old_cal_rev() -> None:
+    store_h = (ROOT / "firmware/main/config_store.h").read_text()
+    vol = (ROOT / "firmware/main/volume_buttons.c").read_text()
+    assert "#define SB_TOUCH_SENS_REV 3" in store_h
+    assert "rev < SB_TOUCH_SENS_REV" in vol
+
+
+def test_cal_read_early_exit_and_late_success() -> None:
+    t = [0.0]
+    emitted = [False]
+
+    def now() -> float:
+        return t[0]
+
+    def sleep(dt: float) -> None:
+        t[0] += dt
+
+    def read_early() -> str:
+        if t[0] >= 2.0 and not emitted[0]:
+            emitted[0] = True
+            return "cal: hold +\ncal done\ntouch cal ESP_OK\n"
+        return ""
+
+    text = collect_serial_output(
+        read_early,
+        now=now,
+        deadline=CAL_CEILING_S,
+        stop_when=lambda acc: cal_terminal(acc) is not None,
+        idle_sleep=sleep,
+    )
+    assert cal_terminal(text) == "done"
+    assert t[0] < 5
+
+    t[0] = 0.0
+    emitted[0] = False
+
+    def read_late() -> str:
+        if t[0] >= 90.0 and not emitted[0]:
+            emitted[0] = True
+            return "cal: hold -\ncal done\ntouch cal ESP_OK\n"
+        return ""
+
+    text = collect_serial_output(
+        read_late,
+        now=now,
+        deadline=CAL_CEILING_S,
+        stop_when=lambda acc: cal_terminal(acc) is not None,
+        idle_sleep=sleep,
+    )
+    assert cal_terminal(text) == "done"
+    assert t[0] >= 90
+    assert t[0] < CAL_CEILING_S
+
+
+def test_calibrate_timeout_does_not_send_second_touch_cal() -> None:
+    cmds: list[str] = []
+
+    def serial_cmd(port, command, wait_s):
+        cmds.append(command)
+        if command == "ver":
+            return "version=0.5.20 kconfig=0.5.20 board=s3-zero\n"
+        if command == "board":
+            return "board=s3-zero i2s dout=6\n"
+        if command == "touch cal":
+            return "cal: hold +\n"
+        return ""
+
+    session = FactorySession(
+        image_dir=Path("/tmp"),
+        image_version="0.5.20",
+        list_ports=lambda: [_port("/dev/ttyACM5", "BOX3")],
+        flash=lambda *a: 0,
+        serial_cmd=serial_cmd,
+        wait_port=lambda *a: True,
+        qa_paths=[],
+        sleep=lambda _s: None,
+    )
+    session.arm(True)
+    session.tick()
+    assert cmds.count("touch cal") == 1
+    assert session.snapshot()["phase"] == "fail"
+    assert session.snapshot()["last_error"] == "cal timeout"
+
+
+def test_ver_retries_once() -> None:
+    n = {"ver": 0}
+
+    def serial_cmd(port, command, wait_s):
+        if command == "ver":
+            n["ver"] += 1
+            if n["ver"] == 1:
+                return ""
+            return "version=0.5.20 kconfig=0.5.20 board=s3-zero\n"
+        if command == "board":
+            return "board=s3-zero i2s dout=6\n"
+        if command == "touch cal":
+            return "cal done\ntouch cal ESP_OK\n"
+        return ""
+
+    session = FactorySession(
+        image_dir=Path("/tmp"),
+        image_version="0.5.20",
+        list_ports=lambda: [_port("/dev/ttyACM5", "BOX4")],
+        flash=lambda *a: 0,
+        serial_cmd=serial_cmd,
+        wait_port=lambda *a: True,
+        qa_paths=[],
+        sleep=lambda _s: None,
+    )
+    session.arm(True)
+    session.tick()
+    assert n["ver"] == 2
+    assert session.snapshot()["phase"] == "pass"
+
+
+def test_request_is_local() -> None:
+    assert request_is_local({"Host": "127.0.0.1:8765"})
+    assert request_is_local({"Host": "127.0.0.1:8765", "Origin": "http://127.0.0.1:8765"})
+    assert not request_is_local({"Host": "127.0.0.1:8765", "Origin": "http://evil.example"})
+    assert not request_is_local({"Host": "evil.example"})
+
+
 if __name__ == "__main__":
     test_layout_matches_restore_script()
     test_esptool_args_order()
@@ -299,4 +442,10 @@ if __name__ == "__main__":
     test_session_skips_qa_even_if_new()
     test_desktop_zip_contains_runner()
     test_list_ports_filters_by_vid()
+    test_firmware_ignores_old_cal_rev()
+    test_cal_read_early_exit_and_late_success()
+    test_calibrate_timeout_does_not_send_second_touch_cal()
+    test_ver_retries_once()
+    test_request_is_local()
+    test_qa_serial_skipped_without_symlink()
     print("ok")

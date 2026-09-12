@@ -203,7 +203,7 @@
     arm.addEventListener("change", async () => {
       if (arm.checked) {
         const ok = window.confirm(
-          "ARM factory flash?\n\nThe next SearaBoom you plug in will be erased and rewritten with the USB factory image. Dedicated QA boxes are skipped."
+          "ARM factory flash?\n\nIf one SearaBoom is already plugged in, it will be flashed now. Otherwise the next box you plug in is erased and rewritten with the USB factory image. Dedicated QA boxes are skipped."
         );
         if (!ok) {
           arm.checked = lastArmed;
