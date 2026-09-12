@@ -12,7 +12,7 @@ source "$IDF_PATH/export.sh"
 ./scripts/setup_host.sh   # udev + uucp; log out/in once
 ```
 
-User units `searaboom-server` and `searaboom-tunnel` live in `~/.config/systemd/user/` (not in this repo). Same processes: `./scripts/run_server.sh` and `./scripts/run_tunnel.sh`.
+Mini prod user units `searaboom-server` and `searaboom-tunnel` live in `~/.config/systemd/user/` (legacy names). Portable standup (prod from `main` + test from a PR worktree on the same machine): [`docs/hosting.md`](docs/hosting.md) and `./scripts/searaboom-host`. Do not point `searaboom.goossen.dev` at a new host from a PR. Ad-hoc: `./scripts/run_server.sh` and `./scripts/run_tunnel.sh`.
 
 Agent / automation notes: [`AGENTS.md`](AGENTS.md).
 

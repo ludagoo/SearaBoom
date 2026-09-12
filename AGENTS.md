@@ -43,6 +43,8 @@ After a release, `GET /api/status` — `firmware.version` and `factory.version` 
 
 Server: `~/.config/systemd/user/searaboom-server.service` (repo `server/app.py`). After editing `app.py`, restart that unit. Do **not** restart it from a PR. Admin token default: `searaboom-dev`.
 
+Portable standup (new host, or a **test** instance beside Mini prod): [`docs/hosting.md`](docs/hosting.md). Do **not** retarget `searaboom.goossen.dev`. Do **not** restart `searaboom-server` / `searaboom-tunnel` from a PR.
+
 QA Origin app (this host): `./scripts/setup_origin_app.sh`. Webhook: `POST /api/lab/origin-webhook`.
 
 ## Log acknowledgments

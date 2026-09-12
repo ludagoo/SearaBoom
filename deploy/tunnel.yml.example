@@ -1,0 +1,14 @@
+# Locally-managed named tunnel. Copy to ~/.config/searaboom/tunnel/{prod,test}.yml
+# QUIC/UDP 7844 is blocked on the Mini network; keep HTTP/2.
+#
+# Test copies MUST use a different hostname than searaboom.goossen.dev.
+# Do not point the live CNAME at a new host from a PR.
+
+protocol: http2
+tunnel: <TUNNEL_UUID_OR_NAME>
+credentials-file: /home/YOU/.config/searaboom/tunnel/<TUNNEL_UUID>.json
+
+ingress:
+  - hostname: searaboom-test.example.com
+    service: http://127.0.0.1:18081
+  - service: http_status:404
