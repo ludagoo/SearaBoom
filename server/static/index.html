@@ -83,16 +83,18 @@
     footer { margin-top: 1.25rem; color: var(--muted); font-size: .88rem; }
     .unsupported { color: #ffd6a8; display: block; margin-top: .8rem; }
     esp-web-install-button { display: inline-block; }
-    #serial-help p { color: var(--muted); line-height: 1.5; margin: .6rem 0; }
-    #serial-help pre {
+    #serial-help p, #linux-run p { color: var(--muted); line-height: 1.5; margin: .6rem 0; }
+    pre.cmd {
       margin: .4rem 0;
       padding: .7rem .8rem;
       border-radius: 8px;
       background: rgba(0,0,0,.28);
       overflow-x: auto;
       font-size: .9rem;
+      white-space: pre-wrap;
+      word-break: break-all;
     }
-    #serial-help .copy {
+    button.copy {
       border: 0;
       border-radius: 8px;
       padding: .55rem 1rem;
@@ -100,7 +102,10 @@
       cursor: pointer;
       background: var(--gold);
       color: var(--bg);
+      margin: 0 .5rem .6rem 0;
     }
+    #linux-run .cmd-block { margin-top: .7rem; }
+    #linux-run .cmd-block .meta { margin: 0 0 .25rem; }
   </style>
 </head>
 <body>
@@ -110,7 +115,8 @@
       <div class="meta" id="status">Loading image…</div>
       <ol>
         <li>Download the factory flasher for this computer — one file, no Python, no zip of scripts.</li>
-        <li>Run it. ARM once. Plug a box in. It flashes the <strong>live</strong> USB image from this server.</li>
+        <li><strong>Linux:</strong> a browser download is never executable. Run <code>chmod +x</code> on the file, then run it. Or paste a one-liner below (curl, chmod, run). Windows: run the <code>.exe</code>. macOS: <code>chmod +x</code>, then run (right-click → Open if blocked).</li>
+        <li>ARM once. Plug a box in. It flashes the <strong>live</strong> USB image from this server.</li>
         <li>After write: confirm version/board, then hold volume + then − to calibrate pads.</li>
       </ol>
       <p style="margin:1rem 0 0">
@@ -118,6 +124,27 @@
       </p>
       <p class="meta" id="flasher-hint" style="margin:.7rem 0 0"></p>
       <p class="meta" id="flasher-others" style="margin:.4rem 0 0"></p>
+      <div id="linux-run">
+        <p>
+          <strong style="color:var(--ink)">Linux factory PCs:</strong>
+          browsers never keep <code>+x</code>. After Download:
+          <code>chmod +x searaboom-factory-flasher-linux-amd64</code>
+          then
+          <code>./searaboom-factory-flasher-linux-amd64</code>
+          (arm64: same commands with <code>linux-arm64</code>).
+        </p>
+        <p class="meta">Or one line — download, <code>chmod +x</code>, and run:</p>
+        <div class="cmd-block">
+          <p class="meta"><strong>linux-amd64</strong> (x86_64)</p>
+          <pre class="cmd" id="linux-amd64-cmd">curl -fsSL -o searaboom-factory-flasher-linux-amd64 https://searaboom.goossen.dev/api/factory/flasher/linux-amd64 &amp;&amp; chmod +x searaboom-factory-flasher-linux-amd64 &amp;&amp; ./searaboom-factory-flasher-linux-amd64</pre>
+          <button type="button" class="copy" data-copy="linux-amd64-cmd">Copy linux-amd64</button>
+        </div>
+        <div class="cmd-block">
+          <p class="meta"><strong>linux-arm64</strong></p>
+          <pre class="cmd" id="linux-arm64-cmd">curl -fsSL -o searaboom-factory-flasher-linux-arm64 https://searaboom.goossen.dev/api/factory/flasher/linux-arm64 &amp;&amp; chmod +x searaboom-factory-flasher-linux-arm64 &amp;&amp; ./searaboom-factory-flasher-linux-arm64</pre>
+          <button type="button" class="copy" data-copy="linux-arm64-cmd">Copy linux-arm64</button>
+        </div>
+      </div>
     </div>
     <p class="lead" style="margin-top:-.4rem">Chrome WebSerial often fails and asks for BOOT. Prefer the desktop program. Chrome remains a fallback below.</p>
     <div class="card" id="need-chrome" hidden>
@@ -136,8 +163,8 @@
         Chromium saw the box, but Linux blocked <code>/dev/ttyACM0</code>.
         Plug the box in, run this, then click Flash again:
       </p>
-      <pre data-linux id="serial-cmd">sudo chmod a+rw /dev/ttyACM0</pre>
-      <button type="button" class="copy" data-linux id="copy-cmd">Copy command</button>
+      <pre class="cmd" data-linux id="serial-cmd">sudo chmod a+rw /dev/ttyACM0</pre>
+      <button type="button" class="copy" data-linux data-copy="serial-cmd">Copy command</button>
       <p class="meta" data-linux>
         Permanent (once), then log out and back in:
         <code>sudo usermod -aG uucp "$USER"</code>
@@ -161,14 +188,29 @@
       if (help) help.hidden = false;
       if (inst) inst.hidden = true;
     })();
-    document.getElementById("copy-cmd")?.addEventListener("click", async () => {
-      const cmd = document.getElementById("serial-cmd")?.textContent || "";
-      try {
-        await navigator.clipboard.writeText(cmd);
-        document.getElementById("copy-cmd").textContent = "Copied";
-      } catch {
-        document.getElementById("copy-cmd").textContent = "Copy failed";
-      }
+    function linuxOneLiner(id, origin) {
+      const file = `searaboom-factory-flasher-${id}`;
+      return `curl -fsSL -o ${file} ${origin}/api/factory/flasher/${id} && chmod +x ${file} && ./${file}`;
+    }
+    function fillLinuxOneLiners() {
+      const origin = (window.location && window.location.origin) || "https://searaboom.goossen.dev";
+      const amd = document.getElementById("linux-amd64-cmd");
+      const arm = document.getElementById("linux-arm64-cmd");
+      if (amd) amd.textContent = linuxOneLiner("linux-amd64", origin);
+      if (arm) arm.textContent = linuxOneLiner("linux-arm64", origin);
+    }
+    fillLinuxOneLiners();
+    document.querySelectorAll("[data-copy]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.getAttribute("data-copy");
+        const cmd = document.getElementById(id)?.textContent || "";
+        try {
+          await navigator.clipboard.writeText(cmd.trim());
+          btn.textContent = "Copied";
+        } catch {
+          btn.textContent = "Copy failed";
+        }
+      });
     });
     function guessFlasherId() {
       const ua = navigator.userAgent || "";
@@ -185,7 +227,7 @@
     function howToRun(id, filename) {
       if (id.startsWith("windows")) return `Save ${filename} and run it.`;
       if (id.startsWith("darwin")) return `chmod +x ${filename} && ./${filename}  (if macOS blocks it: right-click → Open)`;
-      return `chmod +x ${filename} && ./${filename}  (Linux USB once: ./${filename} --linux-serial)`;
+      return `Browser downloads are not executable. chmod +x ${filename} && ./${filename}  (USB once: ./${filename} --linux-serial)`;
     }
     fetch("/api/factory")
       .then((r) => r.json())

@@ -89,6 +89,15 @@ def test_public_page_offers_binaries_not_zip() -> None:
     assert "./run.sh" not in html
     assert "/api/factory/flasher" in html
     assert "Download factory flasher" in html
+    assert "chmod +x" in html
+    assert "browser download is never executable" in html
+    assert "linux-amd64-cmd" in html
+    assert "linux-arm64-cmd" in html
+    assert "curl -fsSL -o searaboom-factory-flasher-linux-amd64" in html
+    assert "curl -fsSL -o searaboom-factory-flasher-linux-arm64" in html
+    assert "/api/factory/flasher/linux-amd64" in html
+    assert "/api/factory/flasher/linux-arm64" in html
+    assert "0.5.20" not in html
 
 
 def test_python_tree_removed() -> None:
@@ -129,6 +138,8 @@ def test_flasher_api(tmp_path: Path | None = None) -> None:
     client = searaboom_app.app.test_client()
     cat = client.get("/api/factory/flasher").get_json()
     assert cat["tool"] == "searaboom-factory-flasher"
+    assert "chmod +x" in cat["note"]
+    assert "not executable" in cat["note"]
     ids = [d["id"] for d in cat["downloads"]]
     assert ids == [
         "linux-amd64",

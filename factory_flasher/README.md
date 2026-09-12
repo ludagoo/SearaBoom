@@ -25,11 +25,22 @@ From https://searaboom.goossen.dev/ — one of:
 Direct URLs: `/api/factory/flasher/<id>` (ids in the table above, without the
 filename prefix). Catalog: `GET /api/factory/flasher`.
 
+Browser downloads never keep `+x`. After Download on Linux:
+
 ```bash
-# Linux
 chmod +x searaboom-factory-flasher-linux-amd64
 ./searaboom-factory-flasher-linux-amd64 --linux-serial   # once: udev text
 ./searaboom-factory-flasher-linux-amd64                  # opens http://127.0.0.1:8765/
+```
+
+Or one line (download, chmod, run):
+
+```bash
+# linux-amd64
+curl -fsSL -o searaboom-factory-flasher-linux-amd64 https://searaboom.goossen.dev/api/factory/flasher/linux-amd64 && chmod +x searaboom-factory-flasher-linux-amd64 && ./searaboom-factory-flasher-linux-amd64
+
+# linux-arm64
+curl -fsSL -o searaboom-factory-flasher-linux-arm64 https://searaboom.goossen.dev/api/factory/flasher/linux-arm64 && chmod +x searaboom-factory-flasher-linux-arm64 && ./searaboom-factory-flasher-linux-arm64
 ```
 
 Windows: run the `.exe`. macOS: `chmod +x` then run; if Gatekeeper blocks it,
