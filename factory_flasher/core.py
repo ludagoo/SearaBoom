@@ -362,13 +362,63 @@ def flash_port(
     return int(proc.wait())
 
 
-def wait_for_port(device: str, timeout_s: float = 10.0) -> bool:
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        if Path(device).exists():
-            return True
-        time.sleep(0.2)
-    return Path(device).exists()
+def port_node_present(device: str) -> bool:
+    """True when a Unix tty node exists. Windows COM* is not a filesystem path."""
+    text = str(device or "")
+    if not text:
+        return False
+    if re.match(r"^(COM\d+|\\\\\.\\COM\d+)$", text, re.I):
+        return False
+    try:
+        return Path(text).exists()
+    except OSError:
+        return False
+
+
+def wait_for_port(
+    device: str,
+    timeout_s: float = 10.0,
+    *,
+    identity: str = "",
+    list_ports: Callable[[], list[UsbPort]] | None = None,
+    now: Callable[[], float] | None = None,
+    sleep: Callable[[float], None] | None = None,
+) -> str | None:
+    """Wait until the box serial is back. ESP32-S3 USB-JTAG often remaps ttyACM*.
+
+    Returns the device path to use (may differ from `device`), or None.
+    """
+    clock = now or time.time
+    nap = sleep or time.sleep
+    deadline = clock() + max(0.0, float(timeout_s))
+    want = (identity or "").strip()
+
+    def _match() -> str | None:
+        if port_node_present(device):
+            return device
+        try:
+            if list_ports is not None:
+                ports = list(list_ports())
+            elif want or re.match(r"^COM\d+$", device, re.I):
+                ports = list_usb_ports()
+            else:
+                ports = []
+        except Exception:
+            ports = []
+        for port in ports:
+            if want and port.identity == want:
+                return port.device
+            if port.device == device:
+                return port.device
+        return None
+
+    while True:
+        found = _match()
+        if found:
+            return found
+        if clock() >= deadline:
+            return _match()
+        nap(0.2)
 
 
 def collect_serial_output(

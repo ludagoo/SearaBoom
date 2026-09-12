@@ -3,6 +3,7 @@
 
   python3 -m factory_flasher
   python3 -m factory_flasher --demo
+  python3 -m factory_flasher --write-zip
   python3 -m factory_flasher --image-dir /path/to/factory
 """
 from __future__ import annotations
@@ -19,6 +20,7 @@ from factory_flasher.core import (
     load_manifest,
     resolve_image_dir,
 )
+from factory_flasher.packaging import desktop_zip_bytes
 from factory_flasher.server import run_poll_loop, serve
 from factory_flasher.session import FactorySession
 
@@ -100,11 +102,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="UI walkthrough without USB hardware (does not flash)",
     )
+    p.add_argument(
+        "--write-zip",
+        nargs="?",
+        const="searaboom-factory-flasher.zip",
+        type=Path,
+        help="Write the operator zip and exit (does not start the UI or flash)",
+    )
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.write_zip:
+        dest = Path(args.write_zip)
+        dest.write_bytes(desktop_zip_bytes())
+        print(str(dest.resolve()))
+        return 0
     if args.demo:
         image_dir = args.image_dir or Path("/tmp/searaboom-factory-demo")
         image_dir.mkdir(parents=True, exist_ok=True)

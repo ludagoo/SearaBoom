@@ -105,7 +105,7 @@ class FactorySession:
         self._list_ports = list_ports or list_usb_ports
         self._flash = flash
         self._serial_cmd = serial_cmd
-        self._wait_port = wait_port or wait_for_port
+        self._wait_port = wait_port
         self._qa_paths = qa_paths
         self._qa_serials = qa_serials
         self._sleep = sleep
@@ -195,6 +195,23 @@ class FactorySession:
 
     def stop(self) -> None:
         self._stop = True
+
+    def _await_serial(self, device: str, identity: str) -> str | None:
+        if self._wait_port is not None:
+            found = self._wait_port(device, 12.0)
+            if not found:
+                return None
+            if isinstance(found, str):
+                return found
+            return device
+        return wait_for_port(
+            device,
+            12.0,
+            identity=identity,
+            list_ports=self._list_ports,
+            now=self._now,
+            sleep=self._sleep,
+        )
 
     def tick(self) -> None:
         with self._lock:
@@ -286,7 +303,8 @@ class FactorySession:
         with self._lock:
             self._set(phase="verify", progress=100, message="Flash wrote. Checking boot…")
             self._log("esptool ok — waiting for serial")
-        if not self._wait_port(device, 12.0):
+        found = self._await_serial(device, identity)
+        if not found:
             with self._lock:
                 self._set(
                     phase="fail",
@@ -294,6 +312,11 @@ class FactorySession:
                     message="Flash wrote but the USB serial port did not come back.",
                 )
             return
+        if found != device:
+            with self._lock:
+                self._log(f"serial remapped {device} -> {found}")
+                self._set(port=found)
+            device = found
         self._sleep(2.0)
         self._verify(device)
         if self._phase() == "fail":

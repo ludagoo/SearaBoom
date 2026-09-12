@@ -181,7 +181,7 @@
       } else {
         calEl.hidden = true;
       }
-      retry.hidden = !(s.phase === "calibrate" && prompt === "fail") && !(s.phase === "fail" && (s.confirm || []).some(x => x.id === "cal" && x.status === "fail"));
+      retry.hidden = !(s.phase === "calibrate" && prompt === "fail");
       resultEl.className = "";
       resultEl.textContent = "";
       if (s.phase === "pass") {

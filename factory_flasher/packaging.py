@@ -34,6 +34,10 @@ def desktop_zip_bytes() -> bytes:
         if readme.is_file():
             zf.writestr(
                 "README.md",
-                "Unpack, then: cd factory_flasher && ./run.sh\n\n" + readme.read_text(),
+                "Unpack, then:\n"
+                "  cd factory_flasher\n"
+                "  ./install-serial-linux.sh   # once per factory PC\n"
+                "  ./run.sh\n\n"
+                + readme.read_text(),
             )
     return buf.getvalue()

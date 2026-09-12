@@ -22,6 +22,7 @@ from factory_flasher.core import (  # noqa: E402
     fetch_factory_image,
     is_qa_device_path,
     new_ports,
+    wait_for_port,
     parse_board_line,
     parse_progress_line,
     parse_version_line,
@@ -275,7 +276,93 @@ def test_desktop_zip_contains_runner() -> None:
     assert "factory_flasher/run.sh" in names
     assert "factory_flasher/layout.py" in names
     assert "factory_flasher/static/index.html" in names
+    assert "factory_flasher/99-searaboom-esp.rules" in names
+    assert "factory_flasher/install-serial-linux.sh" in names
     assert not any("__pycache__" in n for n in names)
+    info = zf.getinfo("factory_flasher/run.sh")
+    assert (info.external_attr >> 16) & 0o111
+    inst = zf.getinfo("factory_flasher/install-serial-linux.sh")
+    assert (inst.external_attr >> 16) & 0o111
+    top = zf.read("README.md").decode()
+    assert "./install-serial-linux.sh" in top
+    assert "./run.sh" in top
+
+
+def test_udev_rules_match_host_script() -> None:
+    a = (ROOT / "scripts/99-searaboom-esp.rules").read_text()
+    b = (ROOT / "factory_flasher/99-searaboom-esp.rules").read_text()
+    assert a == b
+    assert "303a" in a
+
+
+def test_wait_for_port_remapped_identity() -> None:
+    t = [0.0]
+
+    def now() -> float:
+        return t[0]
+
+    def sleep(dt: float) -> None:
+        t[0] += dt
+
+    def lister():
+        if t[0] < 0.6:
+            return []
+        return [_port("/dev/ttyACM7", "BOX1")]
+
+    found = wait_for_port(
+        "/tmp/searaboom-no-tty-5",
+        5.0,
+        identity="BOX1",
+        list_ports=lister,
+        now=now,
+        sleep=sleep,
+    )
+    assert found == "/dev/ttyACM7"
+    assert t[0] >= 0.6
+    assert t[0] < 5
+
+
+def test_session_verify_on_remapped_port() -> None:
+    serial_ports: list[str] = []
+
+    def serial_cmd(port, command, wait_s):
+        serial_ports.append(port)
+        if command == "ver":
+            return "version=0.5.20 kconfig=0.5.20 board=s3-zero\n"
+        if command == "board":
+            return "board=s3-zero i2s dout=6\n"
+        if command == "touch cal":
+            return "cal done\ntouch cal ESP_OK\n"
+        return ""
+
+    session = FactorySession(
+        image_dir=Path("/tmp"),
+        image_version="0.5.20",
+        list_ports=lambda: [_port("/dev/ttyACM5", "BOX1")],
+        flash=lambda *a: 0,
+        serial_cmd=serial_cmd,
+        wait_port=lambda *_a: "/dev/ttyACM7",
+        qa_paths=[],
+        sleep=lambda _s: None,
+    )
+    session.arm(True)
+    session.tick()
+    snap = session.snapshot()
+    assert snap["phase"] == "pass"
+    assert snap["port"] == "/dev/ttyACM7"
+    assert serial_ports
+    assert all(p == "/dev/ttyACM7" for p in serial_ports)
+
+
+def test_write_zip_cli(tmp_path: Path | None = None) -> None:
+    from factory_flasher.__main__ import main
+
+    dest = Path("/tmp/searaboom-factory-flasher-cli-test.zip")
+    if dest.exists():
+        dest.unlink()
+    assert main(["--write-zip", str(dest)]) == 0
+    assert dest.is_file() and dest.stat().st_size > 100
+    dest.unlink()
 
 
 def test_list_ports_filters_by_vid() -> None:
@@ -448,4 +535,8 @@ if __name__ == "__main__":
     test_ver_retries_once()
     test_request_is_local()
     test_qa_serial_skipped_without_symlink()
+    test_udev_rules_match_host_script()
+    test_wait_for_port_remapped_identity()
+    test_session_verify_on_remapped_port()
+    test_write_zip_cli()
     print("ok")
