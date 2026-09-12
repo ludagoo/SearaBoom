@@ -33,7 +33,7 @@ A release ships **one** version to OTA **and** USB factory (`slot=live`).
 | Already-built bin | `./scripts/publish_firmware.sh X.Y.Z` | From main when releasing |
 | USB factory only | `./scripts/snapshot_factory.sh [X.Y.Z]` | Rare |
 
-Do **not** point the public flash page at `firmware/build/`. Factory files live in `server/firmware/factory/`. USB install for testers is the **single-binary factory flasher** from https://searaboom.goossen.dev/ (`/api/factory/flasher/`, esptool-style DTR/RTS). The binary fetches the live USB image; do not embed firmware. Chrome WebSerial is a fallback. `idf.py flash` is local-dev only, never on QA nodes.
+Do **not** point the public flash page at `firmware/build/`. Factory files live in `server/firmware/factory/`. USB install for testers is the **curl one-liner** on https://searaboom.goossen.dev/ (TUI binary from `/api/factory/flasher/`, esptool-style DTR/RTS). The binary fetches the live USB image; do not embed firmware. Chrome WebSerial is a fallback. `idf.py flash` is local-dev only, never on QA nodes.
 
 Version source of truth: `firmware/VERSION` (also `CONFIG_SEARABOOM_FW_VERSION` in `firmware/sdkconfig.defaults`).
 

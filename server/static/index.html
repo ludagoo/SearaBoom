@@ -84,15 +84,17 @@
     .unsupported { color: #ffd6a8; display: block; margin-top: .8rem; }
     esp-web-install-button { display: inline-block; }
     #serial-help p { color: var(--muted); line-height: 1.5; margin: .6rem 0; }
-    #serial-help pre {
+    #serial-help pre, pre.install {
       margin: .4rem 0;
       padding: .7rem .8rem;
       border-radius: 8px;
       background: rgba(0,0,0,.28);
       overflow-x: auto;
-      font-size: .9rem;
+      font-size: .82rem;
+      white-space: pre-wrap;
+      word-break: break-all;
     }
-    #serial-help .copy {
+    button.copy {
       border: 0;
       border-radius: 8px;
       padding: .55rem 1rem;
@@ -100,7 +102,10 @@
       cursor: pointer;
       background: var(--gold);
       color: var(--bg);
+      margin: 0 .4rem .4rem 0;
     }
+    .install-block { margin-top: .9rem; }
+    .install-block.mine pre.install { outline: 2px solid var(--gold); }
   </style>
 </head>
 <body>
@@ -108,18 +113,45 @@
     <h1>Flash a SearaBoom</h1>
     <div class="card">
       <div class="meta" id="status">Loading image…</div>
-      <ol>
-        <li>Download the factory flasher for this computer — one file, no Python, no zip of scripts.</li>
-        <li>Run it. ARM once. Plug a box in. It flashes the <strong>live</strong> USB image from this server.</li>
-        <li>After write: confirm version/board, then hold volume + then − to calibrate pads.</li>
-      </ol>
-      <p style="margin:1rem 0 0">
-        <a class="flash" id="flasher-dl" href="/api/factory/flasher">Download factory flasher</a>
+      <p class="lead" style="margin:.55rem 0 .85rem">
+        Factory install is a <strong>curl one-liner</strong>. Paste it in a terminal.
+        That fetches the TUI binary, keeps execute permission, and runs it.
+        A terminal window is the UI — no second app, no localhost browser.
       </p>
-      <p class="meta" id="flasher-hint" style="margin:.7rem 0 0"></p>
+      <ol>
+        <li>Copy the one-liner for this computer. The TUI opens.</li>
+        <li>ARM (Space, then Y). Plug a box in. It flashes the <strong>live</strong> USB image from this server.</li>
+        <li>After write: <code>ver</code> / <code>board</code>, then hold volume + then −.</li>
+      </ol>
+      <div class="install-block" data-flasher="linux-amd64">
+        <div class="meta"><strong>Linux x86_64</strong></div>
+        <pre class="install" id="cmd-linux-amd64">curl -fsSL -o searaboom-factory-flasher-linux-amd64 https://searaboom.goossen.dev/api/factory/flasher/linux-amd64 &amp;&amp; chmod +x searaboom-factory-flasher-linux-amd64 &amp;&amp; ./searaboom-factory-flasher-linux-amd64</pre>
+        <button type="button" class="copy" data-copy="cmd-linux-amd64">Copy linux-amd64</button>
+      </div>
+      <div class="install-block" data-flasher="linux-arm64">
+        <div class="meta"><strong>Linux arm64</strong></div>
+        <pre class="install" id="cmd-linux-arm64">curl -fsSL -o searaboom-factory-flasher-linux-arm64 https://searaboom.goossen.dev/api/factory/flasher/linux-arm64 &amp;&amp; chmod +x searaboom-factory-flasher-linux-arm64 &amp;&amp; ./searaboom-factory-flasher-linux-arm64</pre>
+        <button type="button" class="copy" data-copy="cmd-linux-arm64">Copy linux-arm64</button>
+      </div>
+      <div class="install-block" data-flasher="windows-amd64">
+        <div class="meta"><strong>Windows x64</strong> (cmd / PowerShell)</div>
+        <pre class="install" id="cmd-windows-amd64">curl.exe -fsSL -o searaboom-factory-flasher-windows-amd64.exe https://searaboom.goossen.dev/api/factory/flasher/windows-amd64 &amp;&amp; .\searaboom-factory-flasher-windows-amd64.exe</pre>
+        <button type="button" class="copy" data-copy="cmd-windows-amd64">Copy windows-amd64</button>
+      </div>
+      <div class="install-block" data-flasher="darwin-arm64">
+        <div class="meta"><strong>macOS Apple silicon</strong></div>
+        <pre class="install" id="cmd-darwin-arm64">curl -fsSL -o searaboom-factory-flasher-darwin-arm64 https://searaboom.goossen.dev/api/factory/flasher/darwin-arm64 &amp;&amp; chmod +x searaboom-factory-flasher-darwin-arm64 &amp;&amp; ./searaboom-factory-flasher-darwin-arm64</pre>
+        <button type="button" class="copy" data-copy="cmd-darwin-arm64">Copy darwin-arm64</button>
+      </div>
+      <div class="install-block" data-flasher="darwin-amd64">
+        <div class="meta"><strong>macOS Intel</strong></div>
+        <pre class="install" id="cmd-darwin-amd64">curl -fsSL -o searaboom-factory-flasher-darwin-amd64 https://searaboom.goossen.dev/api/factory/flasher/darwin-amd64 &amp;&amp; chmod +x searaboom-factory-flasher-darwin-amd64 &amp;&amp; ./searaboom-factory-flasher-darwin-amd64</pre>
+        <button type="button" class="copy" data-copy="cmd-darwin-amd64">Copy darwin-amd64</button>
+      </div>
+      <p class="meta" id="flasher-hint" style="margin:1rem 0 0"></p>
       <p class="meta" id="flasher-others" style="margin:.4rem 0 0"></p>
     </div>
-    <p class="lead" style="margin-top:-.4rem">Chrome WebSerial often fails and asks for BOOT. Prefer the desktop program. Chrome remains a fallback below.</p>
+    <p class="lead" style="margin-top:-.4rem">Chrome WebSerial often fails and asks for BOOT. Prefer the TUI one-liner. Chrome remains a fallback below.</p>
     <div class="card" id="need-chrome" hidden>
       <div class="meta"><strong>Open this page in Chrome.</strong></div>
       <p class="lead" style="margin: .5rem 0 0">USB flashing only works in Google Chrome (or Chromium / Edge). Copy the address and paste it there.</p>
@@ -182,11 +214,37 @@
       if (isMac) return arm ? "darwin-arm64" : "darwin-amd64";
       return arm ? "linux-arm64" : "linux-amd64";
     }
-    function howToRun(id, filename) {
-      if (id.startsWith("windows")) return `Save ${filename} and run it.`;
-      if (id.startsWith("darwin")) return `chmod +x ${filename} && ./${filename}  (if macOS blocks it: right-click → Open)`;
-      return `chmod +x ${filename} && ./${filename}  (Linux USB once: ./${filename} --linux-serial)`;
+    function oneLiner(id, filename) {
+      const url = `${location.origin}/api/factory/flasher/${id}`;
+      if (id.startsWith("windows")) {
+        return `curl.exe -fsSL -o ${filename} ${url} && .\\${filename}`;
+      }
+      return `curl -fsSL -o ${filename} ${url} && chmod +x ${filename} && ./${filename}`;
     }
+    function copyText(text, btn) {
+      const done = () => { if (btn) btn.textContent = "Copied"; };
+      const fallback = () => {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand("copy"); done(); } catch { if (btn) btn.textContent = "Copy failed"; }
+        ta.remove();
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text).then(done).catch(fallback);
+      }
+      fallback();
+    }
+    document.querySelectorAll("button.copy[data-copy]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const pre = document.getElementById(btn.getAttribute("data-copy"));
+        copyText((pre && pre.textContent) || "", btn);
+      });
+    });
     fetch("/api/factory")
       .then((r) => r.json())
       .then((d) => {
@@ -200,21 +258,33 @@
         const fl = d.flasher || {};
         const downloads = fl.downloads || [];
         const want = guessFlasherId();
-        const match = downloads.find((x) => x.id === want) || downloads[0];
-        const btn = document.getElementById("flasher-dl");
         const hint = document.getElementById("flasher-hint");
         const others = document.getElementById("flasher-others");
-        if (match) {
-          btn.href = match.url;
-          btn.textContent = match.ready
-            ? `Download ${match.label}`
-            : `Download ${match.label} (not built on this server yet)`;
-          hint.textContent = howToRun(match.id, match.filename);
+        downloads.forEach((x) => {
+          const pre = document.getElementById("cmd-" + x.id);
+          if (pre && x.filename) pre.textContent = oneLiner(x.id, x.filename);
+        });
+        document.querySelectorAll(".install-block").forEach((n) => {
+          n.classList.toggle("mine", n.getAttribute("data-flasher") === want);
+        });
+        const match = downloads.find((x) => x.id === want);
+        if (hint) {
+          if (want.startsWith("linux")) {
+            hint.textContent = "This computer: copy the highlighted Linux one-liner (curl keeps +x). USB once: run the binary with --linux-serial.";
+          } else if (want.startsWith("windows")) {
+            hint.textContent = "This computer: copy the Windows one-liner. Double-click also opens a console TUI.";
+          } else {
+            hint.textContent = "This computer: copy the highlighted macOS one-liner. If Gatekeeper blocks it: right-click → Open.";
+          }
         }
-        others.innerHTML = downloads
-          .filter((x) => x.id !== (match && match.id))
-          .map((x) => `<a href="${x.url}">${x.label}</a>`)
-          .join(" · ");
+        if (others) {
+          others.innerHTML = downloads
+            .map((x) => `<a href="${x.url}">${x.label} file</a>`)
+            .join(" · ");
+        }
+        if (match && !match.ready && hint) {
+          hint.textContent += " Binary not built on this server yet.";
+        }
       })
       .catch((e) => {
         document.getElementById("status").textContent = e.message;
