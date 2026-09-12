@@ -9,6 +9,7 @@
 #include "searaboom.h"
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
+#include "esp_ota_ops.h"
 #include "esp_crt_bundle.h"
 #include "esp_app_desc.h"
 #include "cJSON.h"
@@ -265,7 +266,11 @@ esp_err_t ota_update_check(ota_policy_t policy)
     }
     clip_player_stop();
 
-    ESP_LOGE(TAG, "OTA failed: %s", esp_err_to_name(ota_err));
+    if (ota_err == ESP_ERR_OTA_VALIDATE_FAILED) {
+        ESP_LOGE(TAG, "OTA rejected: image signature invalid (not our firmware)");
+    } else {
+        ESP_LOGE(TAG, "OTA failed: %s", esp_err_to_name(ota_err));
+    }
     led_status_set(SB_LED_MAGENTA, 150);
     vTaskDelay(pdMS_TO_TICKS(2000));
     led_status_set(SB_LED_OFF, 0);

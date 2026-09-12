@@ -16,6 +16,7 @@ def test_parse_hw_comment() -> None:
 
 
 def test_needs_firmware_qa() -> None:
+    assert needs_firmware_qa(["firmware/sdkconfig.defaults"])
     assert needs_firmware_qa(["firmware/main/main.c"])
     assert needs_firmware_qa(["server/app.py", "firmware/clips/x.aac"])
     assert not needs_firmware_qa(["README.md", "server/app.py"])

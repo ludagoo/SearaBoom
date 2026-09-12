@@ -2,6 +2,9 @@
 
 - Factory reset: hold both volume pads ~5s → wipe NVS → captive portal.
 - Signed OTA (ECDSA) + admin auth beyond shared token.
+  **Done for OTA (IDF RSA-3072 / Secure Boot V2 signature, no eFuse).** See
+  [`docs/SIGNED_FIRMWARE.md`](SIGNED_FIRMWARE.md). Hardware Secure Boot + admin
+  auth beyond the shared token still open.
 - Station list served from the management server instead of hard-coded URLs.
 - Drop the unused live-AAC proxy if boxes stay on direct Brasilstream. Firmware
   now opens `8396`/`8404.brasilstream.com.br/stream` (ADTS, `Icy-MetaData: 0`,

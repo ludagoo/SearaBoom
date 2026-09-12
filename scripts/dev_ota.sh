@@ -21,6 +21,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+python3 "$ROOT/scripts/signing_key_backup.py" --require
+
 VER_FILE="$ROOT/firmware/VERSION"
 cur="$(tr -d '[:space:]' < "$VER_FILE")"
 IFS=. read -r MA MI PA <<< "$cur"

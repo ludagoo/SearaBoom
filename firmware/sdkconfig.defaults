@@ -50,6 +50,16 @@ CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_MAX_CERTS=8
 CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=n
 CONFIG_ESP_HTTPS_OTA_DECRYPT_CB=n
 
+# Signed OTA without hardware Secure Boot (no eFuse burns). IDF verifies
+# RSA-PSS on every esp_https_ota / esp_ota_end. USB download stays open so
+# a signed factory image can unbrick. Hardware Secure Boot is opt-in later:
+# firmware/sdkconfig.defaults.secureboot and docs/SIGNED_FIRMWARE.md.
+CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y
+CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME=y
+CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y
+CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y
+CONFIG_SECURE_BOOT_SIGNING_KEY="secure_boot_signing_key.pem"
+
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 CONFIG_HTTPD_MAX_URI_LEN=512
 

@@ -7,6 +7,8 @@ __pycache__/
 firmware/build/
 firmware/sdkconfig
 firmware/sdkconfig.old
+firmware/secure_boot_signing_key.pem
+firmware/*.pem
 firmware/managed_components/
 firmware/dependencies.lock
 tunnel/*.json
