@@ -83,12 +83,28 @@ def test_udev_copy_matches_scripts() -> None:
     assert a == b
 
 
-def test_public_page_offers_binaries_not_zip() -> None:
+def test_public_page_offers_curl_install_not_zip() -> None:
     html = (ROOT / "server" / "static" / "index.html").read_text()
     assert "desktop.zip" not in html
     assert "./run.sh" not in html
+    assert "127.0.0.1:8765" not in html
+    assert "esp-web-tools" not in html
+    assert "web-tools.json" not in html
+    assert "WebSerial" not in html
+    assert "Open this page in Chrome" not in html
+    assert "Flash a box" not in html
     assert "/api/factory/flasher" in html
-    assert "Download factory flasher" in html
+    assert "curl -fsSL -o searaboom-factory-flasher-linux-amd64" in html
+    assert "chmod +x searaboom-factory-flasher-linux-amd64" in html
+    assert html.count("<pre") == 1
+    assert "guessFlasherId" in html
+    assert "linux-arm64" in html
+    assert "windows-amd64" in html
+    assert 'id="os"' in html
+    assert "Linux x86_64" in html
+    assert "any ESP32-S3 plugged into this computer is flashed" not in html
+    assert "While ARM" not in html
+    assert "esp-web-install" not in html
 
 
 def test_python_tree_removed() -> None:
@@ -110,10 +126,26 @@ def test_binary_source_does_not_pin_live_firmware() -> None:
     """Factory PCs always fetch whatever /api/factory is serving."""
     image_go = (ROOT / "factory_flasher" / "internal" / "image" / "image.go").read_text()
     main_go = (ROOT / "factory_flasher" / "main.go").read_text()
+    tui_go = (ROOT / "factory_flasher" / "internal" / "tui" / "tui.go").read_text()
     assert 'DefaultFactoryURL = "https://searaboom.goossen.dev"' in image_go
     assert "image.DefaultFactoryURL" in main_go
     assert "0.5.20" not in image_go
     assert "0.5.20" not in main_go
+    assert "0.5.20" not in tui_go
+
+
+def test_flasher_is_tui_not_browser() -> None:
+    main_go = (ROOT / "factory_flasher" / "main.go").read_text()
+    readme = (ROOT / "factory_flasher" / "README.md").read_text()
+    assert "openBrowser" not in main_go
+    assert "8765" not in main_go
+    assert "127.0.0.1" not in main_go
+    assert "httpserver" not in main_go
+    assert not (ROOT / "factory_flasher" / "web" / "index.html").exists()
+    assert not (ROOT / "factory_flasher" / "internal" / "httpserver").exists()
+    assert "terminal UI" in readme or "TUI" in readme
+    assert "curl -fsSL" in readme
+    assert "127.0.0.1:8765" not in readme
 
 
 def test_flasher_api(tmp_path: Path | None = None) -> None:
@@ -166,8 +198,9 @@ if __name__ == "__main__":
     test_plan_build_paths()
     test_firmware_ignores_old_cal_rev()
     test_udev_copy_matches_scripts()
-    test_public_page_offers_binaries_not_zip()
+    test_public_page_offers_curl_install_not_zip()
     test_python_tree_removed()
     test_binary_source_does_not_pin_live_firmware()
+    test_flasher_is_tui_not_browser()
     test_flasher_api()
     print("ok")

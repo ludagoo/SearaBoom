@@ -82,6 +82,41 @@ func TestArmAndFlashPass(t *testing.T) {
 	}
 }
 
+func TestFlashOnceDoesNotArmLaterPlugs(t *testing.T) {
+	device := "/dev/ttyACM5"
+	serial := "BOX1"
+	var flashed []string
+	sess := New(Options{
+		ImageDir: "/tmp",
+		ImageVer: "9.9.9",
+		ListPorts: func() ([]ports.Port, error) {
+			return []ports.Port{box(device, serial)}, nil
+		},
+		Flash:    func(port, _ string, onLine func(string)) error { flashed = append(flashed, port); return nil },
+		Serial:   okSerial,
+		WaitPort: func(string, time.Duration) bool { return true },
+		QAPaths:  []string{},
+		Sleep:    func(time.Duration) {},
+	})
+	snap := sess.FlashOnce()
+	if snap.Armed {
+		t.Fatal("one-shot must not ARM")
+	}
+	if len(flashed) != 1 || snap.Phase != "pass" {
+		t.Fatalf("once flashed=%v phase=%s", flashed, snap.Phase)
+	}
+	sess.FlashOnce()
+	sess.Tick()
+	if len(flashed) != 1 || sess.Snapshot().BoxesDone != 1 {
+		t.Fatalf("second FlashOnce after PASS: flashed=%v done=%d", flashed, sess.Snapshot().BoxesDone)
+	}
+	serial = "BOX2"
+	sess.Tick()
+	if len(flashed) != 1 {
+		t.Fatalf("later plug auto-flashed without ARM: %v", flashed)
+	}
+}
+
 func TestFlashFail(t *testing.T) {
 	sess := New(Options{
 		ImageDir:  "/tmp",

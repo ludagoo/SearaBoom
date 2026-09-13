@@ -4,38 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#052C31" />
-  <title>SearaBoom — flash a box</title>
-  <script>
-    if (navigator.serial && navigator.serial.requestPort) {
-      const orig = navigator.serial.requestPort.bind(navigator.serial);
-      navigator.serial.requestPort = (opts = {}) =>
-        orig({
-          ...opts,
-          filters: opts.filters && opts.filters.length
-            ? opts.filters
-            : [{ usbVendorId: 0x303A }],
-        });
-    }
-    const _alert = window.alert.bind(window);
-    window.alert = (msg) => {
-      const text = String(msg || "");
-      if (/Failed to open serial port|Failed to execute ['']open['']/i.test(text)) {
-        const linux = /Linux/i.test(navigator.userAgent) && !/Android/i.test(navigator.userAgent);
-        const box = document.getElementById("serial-help");
-        if (box) {
-          box.hidden = false;
-          const lx = box.querySelectorAll("[data-linux]");
-          const other = box.querySelector("[data-other]");
-          lx.forEach((n) => { n.hidden = !linux; });
-          if (other) other.hidden = linux;
-          box.scrollIntoView({ behavior: "smooth", block: "nearest" });
-          return;
-        }
-      }
-      _alert(msg);
-    };
-  </script>
-  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+  <title>SearaBoom</title>
   <style>
     :root {
       --bg: #052C31;
@@ -54,45 +23,17 @@
       padding: 2rem 1rem 3rem;
     }
     main { max-width: 640px; margin: 0 auto; }
-    h1 { margin: 0 0 .25rem; font-weight: 700; }
-    p.lead { color: var(--muted); margin: 0 0 1.5rem; }
-    .card {
-      background: var(--panel);
-      border-radius: 12px;
-      padding: 1.1rem 1.2rem;
-      margin-bottom: 1.2rem;
-    }
-    .meta { color: var(--muted); font-size: .92rem; }
-    .meta strong { color: var(--ink); }
-    ol { margin: .4rem 0 0; padding-left: 1.2rem; line-height: 1.55; }
-    button.flash, a.flash {
-      border: 0;
-      border-radius: 10px;
-      padding: .9rem 1.25rem;
-      font-size: 1.05rem;
-      font-weight: 700;
-      cursor: pointer;
-      background: var(--gold);
-      color: var(--bg);
-      text-decoration: none;
-      display: inline-block;
-    }
-    button.flash:disabled { opacity: .45; cursor: not-allowed; }
-    a.flash:visited { color: var(--bg); }
-    a { color: var(--gold); }
-    footer { margin-top: 1.25rem; color: var(--muted); font-size: .88rem; }
-    .unsupported { color: #ffd6a8; display: block; margin-top: .8rem; }
-    esp-web-install-button { display: inline-block; }
-    #serial-help p { color: var(--muted); line-height: 1.5; margin: .6rem 0; }
-    #serial-help pre {
-      margin: .4rem 0;
+    pre.install {
+      margin: 0 0 .75rem;
       padding: .7rem .8rem;
       border-radius: 8px;
       background: rgba(0,0,0,.28);
       overflow-x: auto;
-      font-size: .9rem;
+      font-size: .82rem;
+      white-space: pre-wrap;
+      word-break: break-all;
     }
-    #serial-help .copy {
+    button.copy {
       border: 0;
       border-radius: 8px;
       padding: .55rem 1rem;
@@ -101,124 +42,128 @@
       background: var(--gold);
       color: var(--bg);
     }
+    p.os {
+      margin: 0 0 .55rem;
+      color: var(--muted);
+      font-size: 1rem;
+    }
+    #picker {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .4rem;
+      margin-top: .85rem;
+    }
+    #picker[hidden] { display: none; }
+    #picker button {
+      border: 0;
+      border-radius: 8px;
+      padding: .4rem .7rem;
+      cursor: pointer;
+      background: rgba(0,0,0,.28);
+      color: var(--ink);
+    }
+    #picker button.on { background: var(--gold); color: var(--bg); font-weight: 700; }
   </style>
 </head>
 <body>
   <main>
-    <h1>Flash a SearaBoom</h1>
-    <div class="card">
-      <div class="meta" id="status">Loading image…</div>
-      <ol>
-        <li>Download the factory flasher for this computer — one file, no Python, no zip of scripts.</li>
-        <li>Run it. ARM once. Plug a box in. It flashes the <strong>live</strong> USB image from this server.</li>
-        <li>After write: confirm version/board, then hold volume + then − to calibrate pads.</li>
-      </ol>
-      <p style="margin:1rem 0 0">
-        <a class="flash" id="flasher-dl" href="/api/factory/flasher">Download factory flasher</a>
-      </p>
-      <p class="meta" id="flasher-hint" style="margin:.7rem 0 0"></p>
-      <p class="meta" id="flasher-others" style="margin:.4rem 0 0"></p>
-    </div>
-    <p class="lead" style="margin-top:-.4rem">Chrome WebSerial often fails and asks for BOOT. Prefer the desktop program. Chrome remains a fallback below.</p>
-    <div class="card" id="need-chrome" hidden>
-      <div class="meta"><strong>Open this page in Chrome.</strong></div>
-      <p class="lead" style="margin: .5rem 0 0">USB flashing only works in Google Chrome (or Chromium / Edge). Copy the address and paste it there.</p>
-    </div>
-    <p class="lead">Fallback if you cannot run the desktop flasher. Pick <strong>USB JTAG/serial debug unit</strong>. Linux may still block the port.</p>
-    <esp-web-install-button id="installer" manifest="/api/factory/web-tools.json">
-      <button class="flash" slot="activate" type="button">Flash a box</button>
-      <span class="unsupported" slot="unsupported">Use Chrome or Edge on a computer. This browser cannot talk to USB serial.</span>
-      <span class="unsupported" slot="not-allowed">USB flashing needs HTTPS (or localhost).</span>
-    </esp-web-install-button>
-    <div class="card" id="serial-help" hidden>
-      <div class="meta"><strong>Could not open the USB port</strong></div>
-      <p data-linux>
-        Chromium saw the box, but Linux blocked <code>/dev/ttyACM0</code>.
-        Plug the box in, run this, then click Flash again:
-      </p>
-      <pre data-linux id="serial-cmd">sudo chmod a+rw /dev/ttyACM0</pre>
-      <button type="button" class="copy" data-linux id="copy-cmd">Copy command</button>
-      <p class="meta" data-linux>
-        Permanent (once), then log out and back in:
-        <code>sudo usermod -aG uucp "$USER"</code>
-      </p>
-      <p data-other hidden>
-        Close other programs using the box, unplug it, plug it back in, then try again.
-      </p>
+    <p class="os" id="os">Linux x86_64</p>
+    <pre class="install" id="cmd">curl -fsSL -o searaboom-factory-flasher-linux-amd64 https://searaboom.goossen.dev/api/factory/flasher/linux-amd64 &amp;&amp; chmod +x searaboom-factory-flasher-linux-amd64 &amp;&amp; ./searaboom-factory-flasher-linux-amd64</pre>
+    <button type="button" class="copy" id="copy">Copy</button>
+    <div id="picker" hidden>
+      <button type="button" data-id="linux-amd64">Linux x86_64</button>
+      <button type="button" data-id="linux-arm64">Linux arm64</button>
+      <button type="button" data-id="windows-amd64">Windows x64</button>
+      <button type="button" data-id="darwin-arm64">macOS Apple silicon</button>
+      <button type="button" data-id="darwin-amd64">macOS Intel</button>
     </div>
   </main>
-  <footer>
-    <a href="/ovintes">Ouvintes</a>
-  </footer>
   <script>
-    (function () {
-      const ua = navigator.userAgent || "";
-      const chromeLike = (/Chrome\//.test(ua) || /CriOS\//.test(ua) || /Edg\//.test(ua))
-        && !/OPR\//.test(ua);
-      if (chromeLike) return;
-      const help = document.getElementById("need-chrome");
-      const inst = document.getElementById("installer");
-      if (help) help.hidden = false;
-      if (inst) inst.hidden = true;
-    })();
-    document.getElementById("copy-cmd")?.addEventListener("click", async () => {
-      const cmd = document.getElementById("serial-cmd")?.textContent || "";
-      try {
-        await navigator.clipboard.writeText(cmd);
-        document.getElementById("copy-cmd").textContent = "Copied";
-      } catch {
-        document.getElementById("copy-cmd").textContent = "Copy failed";
+    const FILES = {
+      "linux-amd64": "searaboom-factory-flasher-linux-amd64",
+      "linux-arm64": "searaboom-factory-flasher-linux-arm64",
+      "windows-amd64": "searaboom-factory-flasher-windows-amd64.exe",
+      "darwin-amd64": "searaboom-factory-flasher-darwin-amd64",
+      "darwin-arm64": "searaboom-factory-flasher-darwin-arm64",
+    };
+    const LABELS = {
+      "linux-amd64": "Linux x86_64",
+      "linux-arm64": "Linux arm64",
+      "windows-amd64": "Windows x64",
+      "darwin-amd64": "macOS Intel",
+      "darwin-arm64": "macOS Apple silicon",
+    };
+
+    function oneLiner(id) {
+      const filename = FILES[id];
+      const url = `${location.origin}/api/factory/flasher/${id}`;
+      if (id.startsWith("windows")) {
+        return `curl.exe -fsSL -o ${filename} ${url} && .\\${filename}`;
       }
-    });
+      return `curl -fsSL -o ${filename} ${url} && chmod +x ${filename} && ./${filename}`;
+    }
+
     function guessFlasherId() {
       const ua = navigator.userAgent || "";
+      if (!ua) return null;
+      if (/Android|iPhone|iPad|iPod/i.test(ua)) return null;
       const plat = (navigator.platform || "").toLowerCase();
       const arch = ((navigator.userAgentData && navigator.userAgentData.architecture) || "").toLowerCase();
       const blob = `${ua} ${plat} ${arch}`;
       const isWin = /Win/i.test(ua);
       const isMac = /Mac/i.test(ua) && !/iPhone|iPad/i.test(ua);
+      const isLinux = /Linux/i.test(ua) && !/Android/i.test(ua);
       const arm = /arm64|aarch64|apple silicon/i.test(blob) || (isMac && /arm/i.test(plat));
       if (isWin) return "windows-amd64";
       if (isMac) return arm ? "darwin-arm64" : "darwin-amd64";
-      return arm ? "linux-arm64" : "linux-amd64";
+      if (isLinux) return arm ? "linux-arm64" : "linux-amd64";
+      return null;
     }
-    function howToRun(id, filename) {
-      if (id.startsWith("windows")) return `Save ${filename} and run it.`;
-      if (id.startsWith("darwin")) return `chmod +x ${filename} && ./${filename}  (if macOS blocks it: right-click → Open)`;
-      return `chmod +x ${filename} && ./${filename}  (Linux USB once: ./${filename} --linux-serial)`;
+
+    function copyText(text, btn) {
+      const done = () => { if (btn) btn.textContent = "Copied"; };
+      const fallback = () => {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand("copy"); done(); } catch { if (btn) btn.textContent = "Copy failed"; }
+        ta.remove();
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text).then(done).catch(fallback);
+      }
+      fallback();
     }
-    fetch("/api/factory")
-      .then((r) => r.json())
-      .then((d) => {
-        const el = document.getElementById("status");
-        if (!d.ready) {
-          el.textContent = "No factory image on the server yet.";
-        } else {
-          const ota = d.ota_version ? ` · OTA <strong>${d.ota_version}</strong>` : "";
-          el.innerHTML = `Live USB image <strong>${d.version}</strong>${ota} · ESP32-S3 · 4MB`;
-        }
-        const fl = d.flasher || {};
-        const downloads = fl.downloads || [];
-        const want = guessFlasherId();
-        const match = downloads.find((x) => x.id === want) || downloads[0];
-        const btn = document.getElementById("flasher-dl");
-        const hint = document.getElementById("flasher-hint");
-        const others = document.getElementById("flasher-others");
-        if (match) {
-          btn.href = match.url;
-          btn.textContent = match.ready
-            ? `Download ${match.label}`
-            : `Download ${match.label} (not built on this server yet)`;
-          hint.textContent = howToRun(match.id, match.filename);
-        }
-        others.innerHTML = downloads
-          .filter((x) => x.id !== (match && match.id))
-          .map((x) => `<a href="${x.url}">${x.label}</a>`)
-          .join(" · ");
-      })
-      .catch((e) => {
-        document.getElementById("status").textContent = e.message;
+
+    const cmd = document.getElementById("cmd");
+    const osEl = document.getElementById("os");
+    const picker = document.getElementById("picker");
+    const copyBtn = document.getElementById("copy");
+
+    function show(id) {
+      cmd.textContent = oneLiner(id);
+      if (osEl) osEl.textContent = LABELS[id] || id;
+      picker.querySelectorAll("button").forEach((b) => {
+        b.classList.toggle("on", b.getAttribute("data-id") === id);
       });
+    }
+
+    const detected = guessFlasherId();
+    if (detected) {
+      show(detected);
+    } else {
+      show("linux-amd64");
+      picker.hidden = false;
+    }
+
+    copyBtn.addEventListener("click", () => copyText(cmd.textContent || "", copyBtn));
+    picker.querySelectorAll("button").forEach((b) => {
+      b.addEventListener("click", () => show(b.getAttribute("data-id")));
+    });
   </script>
 </body>
 </html>

@@ -320,9 +320,11 @@ def flasher_manifest() -> dict:
         "version": flasher_tool_version(),
         "downloads": downloads,
         "note": (
-            "One executable per OS/arch. The program fetches the live USB "
-            "factory image from this server at runtime. Firmware is not "
-            "inside the binary."
+            "One executable per OS/arch. Install with the curl one-liner on "
+            "the homepage (chmod +x is in that command so Linux browsers never "
+            "strip execute). Running the file opens a terminal UI — no "
+            "browser. The program fetches the live USB factory image from "
+            "this server at runtime. Firmware is not inside the binary."
         ),
     }
 
