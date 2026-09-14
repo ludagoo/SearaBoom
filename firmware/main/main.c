@@ -336,8 +336,12 @@ void app_main(void)
             }
         } else if (!radio_player_wifi_weak_holding()
                    && (clip_player_playing() == SB_CLIP_WIFI_WEAK
-                       || clip_player_playing() == SB_CLIP_NET_SLOW)
-                   && !radio_player_is_running()) {
+                       || clip_player_playing() == SB_CLIP_NET_SLOW)) {
+            /* Prompt clips only run during hold. teardown_radio() clears
+             * hold without stopping the clip; without this the loop
+             * keeps saying "internet lenta" over a healthy station. */
+            ESP_LOGI(TAG, "stop %s clip - not holding",
+                     clip_player_name(clip_player_playing()));
             clip_player_stop();
         }
         int64_t now = esp_timer_get_time() / 1000;

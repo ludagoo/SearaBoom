@@ -745,6 +745,13 @@ esp_err_t clip_player_play(sb_clip_id_t id, bool loop)
         unlock();
         return ESP_FAIL;
     }
+    /* tick() increments s_loop_plays then calls play() to restart the
+     * same loop. halt_playback() used to zero that count and play() set
+     * it back to 1, so net_slow/wifi_weak never reached max_plays. */
+    int keep_plays = 0;
+    if (loop && s_playing_id == id && s_loop_plays > 0) {
+        keep_plays = s_loop_plays;
+    }
     halt_playback();
     if (ensure_clip_pipe() != ESP_OK) {
         unlock();
@@ -754,7 +761,7 @@ esp_err_t clip_player_play(sb_clip_id_t id, bool loop)
     audio_element_set_music_info(s_m2s, 44100, 1, 16);
     s_loop = loop;
     s_loop_at = 0;
-    s_loop_plays = 1;
+    s_loop_plays = keep_plays > 0 ? keep_plays : 1;
     s_playing_id = id;
     if (id == SB_CLIP_AP_PAGE) {
         s_pending_page = SB_CLIP_COUNT;
