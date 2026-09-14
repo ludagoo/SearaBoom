@@ -46,12 +46,16 @@ PORT = int(os.environ.get("SEARABOOM_PORT", "8080"))
 PUBLIC_URL = os.environ.get("SEARABOOM_PUBLIC_URL", "https://searaboom.goossen.dev").rstrip("/")
 
 LOG_LINES_PER_DEVICE = 2000
-LOGS_DIR = ROOT / "logs"
+LOGS_DIR = Path(os.environ.get("SEARABOOM_LOGS_DIR", str(ROOT / "logs")))
 DEVICES_PATH = LOGS_DIR / "devices.json"
 GEOCODE_PATH = LOGS_DIR / "geocode.json"
 LOG_ACKS_PATH = LOGS_DIR / "log_acks.json"
 GEO_TTL_S = 24 * 3600
 ONLINE_WINDOW_S = 120
+LOG_MAX_BODY = 64 * 1024
+CRASH_RESETS = frozenset({
+    "PANIC", "INT_WDT", "TASK_WDT", "WDT", "BROWNOUT", "CPU_LOCKUP", "PWR_GLITCH",
+})
 PLAYING_WINDOW_S = 180
 DEVICES_SAVE_DEBOUNCE_S = 1.0
 ACKS_SAVE_DEBOUNCE_S = 1.0
@@ -1146,7 +1150,21 @@ def update_registry(device_id: str, data: dict, ip: str, now: float, n_new_lines
     rec["lines"] = int(rec.get("lines") or 0) + n_new_lines
     if ip:
         rec["ip"] = ip
-    for key in ("fw", "reset", "uptime_ms", "heap", "rssi", "station", "seq", "name", "city"):
+
+    new_up = coerce_nonneg_int(data.get("uptime_ms"), None)
+    old_up = coerce_nonneg_int(rec.get("uptime_ms"), None)
+    boot_changed = new_up is not None and (old_up is None or new_up + 2000 < old_up)
+    new_crashes = coerce_nonneg_int(data.get("crashes"), None) if "crashes" in data else None
+    old_crashes = coerce_nonneg_int(rec.get("crashes"), None)
+    crashes_up = new_crashes is not None and (old_crashes is None or new_crashes > old_crashes)
+    reset_val = data.get("reset") if "reset" in data else None
+    if isinstance(reset_val, str) and reset_val in CRASH_RESETS and (boot_changed or crashes_up):
+        rec["last_crash_at"] = utc_iso(now)
+        rec["last_crash_reset"] = reset_val
+        rec["crash_count"] = int(rec.get("crash_count") or 0) + 1
+
+    for key in ("fw", "reset", "uptime_ms", "heap", "heap_min", "heap_int",
+                "crashes", "rssi", "station", "seq", "name", "city"):
         if key not in data:
             continue
         val = data[key]
@@ -1154,6 +1172,16 @@ def update_registry(device_id: str, data: dict, ip: str, now: float, n_new_lines
             if not isinstance(val, str):
                 val = "" if val is None else str(val)
             val = "".join(ch for ch in val.strip() if ch >= " " and ch not in "\"\\<>")[:40]
+        elif key == "rssi":
+            try:
+                val = int(val)
+            except (TypeError, ValueError):
+                continue
+        elif key in ("heap", "heap_min", "heap_int", "crashes", "uptime_ms", "seq"):
+            coerced = coerce_nonneg_int(val, None)
+            if coerced is None:
+                continue
+            val = coerced
         rec[key] = val
     ensure_session_state(rec)
     listen_delta = 0
@@ -1654,11 +1682,28 @@ def firmware_upload():
     return jsonify({"ok": True, "firmware": meta})
 
 
+@app.before_request
+def limit_logs_ingest_body():
+    if request.method == "POST" and request.path == "/api/logs":
+        request.max_content_length = LOG_MAX_BODY
+
+
 @app.post("/api/logs")
 def logs_ingest():
-    data = request.get_json(silent=True) or {}
-    if not isinstance(data, dict):
+    request.max_content_length = LOG_MAX_BODY
+    if request.content_length and request.content_length > LOG_MAX_BODY:
+        return jsonify({"error": "payload too large"}), 413
+    raw = request.get_data(cache=True, as_text=True) or ""
+    if not raw.strip():
         data = {}
+    else:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return jsonify({"error": "invalid json"}), 400
+        if not isinstance(parsed, dict):
+            return jsonify({"error": "invalid json"}), 400
+        data = parsed
     device_id = str(data.get("device_id") or "unknown").strip().lower()
     text = data.get("text") or ""
     if not isinstance(text, str):
@@ -1688,16 +1733,26 @@ def logs_ingest():
         city = (rec.get("city") or "").strip()
         if entries:
             path = device_log_path(device_id)
-            with path.open("a", encoding="utf-8") as f:
-                for entry in entries:
-                    device_logs[device_id].append(entry)
-                    f.write(json.dumps(entry, separators=(",", ":")) + "\n")
-                    publish_log_event(entry)
+            try:
+                LOGS_DIR.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as f:
+                    for entry in entries:
+                        f.write(json.dumps(entry, separators=(",", ":")) + "\n")
+            except OSError as err:
+                app.logger.warning("log persist failed device=%s: %s", device_id, err)
+            for entry in entries:
+                device_logs[device_id].append(entry)
+                publish_log_event(entry)
         schedule_save_devices()
     maybe_geolocate(device_id, ip)
     if city:
         maybe_geocode_city(city)
-    return jsonify({"ok": True, "accepted": n_text, "device_id": device_id})
+    return jsonify({
+        "ok": True,
+        "accepted": n_text,
+        "device_id": device_id,
+        "seq": rec.get("seq"),
+    })
 
 
 @app.get("/api/logs")
@@ -2023,6 +2078,11 @@ def log_acks_compute_fingerprint():
         "is_acked": is_acked,
         "ack": ack_info,
     })
+
+
+@app.errorhandler(413)
+def payload_too_large(_e):
+    return jsonify({"error": "payload too large"}), 413
 
 
 @app.errorhandler(404)
