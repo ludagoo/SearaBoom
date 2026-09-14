@@ -54,7 +54,10 @@ static const char *TAG = "radio_player";
 #define SB_PCM_HOLD_ABS 400
 
 #define SB_ALC_MIN_DB (-36)
-#define SB_ALC_MAX_DB (2)
+#define SB_ALC_CURVE2_MAX_DB 2
+#define SB_ALC_CLICK22_DB 4
+#define SB_ALC_CLICK23_DB 6
+#define SB_ALC_CLICK24_DB 9
 /* Downmix reads slots in series. A mute-slot wait of 20 ticks (20 ms at
  * 1 kHz) on an empty rb adds 20 ms to every 256-sample block (~6 ms) and
  * I2S underruns — choppy welcome. Unused slots must be timeout 0: ADF
@@ -173,8 +176,24 @@ static int volume_to_alc(int volume)
     if (volume > SB_VOLUME_MAX) {
         volume = SB_VOLUME_MAX;
     }
-    return SB_ALC_MIN_DB
-        + ((volume - 1) * (SB_ALC_MAX_DB - SB_ALC_MIN_DB)) / (SB_VOLUME_MAX - 1);
+    /* vol_curve v3: knobs 1–21 match v2. 22/23/24 add headroom. */
+    if (volume <= SB_VOL_CURVE2_MAX) {
+        return SB_ALC_MIN_DB
+            + ((volume - 1) * (SB_ALC_CURVE2_MAX_DB - SB_ALC_MIN_DB))
+            / (SB_VOL_CURVE2_MAX - 1);
+    }
+    if (volume == 22) {
+        return SB_ALC_CLICK22_DB;
+    }
+    if (volume == 23) {
+        return SB_ALC_CLICK23_DB;
+    }
+    return SB_ALC_CLICK24_DB;
+}
+
+int radio_player_alc_db(int volume)
+{
+    return volume_to_alc(volume);
 }
 
 esp_err_t radio_player_set_volume(int volume)

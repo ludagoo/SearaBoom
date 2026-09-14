@@ -145,7 +145,8 @@ static void handle_line(char *line)
         log_shipper_printf("  reboot     - restart\n");
         log_shipper_printf("  wifi wipe  - clear saved SSID/pass and reboot into setup AP\n");
         log_shipper_printf("  http       - station HTTP ringbuf + stall snapshot\n");
-        log_shipper_printf("  vol [n]    - show or set volume 1-21 (min/QA: vol 1)\n");
+        log_shipper_printf("  vol [n]    - show or set volume %d-%d (min/QA: vol %d)\n",
+               SB_VOLUME_MIN, SB_VOLUME_MAX, SB_VOLUME_MIN);
         log_shipper_printf("  clip name  - play a UI clip (welcome|connected|page|...|stop)\n");
         log_shipper_printf("  audiotest  - PCM start/end markers + AAC clip duration at the mixer tap\n");
         log_shipper_printf("  touch      - show per-pad sensitivity\n");
@@ -241,9 +242,10 @@ static void handle_line(char *line)
             config_store_save(&cfg);
             radio_player_set_volume(v);
             clip_player_set_volume(v);
-            log_shipper_printf("volume=%d\n", v);
+            log_shipper_printf("volume=%d alc=%d dB\n", v, radio_player_alc_db(v));
         } else {
-            log_shipper_printf("volume=%d\n", cfg.volume);
+            log_shipper_printf("volume=%d alc=%d dB\n", cfg.volume,
+                   radio_player_alc_db(cfg.volume));
         }
         return;
     }

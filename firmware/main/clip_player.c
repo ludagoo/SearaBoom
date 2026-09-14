@@ -123,7 +123,7 @@ static const uint8_t *clip_end[SB_CLIP_COUNT] = {
     [SB_CLIP_OTA_DONE] = ota_done_aac_end,
 };
 
-static int s_volume = SB_VOLUME_MAX;
+static int s_volume = SB_DEFAULT_VOLUME;
 static SemaphoreHandle_t s_mu;
 static audio_pipeline_handle_t s_pipe;
 static audio_element_handle_t s_blob;

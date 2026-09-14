@@ -12,8 +12,11 @@
 #define SB_URL2 "https://8404.brasilstream.com.br/stream"
 #define SB_AP_SSID "SearaBoom"
 #define SB_VOLUME_MIN 1
-#define SB_VOLUME_MAX 21
-#define SB_DEFAULT_VOLUME SB_VOLUME_MAX
+#define SB_VOLUME_MAX 24
+/* v2 top: 1–21 stay -36…+2 dB. Extra clicks 22/23/24 are +4/+6/+9. */
+#define SB_VOL_CURVE2_MAX 21
+#define SB_VOL_CURVE 3
+#define SB_DEFAULT_VOLUME SB_VOL_CURVE2_MAX
 #define SB_DEBOUNCE_MS 250
 
 void wifi_set_sta_retry(bool on);
