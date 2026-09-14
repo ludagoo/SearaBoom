@@ -218,6 +218,20 @@ int radio_player_get_volume(void)
     return s_volume;
 }
 
+int radio_player_nudge_volume(int delta)
+{
+    int v = s_volume + delta;
+    if (v < SB_VOLUME_MIN) {
+        v = SB_VOLUME_MIN;
+    }
+    if (v > SB_VOLUME_MAX) {
+        v = SB_VOLUME_MAX;
+    }
+    ESP_LOGI(TAG, "nudge %d%+d -> %d max=%d", s_volume, delta, v, SB_VOLUME_MAX);
+    radio_player_set_volume(v);
+    return v;
+}
+
 bool radio_player_has_music_info(void)
 {
     return s_got_music_info;

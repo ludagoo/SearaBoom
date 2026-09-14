@@ -60,6 +60,11 @@ def test_firmware_wires_curve_and_help() -> None:
     assert "SB_ALC_CLICK24_DB 9" in RP
     assert "SB_VOL_CURVE" in CS
     assert "SB_VOLUME_MAX" in SC
+    assert "radio_player_nudge_volume" in RP
+    main_c = (ROOT / "firmware/main/main.c").read_text()
+    assert "pad vol" in main_c
+    assert "radio_player_nudge_volume" in main_c
+    assert "radio_player_prefetch(url, radio_player_get_volume())" in main_c
     assert "vol_curve v3" in RP
 
 
