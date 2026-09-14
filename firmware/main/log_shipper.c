@@ -30,12 +30,15 @@ static const char *TAG = "log_shipper";
 #define LOG_POST_MAX 1536
 #define LOG_FAIL_BACKOFF_MS 45000
 #define LOG_SETTLE_MS 25000
+#define LOG_SETTLE_CRASH_MS 8000
 #define LOG_PERIOD_MS 25000
 #define LOG_TICK_MS 500
 #define LOG_SPILL_PERIOD_MS 10000
 #define LOG_FLASH_CAP (48 * 1024)
 #define LOG_MU_WAIT_MS 5
 #define LOG_TLS_MIN_INTERNAL 12288
+#define LOG_CRASH_MAGIC 0xA5B00C00u
+#define LOG_CRASH_LOOP 3
 #define LOGQ_PATH "/spiffs/logq"
 #define LOGQ_TMP "/spiffs/logq.tmp"
 
@@ -68,6 +71,13 @@ static size_t s_flash_size;
 static uint32_t s_seq;
 static int s_last_http = -1;
 static int64_t s_wifi_up_ms;
+static sb_config_t s_cfg_cache;
+static int64_t s_cfg_at_ms;
+
+RTC_NOINIT_ATTR static uint32_t s_crash_magic;
+RTC_NOINIT_ATTR static uint32_t s_crash_count;
+RTC_NOINIT_ATTR static uint32_t s_seq_magic;
+RTC_NOINIT_ATTR static uint32_t s_seq_rtc;
 
 static const char *reset_token(void)
 {
@@ -99,6 +109,58 @@ static const char *reset_token(void)
 #endif
     default: return "UNKNOWN";
     }
+}
+
+static bool reset_is_crash(esp_reset_reason_t r)
+{
+    return r == ESP_RST_PANIC || r == ESP_RST_INT_WDT || r == ESP_RST_TASK_WDT
+        || r == ESP_RST_WDT || r == ESP_RST_BROWNOUT
+#ifdef ESP_RST_CPU_LOCKUP
+        || r == ESP_RST_CPU_LOCKUP
+#endif
+#ifdef ESP_RST_PWR_GLITCH
+        || r == ESP_RST_PWR_GLITCH
+#endif
+        ;
+}
+
+static void crash_boot(void)
+{
+    esp_reset_reason_t r = esp_reset_reason();
+    if (s_crash_magic != LOG_CRASH_MAGIC) {
+        s_crash_magic = LOG_CRASH_MAGIC;
+        s_crash_count = 0;
+    }
+    if (s_seq_magic != LOG_CRASH_MAGIC) {
+        s_seq_magic = LOG_CRASH_MAGIC;
+        s_seq_rtc = 0;
+    }
+    if (reset_is_crash(r)) {
+        s_crash_count++;
+    } else if (r == ESP_RST_POWERON || r == ESP_RST_EXT) {
+        s_crash_count = 0;
+        s_seq_rtc = 0;
+    }
+    s_seq = s_seq_rtc;
+}
+
+uint32_t log_shipper_crash_count(void)
+{
+    return s_crash_count;
+}
+
+bool log_shipper_crash_loop(void)
+{
+    return s_crash_count >= LOG_CRASH_LOOP;
+}
+
+void log_shipper_mark_healthy(void)
+{
+    if (s_crash_count == 0) {
+        return;
+    }
+    ESP_LOGI(TAG, "healthy — clearing crash_count=%u", (unsigned)s_crash_count);
+    s_crash_count = 0;
 }
 
 static bool line_is_ew(const char *line, size_t n)
@@ -634,25 +696,38 @@ static int get_rssi(void)
     return 0;
 }
 
+static void refresh_cfg_cache(void)
+{
+    int64_t now = esp_timer_get_time() / 1000;
+    if (s_cfg_at_ms && (now - s_cfg_at_ms) < 30000) {
+        return;
+    }
+    memset(&s_cfg_cache, 0, sizeof(s_cfg_cache));
+    config_store_load(&s_cfg_cache);
+    s_cfg_at_ms = now;
+}
+
 static bool ship_chunk(void)
 {
-    sb_config_t cfg;
-    memset(&cfg, 0, sizeof(cfg));
-    config_store_load(&cfg);
+    refresh_cfg_cache();
 
     uint32_t seq = s_seq + 1;
     int64_t now_ms = esp_timer_get_time() / 1000;
     int off = snprintf(s_payload, sizeof(s_payload),
                        "{\"device_id\":\"%s\",\"fw\":\"%s\",\"reset\":\"%s\","
-                       "\"uptime_ms\":%lld,\"heap\":%u,\"rssi\":%d,\"station\":\"%s\","
+                       "\"uptime_ms\":%lld,\"heap\":%u,\"heap_min\":%u,\"heap_int\":%u,"
+                       "\"crashes\":%u,\"rssi\":%d,\"station\":\"%s\","
                        "\"name\":\"%s\",\"city\":\"%s\","
                        "\"playing\":%s,\"listen_s\":%u,\"session_s\":%u,"
                        "\"seq\":%u,\"ts_ms\":%lld,\"text\":",
                        s_device_id, s_fw, s_reset,
                        (long long)now_ms, (unsigned)esp_get_free_heap_size(),
-                       get_rssi(), cfg.url_key[0] ? cfg.url_key : "",
-                       cfg.name[0] ? cfg.name : "",
-                       cfg.city[0] ? cfg.city : "",
+                       (unsigned)esp_get_minimum_free_heap_size(),
+                       (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                       (unsigned)s_crash_count, get_rssi(),
+                       s_cfg_cache.url_key[0] ? s_cfg_cache.url_key : "",
+                       s_cfg_cache.name[0] ? s_cfg_cache.name : "",
+                       s_cfg_cache.city[0] ? s_cfg_cache.city : "",
                        listen_stats_playing() ? "true" : "false",
                        (unsigned)listen_stats_listen_s(),
                        (unsigned)listen_stats_session_s(),
@@ -722,6 +797,8 @@ static bool ship_chunk(void)
     esp_http_client_cleanup(client);
     if (ok) {
         s_seq = seq;
+        s_seq_rtc = seq;
+        s_seq_magic = LOG_CRASH_MAGIC;
     }
     return ok;
 }
@@ -770,7 +847,8 @@ static void shipper_task(void *arg)
         }
 
         if (s_wifi_up && !s_settled && sta) {
-            if ((now - s_wifi_up_ms) >= LOG_SETTLE_MS) {
+            int settle = (s_crash_count > 0) ? LOG_SETTLE_CRASH_MS : LOG_SETTLE_MS;
+            if ((now - s_wifi_up_ms) >= settle) {
                 s_settled = true;
                 s_flush_req = true;
                 if (!announced) {
@@ -871,13 +949,15 @@ esp_err_t log_shipper_init(void)
 
     const esp_app_desc_t *app = esp_app_get_description();
     strncpy(s_fw, app && app->version[0] ? app->version : "unknown", sizeof(s_fw) - 1);
+    crash_boot();
     strncpy(s_reset, reset_token(), sizeof(s_reset) - 1);
 
     s_prev_vprintf = esp_log_set_vprintf(shipper_vprintf);
     s_paused = false;
     s_inited = true;
 
-    ESP_LOGI(TAG, "boot fw=%s reset=%s", s_fw, s_reset);
+    ESP_LOGI(TAG, "boot fw=%s reset=%s crashes=%u seq=%u", s_fw, s_reset,
+             (unsigned)s_crash_count, (unsigned)s_seq);
     ESP_LOGI(TAG, "PSRAM log buf ring=%u chunk=%u payload=%u spill=%u",
              (unsigned)sizeof(s_ring), (unsigned)sizeof(s_chunk),
              (unsigned)sizeof(s_payload), (unsigned)sizeof(s_spill));
@@ -911,6 +991,12 @@ void log_shipper_wifi_up(void)
     s_settled = false;
 }
 
+void log_shipper_wifi_down(void)
+{
+    s_wifi_up = false;
+    s_settled = false;
+}
+
 void log_shipper_flush(void)
 {
     s_flush_req = true;
@@ -925,11 +1011,13 @@ void log_shipper_logstat(void)
         spill = s_spill_len;
         xSemaphoreGive(s_mu);
     }
-    log_shipper_printf("logstat ring=%u flash=%u paused=%d ready=%d seq=%u http=%d\n",
+    log_shipper_printf("logstat ring=%u flash=%u paused=%d ready=%d seq=%u http=%d crashes=%u heap_int=%u\n",
            (unsigned)ring,
            (unsigned)(flash_unread() + spill),
            (int)s_paused,
            (int)(s_inited && s_wifi_up && s_settled),
            (unsigned)s_seq,
-           s_last_http);
+           s_last_http,
+           (unsigned)s_crash_count,
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 }

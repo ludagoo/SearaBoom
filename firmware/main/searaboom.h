@@ -39,5 +39,6 @@ typedef struct {
 
 bool wifi_sta_got_ip(void);
 esp_err_t wifi_sta_join(const sb_config_t *cfg);
+void wifi_reconnect_tick(void);
 
 #endif

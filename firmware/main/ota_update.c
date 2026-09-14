@@ -6,9 +6,11 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_task_wdt.h"
+#include "esp_attr.h"
 #include "searaboom.h"
 #include "esp_http_client.h"
-#include "esp_https_ota.h"
+#include "esp_ota_ops.h"
+#include "esp_heap_caps.h"
 #include "esp_crt_bundle.h"
 #include "esp_app_desc.h"
 #include "cJSON.h"
@@ -25,6 +27,79 @@ static const char *TAG = "ota_update";
 static volatile bool s_busy;
 static TaskHandle_t s_task;
 static volatile ota_policy_t s_kick_policy = OTA_POLICY_STABLE;
+
+#define OTA_CRASH_MAGIC 0x0A500A01u
+#define OTA_CRASH_LOOP 3
+
+RTC_NOINIT_ATTR static uint32_t s_ota_crash_magic;
+RTC_NOINIT_ATTR static uint32_t s_ota_crash_count;
+RTC_NOINIT_ATTR static uint32_t s_ota_inflight;
+
+static bool ota_reset_is_crash(esp_reset_reason_t r)
+{
+    return r == ESP_RST_PANIC || r == ESP_RST_INT_WDT || r == ESP_RST_TASK_WDT
+        || r == ESP_RST_WDT || r == ESP_RST_BROWNOUT
+#ifdef ESP_RST_CPU_LOCKUP
+        || r == ESP_RST_CPU_LOCKUP
+#endif
+#ifdef ESP_RST_PWR_GLITCH
+        || r == ESP_RST_PWR_GLITCH
+#endif
+        ;
+}
+
+static void ota_crash_boot(void)
+{
+    static bool done;
+    if (done) {
+        return;
+    }
+    done = true;
+
+    esp_reset_reason_t r = esp_reset_reason();
+    if (s_ota_crash_magic != OTA_CRASH_MAGIC) {
+        s_ota_crash_magic = OTA_CRASH_MAGIC;
+        s_ota_crash_count = 0;
+        s_ota_inflight = 0;
+        return;
+    }
+    if (s_ota_inflight == OTA_CRASH_MAGIC && ota_reset_is_crash(r)) {
+        s_ota_crash_count++;
+        ESP_LOGW(TAG, "OTA in-flight crash count=%u reset=%d",
+                 (unsigned)s_ota_crash_count, (int)r);
+    }
+    s_ota_inflight = 0;
+    if (r == ESP_RST_POWERON || r == ESP_RST_EXT) {
+        s_ota_crash_count = 0;
+    }
+}
+
+bool ota_update_skip_boot(void)
+{
+    ota_crash_boot();
+    return s_ota_crash_count >= OTA_CRASH_LOOP;
+}
+
+void ota_update_mark_healthy(void)
+{
+    ota_crash_boot();
+    if (s_ota_crash_count == 0) {
+        return;
+    }
+    ESP_LOGI(TAG, "healthy — clearing ota_crash_count=%u",
+             (unsigned)s_ota_crash_count);
+    s_ota_crash_count = 0;
+}
+
+static void ota_inflight_begin(void)
+{
+    s_ota_inflight = OTA_CRASH_MAGIC;
+}
+
+static void ota_inflight_end(void)
+{
+    s_ota_inflight = 0;
+}
 
 bool ota_update_is_busy(void)
 {
@@ -58,39 +133,229 @@ static void announce_update_found(void)
     clip_player_release_idle();
 }
 
-static esp_err_t download_firmware(const char *fw_url)
+#define OTA_RETRY_MAX 4
+#define OTA_TLS_MIN_INTERNAL 12288
+#define OTA_LOG_EVERY (128 * 1024)
+#define OTA_READ_BUF 1024
+
+static void ota_wdt_feed(void)
 {
-    ESP_LOGI(TAG, "OTA download (audio off, full speed)");
-    
-    /* esp_https_ota() blocks for 30-60s downloading the full firmware binary.
-     * The WDT timeout is 15s, so unsubscribe the main task during download to
-     * prevent spurious panic. Re-subscribe after completion. The OTA task itself
-     * is not subscribed, so this only affects the calling (main) task. */
-    bool was_subscribed = (esp_task_wdt_status(NULL) == ESP_OK);
-    if (was_subscribed) {
-        esp_task_wdt_delete(NULL);
-        ESP_LOGI(TAG, "WDT unsubscribed for blocking OTA download");
+    if (esp_task_wdt_status(NULL) == ESP_OK) {
+        esp_task_wdt_reset();
     }
-    
-    esp_http_client_config_t ota_http = {
+}
+
+static void ota_wdt_unsub(void)
+{
+    if (esp_task_wdt_status(NULL) == ESP_OK) {
+        esp_task_wdt_delete(NULL);
+    }
+}
+
+/* Same-boot resume: keep the OTA write handle and retry HTTP with Range.
+ * Signing / unbrick is out of scope — esp_ota_end() still validates the image. */
+static esp_err_t ota_http_append(const char *fw_url, size_t already,
+                                esp_ota_handle_t ota, size_t *written, int *total_size)
+{
+    if (!fw_url || !ota || !written) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    size_t avail = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (avail < OTA_TLS_MIN_INTERNAL) {
+        ESP_LOGW(TAG, "OTA TLS heap low: %u < %d", (unsigned)avail, OTA_TLS_MIN_INTERNAL);
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_http_client_config_t cfg = {
         .url = fw_url,
-        .timeout_ms = 60000,
+        .timeout_ms = 20000,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .keep_alive_enable = true,
+        .buffer_size = 1024,
+        .buffer_size_tx = 512,
     };
-    esp_https_ota_config_t ota_config = {
-        .http_config = &ota_http,
-    };
-    esp_err_t err = esp_https_ota(&ota_config);
-    
-    if (was_subscribed) {
-        if (esp_task_wdt_add(NULL) == ESP_OK) {
-            ESP_LOGI(TAG, "WDT re-subscribed after OTA download");
-        } else {
-            ESP_LOGW(TAG, "Failed to re-subscribe to WDT after OTA");
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) {
+        return ESP_ERR_NO_MEM;
+    }
+    char range[48];
+    if (already > 0) {
+        snprintf(range, sizeof(range), "bytes=%u-", (unsigned)already);
+        esp_http_client_set_header(client, "Range", range);
+        ESP_LOGI(TAG, "OTA Range %s", range);
+    }
+
+    ota_wdt_feed();
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "OTA HTTP open: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        return err;
+    }
+    ota_wdt_feed();
+    int clen = esp_http_client_fetch_headers(client);
+    int status = esp_http_client_get_status_code(client);
+    ota_wdt_feed();
+
+    size_t skip = 0;
+    if (status == 206) {
+        if (clen > 0 && total_size && *total_size < 0) {
+            *total_size = (int)already + clen;
+        }
+    } else if (status == 200) {
+        skip = already;
+        if (clen > 0 && total_size) {
+            *total_size = clen;
+        }
+    } else if (status == 416) {
+        /* Range unsatisfiable: sequential writes from 0, so the resource is
+         * at most `already` bytes. Let esp_ota_end validate rather than abort
+         * a complete image. Optional Content-Range: bytes * / N. */
+        char *crange = NULL;
+        if (total_size && esp_http_client_get_header(client, "Content-Range", &crange) == ESP_OK
+            && crange) {
+            const char *star = strstr(crange, "*/");
+            if (star) {
+                int n = atoi(star + 2);
+                if (n > 0) {
+                    *total_size = n;
+                }
+            }
+        }
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        ESP_LOGI(TAG, "OTA Range unsatisfiable (416) at %u — treating as complete",
+                 (unsigned)already);
+        return ESP_OK;
+    } else {
+        ESP_LOGW(TAG, "OTA HTTP status=%d", status);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return ESP_FAIL;
+    }
+
+    char buf[OTA_READ_BUF];
+    size_t skipped = 0;
+    size_t last_log = *written;
+    while (true) {
+        ota_wdt_feed();
+        int n = esp_http_client_read(client, buf, sizeof(buf));
+        if (n < 0) {
+            err = ESP_FAIL;
+            ESP_LOGW(TAG, "OTA read err at %u", (unsigned)*written);
+            break;
+        }
+        if (n == 0) {
+            if (!esp_http_client_is_complete_data_received(client)) {
+                ESP_LOGW(TAG, "OTA HTTP closed early at %u", (unsigned)*written);
+                err = ESP_FAIL;
+            } else {
+                err = ESP_OK;
+            }
+            break;
+        }
+        const char *p = buf;
+        int use = n;
+        if (skip > skipped) {
+            size_t still = skip - skipped;
+            if ((size_t)use <= still) {
+                skipped += (size_t)use;
+                continue;
+            }
+            p += still;
+            use -= (int)still;
+            skipped = skip;
+        }
+        if (use <= 0) {
+            continue;
+        }
+        err = esp_ota_write(ota, p, (size_t)use);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "OTA write: %s", esp_err_to_name(err));
+            break;
+        }
+        *written += (size_t)use;
+        if (*written - last_log >= OTA_LOG_EVERY) {
+            last_log = *written;
+            if (total_size && *total_size > 0) {
+                ESP_LOGI(TAG, "OTA progress %u/%d", (unsigned)*written, *total_size);
+            } else {
+                ESP_LOGI(TAG, "OTA wrote %u", (unsigned)*written);
+            }
         }
     }
-    
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+
+    if (err == ESP_OK && total_size && *total_size > 0 && *written < (size_t)*total_size) {
+        ESP_LOGW(TAG, "OTA short %u/%d", (unsigned)*written, *total_size);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    return err;
+}
+
+static esp_err_t download_firmware(const char *fw_url)
+{
+    ESP_LOGI(TAG, "OTA download (audio off, resumable)");
+    const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
+    if (!part) {
+        ESP_LOGE(TAG, "no OTA partition");
+        return ESP_FAIL;
+    }
+
+    ota_inflight_begin();
+
+    esp_ota_handle_t ota = 0;
+    /* Incremental erase: a full 1.75 MB erase at begin can brownout USB 5 V. */
+    esp_err_t err = esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &ota);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_begin: %s", esp_err_to_name(err));
+        ota_inflight_end();
+        return err;
+    }
+
+    size_t written = 0;
+    int total_size = -1;
+    for (int attempt = 0; attempt < OTA_RETRY_MAX; attempt++) {
+        if (total_size > 0 && written >= (size_t)total_size) {
+            ESP_LOGI(TAG, "OTA already complete %u/%d — skip fetch",
+                     (unsigned)written, total_size);
+            err = ESP_OK;
+            break;
+        }
+        if (attempt > 0) {
+            int wait_ms = 1500 * attempt;
+            ESP_LOGW(TAG, "OTA resume attempt %d at %u bytes (wait %d ms)",
+                     attempt, (unsigned)written, wait_ms);
+            vTaskDelay(pdMS_TO_TICKS(wait_ms));
+            ota_wdt_feed();
+        }
+        err = ota_http_append(fw_url, written, ota, &written, &total_size);
+        if (err == ESP_OK) {
+            break;
+        }
+    }
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA download failed after %u bytes: %s",
+                 (unsigned)written, esp_err_to_name(err));
+        esp_ota_abort(ota);
+        ota_inflight_end();
+        return err;
+    }
+
+    ota_wdt_feed();
+    err = esp_ota_end(ota);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_end: %s", esp_err_to_name(err));
+        ota_inflight_end();
+        return err;
+    }
+    err = esp_ota_set_boot_partition(part);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_set_boot_partition: %s", esp_err_to_name(err));
+    }
+    ota_inflight_end();
     return err;
 }
 
@@ -165,6 +430,12 @@ esp_err_t ota_update_check(ota_policy_t policy)
     const esp_app_desc_t *app = esp_app_get_description();
     const char *policy_name = (policy == OTA_POLICY_DEV) ? "dev" : "stable";
     ESP_LOGI(TAG, "OTA check policy=%s current=%s", policy_name, app->version);
+
+    if (policy == OTA_POLICY_STABLE && ota_update_skip_boot()) {
+        ESP_LOGW(TAG, "OTA skipped, ota-inflight crash count=%u (serial ota still works)",
+                 (unsigned)s_ota_crash_count);
+        return ESP_ERR_INVALID_STATE;
+    }
 
     /* Version JSON is a small GET. Stopping the radio here made boot go
      * live, then silent, then start the stream again. Only pause the
@@ -283,13 +554,21 @@ static void ota_task_fn(void *arg)
 {
     (void)arg;
     for (;;) {
+        /* Idle on notify without TWDT: a subscribed task blocked here
+         * panics at CONFIG_ESP_TASK_WDT_TIMEOUT_S (15 s) every boot. */
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        if (esp_task_wdt_add(NULL) != ESP_OK) {
+            ESP_LOGW(TAG, "OTA task WDT add failed");
+        }
+        ota_wdt_feed();
         ota_policy_t pol = s_kick_policy;
         if (pol == OTA_POLICY_DEV) {
             ota_update_check(OTA_POLICY_DEV);
         } else {
             ota_update_check_on_boot();
         }
+        ota_wdt_feed();
+        ota_wdt_unsub();
     }
 }
 
@@ -298,6 +577,7 @@ esp_err_t ota_update_start_task(void)
     if (s_task) {
         return ESP_OK;
     }
+    ota_crash_boot();
     /* Allocate at boot while internal heap still has a 12 KB hole. */
     if (xTaskCreatePinnedToCore(ota_task_fn, "ota", 12288, NULL, 5, &s_task, 1) != pdPASS) {
         ESP_LOGE(TAG, "OTA task create failed at boot");
