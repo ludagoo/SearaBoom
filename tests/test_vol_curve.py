@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""vol_curve v4: 1–21 stay v2; 22–26 add I2S ALC headroom without re-span."""
+"""vol_curve v5: 1–21 stay v2; 22–34 add I2S ALC headroom without re-span."""
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,9 +10,24 @@ SC = (ROOT / "firmware/main/serial_cmd.c").read_text()
 
 SB_VOLUME_MIN = 1
 SB_VOL_CURVE2_MAX = 21
-SB_VOLUME_MAX = 26
+SB_VOLUME_MAX = 34
 SB_ALC_MIN_DB = -36
 SB_ALC_CURVE2_MAX_DB = 2
+EXTRA = {
+    22: 4,
+    23: 6,
+    24: 9,
+    25: 12,
+    26: 15,
+    27: 21,
+    28: 27,
+    29: 33,
+    30: 39,
+    31: 45,
+    32: 51,
+    33: 57,
+    34: 63,
+}
 
 
 def volume_to_alc(volume: int) -> int:
@@ -24,14 +39,13 @@ def volume_to_alc(volume: int) -> int:
         return SB_ALC_MIN_DB + ((volume - 1) * (SB_ALC_CURVE2_MAX_DB - SB_ALC_MIN_DB)) // (
             SB_VOL_CURVE2_MAX - 1
         )
-    extra = {22: 4, 23: 6, 24: 9, 25: 12, 26: 15}
-    return extra[volume]
+    return EXTRA[volume]
 
 
 def test_headers_accept_new_max() -> None:
-    assert "#define SB_VOLUME_MAX 26" in H
+    assert "#define SB_VOLUME_MAX 34" in H
     assert "#define SB_VOL_CURVE2_MAX 21" in H
-    assert "#define SB_VOL_CURVE 4" in H
+    assert "#define SB_VOL_CURVE 5" in H
     assert "#define SB_DEFAULT_VOLUME SB_VOL_CURVE2_MAX" in H
 
 
@@ -48,12 +62,11 @@ def test_v2_steps_unchanged() -> None:
 
 
 def test_extra_clicks() -> None:
-    assert volume_to_alc(22) == 4
-    assert volume_to_alc(23) == 6
-    assert volume_to_alc(24) == 9
-    assert volume_to_alc(25) == 12
-    assert volume_to_alc(26) == 15
-    assert volume_to_alc(27) == 15
+    for step, alc in EXTRA.items():
+        assert volume_to_alc(step) == alc, (step, volume_to_alc(step), alc)
+    assert volume_to_alc(35) == 63
+    assert EXTRA[SB_VOLUME_MAX] == 63
+    assert EXTRA[26] == 15
 
 
 def test_firmware_wires_curve_and_help() -> None:
@@ -62,6 +75,8 @@ def test_firmware_wires_curve_and_help() -> None:
     assert "SB_ALC_CLICK24_DB 9" in RP
     assert "SB_ALC_CLICK25_DB 12" in RP
     assert "SB_ALC_CLICK26_DB 15" in RP
+    assert "SB_ALC_CLICK27_DB 21" in RP
+    assert "SB_ALC_CLICK34_DB 63" in RP
     assert "SB_VOL_CURVE" in CS
     assert "SB_VOLUME_MAX" in SC
     assert "radio_player_nudge_volume" in RP
@@ -69,7 +84,11 @@ def test_firmware_wires_curve_and_help() -> None:
     assert "pad vol" in main_c
     assert "radio_player_nudge_volume" in main_c
     assert "radio_player_prefetch(url, radio_player_get_volume())" in main_c
-    assert "vol_curve v4" in RP
+    assert "vol_curve v5" in RP
+    assert "i2s_cfg.volume = SB_ALC_MIN_DB" in RP
+    assert "i2s_cfg.chan_cfg.auto_clear = true" in RP
+    assert "i2s_set_clk_gated" in RP
+    assert "i2s_alc_gate" in RP
 
 
 if __name__ == "__main__":

@@ -12,10 +12,10 @@
 #define SB_URL2 "https://8404.brasilstream.com.br/stream"
 #define SB_AP_SSID "SearaBoom"
 #define SB_VOLUME_MIN 1
-#define SB_VOLUME_MAX 26
-/* v2 top: 1–21 stay -36…+2 dB. Extra clicks 22–26 are +4/+6/+9/+12/+15. */
+#define SB_VOLUME_MAX 34
+/* v2 top: 1–21 stay -36…+2 dB. Extra clicks 22–34 add +4…+63, not a re-span. */
 #define SB_VOL_CURVE2_MAX 21
-#define SB_VOL_CURVE 4
+#define SB_VOL_CURVE 5
 #define SB_DEFAULT_VOLUME SB_VOL_CURVE2_MAX
 #define SB_DEBOUNCE_MS 250
 

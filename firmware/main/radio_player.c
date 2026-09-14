@@ -60,6 +60,34 @@ static const char *TAG = "radio_player";
 #define SB_ALC_CLICK24_DB 9
 #define SB_ALC_CLICK25_DB 12
 #define SB_ALC_CLICK26_DB 15
+/* After +15: +6 dB clicks to +63. Knob 27–34. */
+#define SB_ALC_CLICK27_DB 21
+#define SB_ALC_CLICK28_DB 27
+#define SB_ALC_CLICK29_DB 33
+#define SB_ALC_CLICK30_DB 39
+#define SB_ALC_CLICK31_DB 45
+#define SB_ALC_CLICK32_DB 51
+#define SB_ALC_CLICK33_DB 57
+#define SB_ALC_CLICK34_DB 63
+/* Knob 22+ I2S ALC (dB). 1–21 stay v2. */
+static const int s_extra_alc[] = {
+    SB_ALC_CLICK22_DB,
+    SB_ALC_CLICK23_DB,
+    SB_ALC_CLICK24_DB,
+    SB_ALC_CLICK25_DB,
+    SB_ALC_CLICK26_DB,
+    SB_ALC_CLICK27_DB,
+    SB_ALC_CLICK28_DB,
+    SB_ALC_CLICK29_DB,
+    SB_ALC_CLICK30_DB,
+    SB_ALC_CLICK31_DB,
+    SB_ALC_CLICK32_DB,
+    SB_ALC_CLICK33_DB,
+    SB_ALC_CLICK34_DB,
+};
+_Static_assert(
+    SB_VOLUME_MAX == SB_VOL_CURVE2_MAX + (int)(sizeof(s_extra_alc) / sizeof(s_extra_alc[0])),
+    "extra ALC table must cover knobs 22..max");
 /* Downmix reads slots in series. A mute-slot wait of 20 ticks (20 ms at
  * 1 kHz) on an empty rb adds 20 ms to every 256-sample block (~6 ms) and
  * I2S underruns — choppy welcome. Unused slots must be timeout 0: ADF
@@ -178,25 +206,21 @@ static int volume_to_alc(int volume)
     if (volume > SB_VOLUME_MAX) {
         volume = SB_VOLUME_MAX;
     }
-    /* vol_curve v4: knobs 1–21 match v2. 22–26 add headroom, not a re-span. */
+    /* vol_curve v5: knobs 1–21 match v2. 22–34 add headroom, not a re-span. */
     if (volume <= SB_VOL_CURVE2_MAX) {
         return SB_ALC_MIN_DB
             + ((volume - 1) * (SB_ALC_CURVE2_MAX_DB - SB_ALC_MIN_DB))
             / (SB_VOL_CURVE2_MAX - 1);
     }
-    if (volume == 22) {
-        return SB_ALC_CLICK22_DB;
+    int idx = volume - (SB_VOL_CURVE2_MAX + 1);
+    int n = (int)(sizeof(s_extra_alc) / sizeof(s_extra_alc[0]));
+    if (idx < 0) {
+        idx = 0;
     }
-    if (volume == 23) {
-        return SB_ALC_CLICK23_DB;
+    if (idx >= n) {
+        idx = n - 1;
     }
-    if (volume == 24) {
-        return SB_ALC_CLICK24_DB;
-    }
-    if (volume == 25) {
-        return SB_ALC_CLICK25_DB;
-    }
-    return SB_ALC_CLICK26_DB;
+    return s_extra_alc[idx];
 }
 
 int radio_player_alc_db(int volume)
@@ -635,6 +659,25 @@ static void mix_mute_slot(int slot)
 
 static void mix_route_clip_and_radio(void);
 
+/* Software ALC does not cover leftover DMA. Keep the ALC field at -36
+ * across driver start and set_clk; IDF 5 auto_clear wipes TX DMA. */
+static void i2s_alc_gate(void)
+{
+    if (s_i2s) {
+        i2s_alc_volume_set(s_i2s, SB_ALC_MIN_DB);
+    }
+}
+
+static void i2s_set_clk_gated(void)
+{
+    if (!s_i2s) {
+        return;
+    }
+    i2s_alc_gate();
+    i2s_stream_set_clk(s_i2s, SB_MIX_SR, 16, 2);
+    i2s_alc_gate();
+}
+
 static void mix_rewind(void)
 {
     if (!s_mix_pipe) {
@@ -656,6 +699,8 @@ static void mix_restart(void)
     audio_element_state_t st = audio_element_get_state(s_downmix);
     audio_element_state_t i2s_st = s_i2s ? audio_element_get_state(s_i2s) : AEL_STATE_RUNNING;
     ESP_LOGW(TAG, "mix restart mix=%d i2s=%d", (int)st, (int)i2s_st);
+    bool restore = s_i2s && !s_amp_gated;
+    i2s_alc_gate();
     mix_rewind();
     mix_mute_slot(SB_SLOT_RADIO);
     mix_mute_slot(SB_SLOT_CLIP);
@@ -663,11 +708,9 @@ static void mix_restart(void)
         ESP_LOGE(TAG, "mix restart run failed");
         return;
     }
-    if (s_i2s) {
-        i2s_stream_set_clk(s_i2s, SB_MIX_SR, 16, 2);
-        if (!s_amp_gated) {
-            i2s_alc_volume_set(s_i2s, volume_to_alc(s_volume));
-        }
+    i2s_set_clk_gated();
+    if (restore) {
+        i2s_alc_volume_set(s_i2s, volume_to_alc(s_volume));
     }
     mix_route_clip_and_radio();
 }
@@ -806,6 +849,9 @@ static esp_err_t ensure_mix(int volume)
         radio_player_set_volume(volume);
         return ESP_OK;
     }
+    /* Gate before the I2S driver or pins can clock the always-on amp. */
+    s_amp_gated = true;
+    s_volume = volume;
     board_codec_start();
     if (!s_mix_evt) {
         s_mix_evt = make_evt();
@@ -836,12 +882,14 @@ static esp_err_t ensure_mix(int volume)
     i2s_stream_cfg_t i2s_cfg = I2S_STREAM_CFG_DEFAULT();
     i2s_cfg.type = AUDIO_STREAM_WRITER;
     i2s_cfg.use_alc = true;
-    i2s_cfg.volume = volume_to_alc(volume);
+    i2s_cfg.volume = SB_ALC_MIN_DB;
+    i2s_cfg.chan_cfg.auto_clear = true;
     i2s_cfg.uninstall_drv = true;
     i2s_cfg.stack_in_ext = false;
     i2s_cfg.std_cfg.clk_cfg.sample_rate_hz = SB_MIX_SR;
     i2s_stream_set_channel_type(&i2s_cfg, I2S_CHANNEL_TYPE_RIGHT_LEFT);
     s_i2s = i2s_stream_init(&i2s_cfg);
+    i2s_alc_gate();
 
     audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
     s_mix_pipe = audio_pipeline_init(&pipeline_cfg);
@@ -861,16 +909,11 @@ static esp_err_t ensure_mix(int volume)
         teardown_mix();
         return ESP_FAIL;
     }
-    i2s_stream_set_clk(s_i2s, SB_MIX_SR, 16, 2);
+    i2s_set_clk_gated();
     beep_prepare();
-    s_amp_gated = true;
     s_have_out = true;
-    s_volume = volume;
-    if (s_i2s) {
-        i2s_alc_volume_set(s_i2s, SB_ALC_MIN_DB);
-    }
     radio_player_pcm_arm();
-    ESP_LOGI(TAG, "mix+I2S up (44100 stereo)");
+    ESP_LOGI(TAG, "mix+I2S up (44100 stereo) alc=%d dB gated", SB_ALC_MIN_DB);
     return ESP_OK;
 }
 
@@ -1048,11 +1091,15 @@ esp_err_t radio_player_go_live(void)
     ESP_LOGI(TAG, "Go live — mixer reads radio");
     /* Always rewind mix here. After the ident clip the mixer may still
      * look RUNNING while wedged on an aborted clip rb; if-needed then
-     * leaves the station silent. Ident is done so a reset is inaudible. */
+     * leaves the station silent. Gate through set_clk so the restart
+     * cannot clock analog full scale, then ungate for the station. */
+    i2s_alc_gate();
+    s_amp_gated = true;
     mix_restart();
-    if (s_amp_gated && s_i2s) {
+    if (s_i2s) {
         s_amp_gated = false;
         i2s_alc_volume_set(s_i2s, volume_to_alc(s_volume));
+        ESP_LOGI(TAG, "amp ungated alc=%d dB", volume_to_alc(s_volume));
     }
     if (!s_running) {
         radio_mark_started();
