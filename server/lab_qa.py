@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from lab_origin import configured, get_pull, iso_now, list_pull_files, post_check
+from lab_origin import configured, get_pull, iso_now, list_pull_files, post_check, rfc3339
 
 _SCRIPTS = str(Path(__file__).resolve().parent.parent / "scripts")
 if _SCRIPTS not in sys.path:
@@ -111,7 +111,7 @@ def details_url() -> str:
 
 
 def deadline(minutes: int = 45) -> str:
-    return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
+    return rfc3339(datetime.now(timezone.utc) + timedelta(minutes=minutes))
 
 
 def launch_runner(*, job: str, pr: str, sha: str, pr_url: str, paths: list[str]) -> None:
