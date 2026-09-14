@@ -116,9 +116,10 @@ esp_err_t config_store_load(sb_config_t *cfg)
     /*
      * Curve 1: 1→-36dB … 21→+9dB (distorted near the top).
      * Curve 2: 1→-36dB … 21→+2dB (clean max measured at old step 18).
-     * Curve 3: 1–21 stay v2 loudness; 22/23/24 = +4/+6/+9 dB.
+     * Curve 3: 1–21 stay v2; 22/23/24 = +4/+6/+9 dB.
+     * Curve 4: 1–24 stay v3; 25/26 = +12/+15 dB.
      * v1→v2 remaps steps so perceived loudness is preserved.
-     * v2→v3 keeps the saved step (21 is still +2 dB, not the new top).
+     * Later curves keep the saved step (do not jump a parked max to the new top).
      */
     bool dirty = false;
     if (vol_curve < 2) {
