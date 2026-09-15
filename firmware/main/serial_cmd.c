@@ -145,7 +145,8 @@ static void handle_line(char *line)
         log_shipper_printf("  reboot     - restart\n");
         log_shipper_printf("  wifi wipe  - clear saved SSID/pass and reboot into setup AP\n");
         log_shipper_printf("  http       - station HTTP ringbuf + stall snapshot\n");
-        log_shipper_printf("  vol [n]    - show or set volume 1-21 (min/QA: vol 1)\n");
+        log_shipper_printf("  vol [n|+|-] - live knob %d-%d (vol + is the pad path)\n",
+               SB_VOLUME_MIN, SB_VOLUME_MAX);
         log_shipper_printf("  clip name  - play a UI clip (welcome|connected|page|...|stop)\n");
         log_shipper_printf("  audiotest  - PCM start/end markers + AAC clip duration at the mixer tap\n");
         log_shipper_printf("  touch      - show per-pad sensitivity\n");
@@ -229,6 +230,25 @@ static void handle_line(char *line)
         while (*arg == ' ') {
             arg++;
         }
+        int live = radio_player_get_volume();
+        if (arg[0] == '+' || arg[0] == '-') {
+            int delta = (arg[0] == '+') ? 1 : -1;
+            int cur = live;
+            int v = radio_player_nudge_volume(delta);
+            if (v == cur) {
+                radio_player_beep_limit();
+                log_shipper_printf("volume=%d alc=%d dB nvs=%d limit max=%d\n",
+                       v, radio_player_alc_db(v), cfg.volume, SB_VOLUME_MAX);
+                return;
+            }
+            clip_player_set_volume(v);
+            cfg.volume = v;
+            config_store_save(&cfg);
+            radio_player_beep();
+            log_shipper_printf("volume=%d alc=%d dB nvs=%d (pad path)\n",
+                   v, radio_player_alc_db(v), v);
+            return;
+        }
         if (*arg) {
             int v = atoi(arg);
             if (v < SB_VOLUME_MIN) {
@@ -241,9 +261,12 @@ static void handle_line(char *line)
             config_store_save(&cfg);
             radio_player_set_volume(v);
             clip_player_set_volume(v);
-            log_shipper_printf("volume=%d\n", v);
+            log_shipper_printf("volume=%d alc=%d dB nvs=%d\n", v,
+                   radio_player_alc_db(v), v);
         } else {
-            log_shipper_printf("volume=%d\n", cfg.volume);
+            /* Live player, not NVS — a saved 21 is not the knob. */
+            log_shipper_printf("volume=%d alc=%d dB nvs=%d max=%d\n", live,
+                   radio_player_alc_db(live), cfg.volume, SB_VOLUME_MAX);
         }
         return;
     }

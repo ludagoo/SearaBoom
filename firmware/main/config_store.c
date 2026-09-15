@@ -68,7 +68,7 @@ esp_err_t config_store_load(sb_config_t *cfg)
         ESP_LOGW(TAG, "No saved config, using defaults (vol=%d)", SB_DEFAULT_VOLUME);
         if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
             nvs_set_i32(h, "volume", SB_DEFAULT_VOLUME);
-            nvs_set_i32(h, "vol_curve", 2);
+            nvs_set_i32(h, "vol_curve", SB_VOL_CURVE);
             nvs_commit(h);
             nvs_close(h);
         }
@@ -116,33 +116,44 @@ esp_err_t config_store_load(sb_config_t *cfg)
     /*
      * Curve 1: 1→-36dB … 21→+9dB (distorted near the top).
      * Curve 2: 1→-36dB … 21→+2dB (clean max measured at old step 18).
-     * Remap so perceived loudness is preserved.
+     * Curve 3: 1–21 stay v2; 22/23/24 = +4/+6/+9 dB.
+     * Curve 4: 1–24 stay v3; 25/26 = +12/+15 dB.
+     * Curve 5: 1–26 stay v4; 27–34 = +21…+63 dB (6 dB clicks).
+     * 34 / +63 is the listen-confirmed ceiling; do not add clicks.
+     * v1→v2 remaps steps so perceived loudness is preserved.
+     * Later curves keep the saved step (do not jump a parked max to the new top).
      */
     bool dirty = false;
     if (vol_curve < 2) {
         int old = cfg->volume;
-        int old_alc = -36 + ((old - 1) * 45) / (SB_VOLUME_MAX - 1);
+        int old_alc = -36 + ((old - 1) * 45) / (SB_VOL_CURVE2_MAX - 1);
         if (old_alc > 2) {
             old_alc = 2;
         }
-        cfg->volume = 1 + ((old_alc + 36) * (SB_VOLUME_MAX - 1) + 19) / 38;
+        cfg->volume = 1 + ((old_alc + 36) * (SB_VOL_CURVE2_MAX - 1) + 19) / 38;
         if (cfg->volume < SB_VOLUME_MIN) {
             cfg->volume = SB_VOLUME_MIN;
         }
-        if (cfg->volume > SB_VOLUME_MAX) {
-            cfg->volume = SB_VOLUME_MAX;
+        if (cfg->volume > SB_VOL_CURVE2_MAX) {
+            cfg->volume = SB_VOL_CURVE2_MAX;
         }
         ESP_LOGI(TAG, "Migrated volume curve v1→v2: step %d → %d", old, cfg->volume);
         dirty = true;
         vol_curve = 2;
     }
+    if (vol_curve < SB_VOL_CURVE) {
+        ESP_LOGI(TAG, "Volume curve v%d→v%d: keeping step %d",
+                 (int)vol_curve, SB_VOL_CURVE, cfg->volume);
+        dirty = true;
+        vol_curve = SB_VOL_CURVE;
+    }
 
-    /* Seed default (max) or migrated volume into NVS so it survives reboot/OTA. */
+    /* Seed default or migrated volume into NVS so it survives reboot/OTA. */
     if (!had_volume || dirty) {
         nvs_handle_t hw;
         if (nvs_open(NVS_NS, NVS_READWRITE, &hw) == ESP_OK) {
             nvs_set_i32(hw, "volume", cfg->volume);
-            nvs_set_i32(hw, "vol_curve", vol_curve < 2 ? 2 : vol_curve);
+            nvs_set_i32(hw, "vol_curve", vol_curve < SB_VOL_CURVE ? SB_VOL_CURVE : vol_curve);
             nvs_commit(hw);
             nvs_close(hw);
         }
@@ -244,7 +255,7 @@ esp_err_t config_store_save(const sb_config_t *cfg)
     }
     ESP_ERROR_CHECK(nvs_set_i32(h, "volume", cfg->volume));
     /* Keep curve marker so boot does not remigrate a user-chosen level. */
-    ESP_ERROR_CHECK(nvs_set_i32(h, "vol_curve", 2));
+    ESP_ERROR_CHECK(nvs_set_i32(h, "vol_curve", SB_VOL_CURVE));
     ESP_ERROR_CHECK(nvs_commit(h));
     nvs_close(h);
     listen_stats_persist();

@@ -45,21 +45,20 @@ static unsigned s_flag_seq;
 static void volume_cb(int delta, void *ctx)
 {
     (void)ctx;
+    /* Live player step, not NVS. Serial `vol` used to show the saved
+     * value, so a knob already at 24 looked "stuck" at 21. */
     int cur = radio_player_get_volume();
-    int v = cur + delta;
-    if (v < SB_VOLUME_MIN) {
-        v = SB_VOLUME_MIN;
-    }
-    if (v > SB_VOLUME_MAX) {
-        v = SB_VOLUME_MAX;
-    }
+    int v = radio_player_nudge_volume(delta);
     if (v == cur) {
+        ESP_LOGI(TAG, "pad vol limit live=%d max=%d alc=%d dB",
+                 cur, SB_VOLUME_MAX, radio_player_alc_db(cur));
         radio_player_beep_limit();
         return;
     }
     clip_player_set_volume(v);
     s_cfg.volume = v;
     config_store_save_volume_deferred(v);
+    ESP_LOGI(TAG, "pad vol %d -> %d alc=%d dB", cur, v, radio_player_alc_db(v));
     radio_player_beep();
 }
 
@@ -85,7 +84,7 @@ static void handle_pad_gesture(int taps)
          * live. Starting the stream live during the clip fills the radio
          * PCM rb with nobody reading it; HTTP/AAC stall and never recover. */
         radio_player_stop();
-        if (radio_player_prefetch(url, s_cfg.volume) != ESP_OK) {
+        if (radio_player_prefetch(url, radio_player_get_volume()) != ESP_OK) {
             ESP_LOGE(TAG, "Station switch prefetch failed");
         }
         clip_player_play_wait(tune, 15000);
