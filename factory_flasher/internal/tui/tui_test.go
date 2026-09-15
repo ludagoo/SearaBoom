@@ -128,6 +128,26 @@ func TestCapitalFFlashesOnce(t *testing.T) {
 	}
 }
 
+func TestIdleHelpIsOneRow(t *testing.T) {
+	st := session.State{Phase: "idle", Armed: false, ImageReady: true, ImageVersion: "0.0.0"}
+	out := Render(st, renderOpts{width: 60})
+	if strings.Count(out, "flash this box") != 1 {
+		t.Fatalf("want one flash-this-box help row:\n%s", out)
+	}
+	if strings.Count(out, "Space") != 1 {
+		t.Fatalf("want Space on one help row:\n%s", out)
+	}
+	if !strings.Contains(out, "ARM batch") {
+		t.Fatalf("missing Space ARM batch:\n%s", out)
+	}
+	if !strings.Contains(out, "Q  quit") {
+		t.Fatalf("missing Q quit:\n%s", out)
+	}
+	if strings.Contains(out, "0.5.20") || strings.Contains(out, "0.5.22") {
+		t.Fatal("pinned firmware version in TUI")
+	}
+}
+
 func TestQQuits(t *testing.T) {
 	sess := session.Demo()
 	m := newModel(sess, "dev")
