@@ -237,6 +237,30 @@ static esp_err_t make_button(int gpio, int delta, float sens, touch_button_handl
                                         (void *)(intptr_t)delta);
 }
 
+static esp_err_t apply_sens(void)
+{
+    touch_element_stop();
+    if (s_btn[0]) {
+        touch_button_delete(s_btn[0]);
+        s_btn[0] = NULL;
+    }
+    if (s_btn[1]) {
+        touch_button_delete(s_btn[1]);
+        s_btn[1] = NULL;
+    }
+    esp_err_t err = make_button(board_hw_vol_up_gpio(), +1, s_sens_up, &s_btn[0]);
+    if (err == ESP_OK) {
+        err = make_button(board_hw_vol_down_gpio(), -1, s_sens_dn, &s_btn[1]);
+    }
+    if (err == ESP_OK) {
+        err = touch_element_start();
+    }
+    if (err == ESP_OK) {
+        s_settle_until_ms = now_ms() + SB_TOUCH_AUTO_SETTLE_MS;
+    }
+    return err;
+}
+
 esp_err_t volume_buttons_init(volume_btn_cb_t cb, volume_gesture_cb_t gesture, void *ctx)
 {
     touch_elem_global_config_t global = TOUCH_ELEM_GLOBAL_DEFAULT_CONFIG();
@@ -640,30 +664,6 @@ static bool pad_seen(uint32_t idle, uint32_t now, float *rel_out)
     float rel = (float)ad / (float)idle;
     *rel_out = rel;
     return (rel >= SB_TOUCH_CAL_SEE) || (ad >= SB_TOUCH_CAL_MIN_DELTA);
-}
-
-static esp_err_t apply_sens(void)
-{
-    touch_element_stop();
-    if (s_btn[0]) {
-        touch_button_delete(s_btn[0]);
-        s_btn[0] = NULL;
-    }
-    if (s_btn[1]) {
-        touch_button_delete(s_btn[1]);
-        s_btn[1] = NULL;
-    }
-    esp_err_t err = make_button(board_hw_vol_up_gpio(), +1, s_sens_up, &s_btn[0]);
-    if (err == ESP_OK) {
-        err = make_button(board_hw_vol_down_gpio(), -1, s_sens_dn, &s_btn[1]);
-    }
-    if (err == ESP_OK) {
-        err = touch_element_start();
-    }
-    if (err == ESP_OK) {
-        s_settle_until_ms = now_ms() + SB_TOUCH_AUTO_SETTLE_MS;
-    }
-    return err;
 }
 
 esp_err_t volume_buttons_set_sens(float up, float dn)
