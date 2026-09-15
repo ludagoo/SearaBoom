@@ -8,13 +8,22 @@
  *
  * Welcome + SoftAP when there is no home network the box can use:
  * - never configured (first-setup)
- * - empty saved SSID (named box included — same class as a scan miss)
+ * - empty saved SSID (named box included)
  * - explicit wifi wipe (force_ap)
- * - saved SSID not on the air (ssid_on_air == false)
+ * - a *successful* probe of the saved SSID that returns zero APs (gone)
  *
- * Not welcome / not SoftAP: the saved SSID was seen on scan or was just
- * associated, but DHCP/auth missed the boot window. Stay STA and retry.
- * That was last night's false first-setup (GOOSE! join-fail). */
+ * Not welcome / not SoftAP:
+ * - saved SSID seen on a directed probe, or just associated, but DHCP/auth
+ *   missed the boot window (last night's GOOSE! join-fail)
+ * - scan failed, still connecting, or otherwise indeterminate — fail closed
+ *   toward STA retry, never SoftAP + welcome
+ */
+
+typedef enum {
+    SB_WIFI_AIR_GONE = 0,
+    SB_WIFI_AIR_SEEN = 1,
+    SB_WIFI_AIR_UNKNOWN = 2,
+} sb_wifi_air_t;
 
 static inline bool sb_wifi_has_text(const char *s)
 {
@@ -34,7 +43,7 @@ static inline bool sb_wifi_is_first_setup(const char *ssid, const char *name,
 }
 
 static inline bool sb_wifi_should_start_portal(const char *ssid, bool force_ap,
-                                              bool ssid_on_air)
+                                              sb_wifi_air_t air)
 {
     if (force_ap) {
         return true;
@@ -42,13 +51,13 @@ static inline bool sb_wifi_should_start_portal(const char *ssid, bool force_ap,
     if (!sb_wifi_has_text(ssid)) {
         return true;
     }
-    return !ssid_on_air;
+    return air == SB_WIFI_AIR_GONE;
 }
 
 static inline bool sb_wifi_should_play_welcome(const char *ssid, bool force_ap,
-                                              bool ssid_on_air)
+                                              sb_wifi_air_t air)
 {
-    return sb_wifi_should_start_portal(ssid, force_ap, ssid_on_air);
+    return sb_wifi_should_start_portal(ssid, force_ap, air);
 }
 
 #endif

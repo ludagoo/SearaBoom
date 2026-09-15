@@ -329,53 +329,75 @@ static bool wifi_recover_ssid_from_driver(sb_config_t *cfg)
     return true;
 }
 
-static bool wifi_scan_has_ssid(const char *want)
+static bool wifi_sta_is_associated(void)
+{
+    wifi_ap_record_t ap = {0};
+    return esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+}
+
+/* Retry off + disconnect, then wait until not associated. Scan-while-connecting
+ * must not run (and must not be treated as "gone"). */
+static bool wifi_idle_sta_for_scan(void)
+{
+    wifi_set_sta_retry(false);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    int64_t deadline = (esp_timer_get_time() / 1000) + 2000;
+    while (wifi_sta_is_associated()) {
+        if (esp_task_wdt_status(NULL) == ESP_OK) {
+            esp_task_wdt_reset();
+        }
+        if ((esp_timer_get_time() / 1000) >= deadline) {
+            ESP_LOGW(TAG, "STA still associated before probe scan — stay STA");
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    return true;
+}
+
+/* Directed probe of the saved SSID. Broadcast + "first 20 APs" is not "gone".
+ * Fail (start / ap_num / still connecting) → UNKNOWN, not GONE. */
+static sb_wifi_air_t wifi_probe_saved_ssid(const char *want)
 {
     if (!want || !want[0]) {
-        return false;
+        return SB_WIFI_AIR_GONE;
     }
+    uint8_t ssid_buf[33] = {0};
+    strncpy((char *)ssid_buf, want, sizeof(ssid_buf) - 1);
     wifi_scan_config_t scan = {0};
+    scan.ssid = ssid_buf;
+    scan.show_hidden = true;
     if (esp_task_wdt_status(NULL) == ESP_OK) {
         esp_task_wdt_reset();
     }
     if (esp_wifi_scan_start(&scan, true) != ESP_OK) {
-        ESP_LOGW(TAG, "home SSID scan failed");
-        return false;
+        ESP_LOGW(TAG, "home SSID probe scan failed — stay STA");
+        return SB_WIFI_AIR_UNKNOWN;
     }
     uint16_t n = 0;
-    esp_wifi_scan_get_ap_num(&n);
+    if (esp_wifi_scan_get_ap_num(&n) != ESP_OK) {
+        ESP_LOGW(TAG, "home SSID probe ap_num failed — stay STA");
+        return SB_WIFI_AIR_UNKNOWN;
+    }
     if (n == 0) {
-        ESP_LOGI(TAG, "scan missed saved ssid=%s (aps=0)", want);
-        return false;
+        ESP_LOGI(TAG, "probe scan: saved ssid=%s not on air", want);
+        return SB_WIFI_AIR_GONE;
     }
-    if (n > 20) {
-        n = 20;
-    }
-    wifi_ap_record_t aps[20];
-    memset(aps, 0, sizeof(aps));
-    if (esp_wifi_scan_get_ap_records(&n, aps) != ESP_OK) {
-        return false;
-    }
-    for (uint16_t i = 0; i < n; i++) {
-        if (strncmp((const char *)aps[i].ssid, want, sizeof(aps[i].ssid)) == 0) {
-            ESP_LOGI(TAG, "scan saw saved ssid=%s rssi=%d", want, aps[i].rssi);
-            return true;
-        }
-    }
-    ESP_LOGI(TAG, "scan missed saved ssid=%s (aps=%u)", want, (unsigned)n);
-    return false;
+    ESP_LOGI(TAG, "probe scan saw saved ssid=%s aps=%u", want, (unsigned)n);
+    return SB_WIFI_AIR_SEEN;
 }
 
-static bool wifi_saved_network_on_air(void)
+static sb_wifi_air_t wifi_saved_network_on_air(void)
 {
     if (s_sta_did_assoc || s_ap_seen) {
         ESP_LOGI(TAG, "saved ssid seen assoc=%d ap_seen=%d reason=%d",
                  (int)s_sta_did_assoc, (int)s_ap_seen, s_wifi_disc_reason);
-        return true;
+        return SB_WIFI_AIR_SEEN;
     }
-    wifi_retry_timer_stop();
-    s_wifi_need_reconnect = false;
-    return wifi_scan_has_ssid(s_cfg.ssid);
+    if (!wifi_idle_sta_for_scan()) {
+        return SB_WIFI_AIR_UNKNOWN;
+    }
+    return wifi_probe_saved_ssid(s_cfg.ssid);
 }
 
 static sb_wifi_result_t wifi_sta_wait_for_ip(void)
@@ -453,14 +475,14 @@ static sb_wifi_result_t wifi_connect_or_setup(bool *play_welcome)
         return SB_WIFI_OK;
     }
 
-    bool on_air = wifi_saved_network_on_air();
-    bool welcome = sb_wifi_should_play_welcome(s_cfg.ssid, false, on_air);
+    sb_wifi_air_t air = wifi_saved_network_on_air();
+    bool welcome = sb_wifi_should_play_welcome(s_cfg.ssid, false, air);
     if (play_welcome) {
         *play_welcome = welcome;
     }
-    if (!sb_wifi_should_start_portal(s_cfg.ssid, false, on_air)) {
-        ESP_LOGW(TAG, "WiFi join timeout ssid=%s fails=%d — STA retry, no setup AP",
-                 s_cfg.ssid, s_wifi_fails);
+    if (!sb_wifi_should_start_portal(s_cfg.ssid, false, air)) {
+        ESP_LOGW(TAG, "WiFi join timeout ssid=%s fails=%d air=%d — STA retry, no setup AP",
+                 s_cfg.ssid, s_wifi_fails, (int)air);
         s_sta_retry = true;
         s_wifi_need_reconnect = true;
         wifi_retry_timer_arm(1000);
