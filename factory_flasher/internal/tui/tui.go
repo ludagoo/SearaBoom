@@ -168,7 +168,7 @@ func faceFor(s session.State) face {
 		return face{label: "FAIL", style: whiteRed, hint: failHint(s)}
 	}
 	if !s.Armed {
-		hint := "Space  ARM batch    F  flash this box"
+		hint := ""
 		if !s.ImageReady {
 			hint = "no image — Space retries"
 		}
@@ -251,7 +251,7 @@ func keys(s session.State) string {
 	if s.Armed {
 		return dim + "Space  disarm    Q  quit" + reset
 	}
-	return dim + "Space  ARM    F  flash this box    Q  quit" + reset
+	return dim + "Space  ARM batch    F  flash this box    Q  quit" + reset
 }
 
 func banner(label, style string, width int) string {
