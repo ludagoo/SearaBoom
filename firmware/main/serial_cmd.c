@@ -12,6 +12,7 @@
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
+#include "searaboom.h"
 #include "serial_cmd.h"
 #include "ota_update.h"
 #include "config_store.h"
@@ -207,6 +208,7 @@ static void handle_line(char *line)
     if (strcasecmp(line, "wifi wipe") == 0 || strcasecmp(line, "wifiwipe") == 0) {
         log_shipper_printf("wiping WiFi, rebooting into setup AP...\n");
         config_store_clear_wifi();
+        wifi_forget_driver_config();
         vTaskDelay(pdMS_TO_TICKS(150));
         esp_restart();
         return;

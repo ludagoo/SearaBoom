@@ -25,6 +25,8 @@
 #define SB_DEBOUNCE_MS 250
 
 void wifi_set_sta_retry(bool on);
+/* Drop ESP-IDF STA credentials so a wifi wipe is not undone by driver NVS. */
+void wifi_forget_driver_config(void);
 
 typedef enum {
     SB_LED_OFF = 0,

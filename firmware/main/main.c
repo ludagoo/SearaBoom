@@ -15,6 +15,7 @@
 #include "searaboom.h"
 #include "board.h"
 #include "config_store.h"
+#include "wifi_boot.h"
 #include "led_status.h"
 #include "volume_buttons.h"
 #include "captive_portal.h"
@@ -108,6 +109,7 @@ static void handle_pad_gesture(int taps)
         led_status_set(SB_LED_BLUE, 80);
         radio_player_beep_limit();
         config_store_clear_wifi();
+        wifi_forget_driver_config();
         vTaskDelay(pdMS_TO_TICKS(400));
         esp_restart();
     }
@@ -271,8 +273,78 @@ void wifi_set_sta_retry(bool on)
     }
 }
 
-static bool wifi_connect_or_setup(void)
+void wifi_forget_driver_config(void)
 {
+    esp_err_t err = esp_wifi_restore();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "wifi restore: %s", esp_err_to_name(err));
+    }
+}
+
+typedef enum {
+    SB_WIFI_OK = 0,
+    SB_WIFI_NEED_SETUP,
+    SB_WIFI_NO_IP,
+} sb_wifi_result_t;
+
+static void wifi_start_sta_idle(void)
+{
+    s_sta_retry = false;
+    ESP_ERROR_CHECK(esp_wifi_start());
+}
+
+static bool wifi_recover_ssid_from_driver(sb_config_t *cfg)
+{
+    wifi_config_t w = {0};
+    if (!cfg || esp_wifi_get_config(WIFI_IF_STA, &w) != ESP_OK) {
+        return false;
+    }
+    if (!w.sta.ssid[0]) {
+        return false;
+    }
+    memset(cfg->ssid, 0, sizeof(cfg->ssid));
+    memcpy(cfg->ssid, w.sta.ssid,
+           sizeof(w.sta.ssid) < sizeof(cfg->ssid) - 1 ? sizeof(w.sta.ssid)
+                                                      : sizeof(cfg->ssid) - 1);
+    memset(cfg->password, 0, sizeof(cfg->password));
+    memcpy(cfg->password, w.sta.password,
+           sizeof(w.sta.password) < sizeof(cfg->password) - 1
+               ? sizeof(w.sta.password)
+               : sizeof(cfg->password) - 1);
+    if (!cfg->ssid[0]) {
+        return false;
+    }
+    ESP_LOGW(TAG, "Restored ssid=%s from WiFi driver NVS", cfg->ssid);
+    (void)config_store_save_wifi(cfg);
+    return true;
+}
+
+static sb_wifi_result_t wifi_sta_wait_for_ip(void)
+{
+    led_status_set(SB_LED_RED, 500);
+    int64_t deadline_ms = (esp_timer_get_time() / 1000) + CONFIG_SEARABOOM_WIFI_TIMEOUT_MS;
+    EventBits_t bits = 0;
+    while ((esp_timer_get_time() / 1000) < deadline_ms) {
+        if (esp_task_wdt_status(NULL) == ESP_OK) {
+            esp_task_wdt_reset();
+        }
+        wifi_reconnect_tick();
+        bits = xEventGroupWaitBits(s_wifi_events, WIFI_OK_BIT, pdFALSE, pdTRUE,
+                                   pdMS_TO_TICKS(1000));
+        if (bits & WIFI_OK_BIT) {
+            return SB_WIFI_OK;
+        }
+    }
+    ESP_LOGW(TAG, "WiFi join timeout ssid=%s fails=%d — STA retry, no setup AP",
+             s_cfg.ssid, s_wifi_fails);
+    return SB_WIFI_NO_IP;
+}
+
+static sb_wifi_result_t wifi_connect_or_setup(bool *play_welcome)
+{
+    if (play_welcome) {
+        *play_welcome = false;
+    }
     s_wifi_events = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -287,12 +359,39 @@ static bool wifi_connect_or_setup(void)
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event, NULL));
     wifi_retry_timer_init();
 
+    bool force_ap = config_store_force_setup();
+    /* Mode before get_config so driver NVS is visible for ssid recover. */
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    if (!force_ap && !config_store_has_wifi(&s_cfg)) {
+        wifi_recover_ssid_from_driver(&s_cfg);
+    }
+
+    bool welcome = sb_wifi_should_play_welcome(s_cfg.ssid, s_cfg.name, s_cfg.city,
+                                              s_cfg.url_key, force_ap);
+    if (play_welcome) {
+        *play_welcome = welcome;
+    }
+
+    if (sb_wifi_should_start_portal(s_cfg.ssid, s_cfg.name, s_cfg.city,
+                                   s_cfg.url_key, force_ap)) {
+        if (welcome) {
+            ESP_LOGW(TAG, "No WiFi SSID saved -> setup AP");
+        } else {
+            ESP_LOGW(TAG, "WiFi wipe -> setup AP (no welcome) name=%s city=%s",
+                     s_cfg.name[0] ? s_cfg.name : "-",
+                     s_cfg.city[0] ? s_cfg.city : "-");
+        }
+        wifi_start_sta_idle();
+        return SB_WIFI_NEED_SETUP;
+    }
+
     if (!config_store_has_wifi(&s_cfg)) {
-        ESP_LOGW(TAG, "No WiFi SSID saved -> setup AP");
-        s_sta_retry = false;
-        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-        ESP_ERROR_CHECK(esp_wifi_start());
-        return false;
+        ESP_LOGW(TAG, "SSID empty but configured name=%s city=%s url=%s — no setup AP",
+                 s_cfg.name[0] ? s_cfg.name : "-",
+                 s_cfg.city[0] ? s_cfg.city : "-",
+                 s_cfg.url_key);
+        wifi_start_sta_idle();
+        return SB_WIFI_NO_IP;
     }
 
     wifi_config_t wifi = {0};
@@ -306,21 +405,31 @@ static bool wifi_connect_or_setup(void)
     /* 20 dBm + 240 MHz + I2S amp sags USB 5V. 17 dBm is enough for STA. */
     esp_wifi_set_max_tx_power(68);
 
-    led_status_set(SB_LED_RED, 500);
-    int64_t deadline_ms = (esp_timer_get_time() / 1000) + CONFIG_SEARABOOM_WIFI_TIMEOUT_MS;
-    EventBits_t bits = 0;
-    while ((esp_timer_get_time() / 1000) < deadline_ms) {
-        if (esp_task_wdt_status(NULL) == ESP_OK) {
-            esp_task_wdt_reset();
-        }
-        wifi_reconnect_tick();
-        bits = xEventGroupWaitBits(s_wifi_events, WIFI_OK_BIT, pdFALSE, pdTRUE,
-                                   pdMS_TO_TICKS(1000));
-        if (bits & WIFI_OK_BIT) {
-            break;
-        }
+    return wifi_sta_wait_for_ip();
+}
+
+static void boot_start_radio(bool play_updated)
+{
+    if (radio_player_is_running()) {
+        return;
     }
-    return (bits & WIFI_OK_BIT) != 0;
+    const char *url = config_store_stream_url(&s_cfg);
+    sb_clip_id_t tune = (strncmp(s_cfg.url_key, "URL2", 4) == 0)
+        ? SB_CLIP_TUNE_104 : SB_CLIP_TUNE_102;
+    ESP_LOGI(TAG, "Prefetch stream %s (%s) vol=%d", s_cfg.url_key, url, s_cfg.volume);
+    if (radio_player_prefetch(url, s_cfg.volume) != ESP_OK) {
+        ESP_LOGE(TAG, "Radio prefetch failed");
+    }
+    if (play_updated) {
+        ESP_LOGI(TAG, "First boot after update — playing atualizado");
+        clip_player_play_wait(SB_CLIP_OTA_DONE, 20000);
+    } else {
+        clip_player_play_wait(tune, 15000);
+    }
+    if (radio_player_go_live() != ESP_OK) {
+        ESP_LOGE(TAG, "Radio go_live failed");
+    }
+    clip_player_release_idle();
 }
 
 void app_main(void)
@@ -363,15 +472,18 @@ void app_main(void)
 
     bool play_updated = config_store_take_play_updated();
     play_updated = config_store_consume_fw_change(app->version) || play_updated;
-    if (play_updated && !config_store_has_wifi(&s_cfg)) {
+    if (play_updated && config_store_is_first_setup(&s_cfg)) {
         ESP_LOGI(TAG, "First boot after update, no Wi-Fi — atualizado then setup AP");
         radio_player_start_idle(s_cfg.volume);
         clip_player_play_wait(SB_CLIP_OTA_DONE, 20000);
     }
 
-    if (!wifi_connect_or_setup()) {
-        ESP_LOGW(TAG, "Starting captive portal");
-        captive_portal_run(); /* returns after save when the phone leaves the AP */
+    bool play_welcome = false;
+    bool wait_for_sta = false;
+    sb_wifi_result_t wifi_boot = wifi_connect_or_setup(&play_welcome);
+    if (wifi_boot == SB_WIFI_NEED_SETUP) {
+        ESP_LOGW(TAG, "Starting captive portal welcome=%d", (int)play_welcome);
+        captive_portal_run(play_welcome); /* returns after save when the phone leaves the AP */
         config_store_load(&s_cfg);
         s_pad_taps = 0;
         /* Portal used to start the station before AP teardown. If that
@@ -379,28 +491,17 @@ void app_main(void)
         if (!radio_player_has_music_info()) {
             radio_player_stop();
         }
+    } else if (wifi_boot == SB_WIFI_NO_IP) {
+        /* Join-fail: keep STA retry (s_sta_retry still on). Empty-ssid
+         * configured box: idle STA, no radio, no welcome. */
+        wait_for_sta = true;
+        ESP_LOGW(TAG, "Configured WiFi not joined — quiet STA retry, no welcome");
     }
 
-    if (!radio_player_is_running()) {
-        const char *url = config_store_stream_url(&s_cfg);
-        sb_clip_id_t tune = (strncmp(s_cfg.url_key, "URL2", 4) == 0)
-            ? SB_CLIP_TUNE_104 : SB_CLIP_TUNE_102;
-        ESP_LOGI(TAG, "Prefetch stream %s (%s) vol=%d", s_cfg.url_key, url, s_cfg.volume);
-        if (radio_player_prefetch(url, s_cfg.volume) != ESP_OK) {
-            ESP_LOGE(TAG, "Radio prefetch failed");
-        }
-        if (play_updated) {
-            ESP_LOGI(TAG, "First boot after update — playing atualizado");
-            clip_player_play_wait(SB_CLIP_OTA_DONE, 20000);
-        } else {
-            clip_player_play_wait(tune, 15000);
-        }
-        if (radio_player_go_live() != ESP_OK) {
-            ESP_LOGE(TAG, "Radio go_live failed");
-        }
-        clip_player_release_idle();
+    if (!wait_for_sta) {
+        boot_start_radio(play_updated);
+        led_status_set(SB_LED_OFF, 0);
     }
-    led_status_set(SB_LED_OFF, 0);
 
     /* Version check after the stream is up. If an update is found the OTA
      * task stops radio, speaks, then downloads with audio off. */
@@ -409,6 +510,12 @@ void app_main(void)
 
     while (true) {
         wifi_reconnect_tick();
+        if (wait_for_sta && wifi_sta_got_ip() && !radio_player_is_running()) {
+            wait_for_sta = false;
+            boot_start_radio(play_updated);
+            led_status_set(SB_LED_OFF, 0);
+            live_at_ms = esp_timer_get_time() / 1000;
+        }
         if (!s_healthy_marked && (esp_timer_get_time() / 1000) >= WIFI_HEALTHY_MS) {
             log_shipper_mark_healthy();
             ota_update_mark_healthy();

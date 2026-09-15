@@ -19,6 +19,12 @@ bool config_store_take_play_updated(void);
 /* True when firmware version changed since last successful boot (OTA or USB). */
 bool config_store_consume_fw_change(const char *version);
 bool config_store_has_wifi(const sb_config_t *cfg);
+bool config_store_has_identity(const sb_config_t *cfg);
+/* True only when the box has never been set up (empty ssid + no name/city + URL1). */
+bool config_store_is_first_setup(const sb_config_t *cfg);
+/* 4-tap / serial wifi wipe: empty ssid but still open SoftAP (no welcome). */
+bool config_store_force_setup(void);
+esp_err_t config_store_save_wifi(const sb_config_t *cfg);
 esp_err_t config_store_clear_wifi(void);
 /* Per-pad touch sensitivity (fraction of idle). False if never calibrated.
  * tsens_rev: 1 = 40% of peak (0.5.16), 2 = 80% of peak (0.5.18).

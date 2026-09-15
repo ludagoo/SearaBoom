@@ -7,6 +7,7 @@
 #include "esp_timer.h"
 #include "config_store.h"
 #include "listen_stats.h"
+#include "wifi_boot.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "config_store";
@@ -76,8 +77,13 @@ esp_err_t config_store_load(sb_config_t *cfg)
     }
 
     size_t len = sizeof(cfg->ssid);
-    if (nvs_get_str(h, "ssid", cfg->ssid, &len) != ESP_OK) {
+    esp_err_t ssid_err = nvs_get_str(h, "ssid", cfg->ssid, &len);
+    if (ssid_err == ESP_ERR_NVS_NOT_FOUND) {
         strncpy(cfg->ssid, CONFIG_SEARABOOM_WIFI_SSID, sizeof(cfg->ssid) - 1);
+    } else if (ssid_err != ESP_OK) {
+        /* Do not treat a read error as "user never configured Wi-Fi". */
+        ESP_LOGW(TAG, "ssid nvs_get_str failed (%s)", esp_err_to_name(ssid_err));
+        cfg->ssid[0] = 0;
     }
     len = sizeof(cfg->password);
     if (nvs_get_str(h, "pass", cfg->password, &len) != ESP_OK) {
@@ -238,8 +244,15 @@ esp_err_t config_store_save(const sb_config_t *cfg)
     s_def_dirty = false;
     nvs_handle_t h;
     ESP_ERROR_CHECK(nvs_open(NVS_NS, NVS_READWRITE, &h));
-    ESP_ERROR_CHECK(nvs_set_str(h, "ssid", cfg->ssid));
-    ESP_ERROR_CHECK(nvs_set_str(h, "pass", cfg->password));
+    if (cfg->ssid[0]) {
+        ESP_ERROR_CHECK(nvs_set_str(h, "ssid", cfg->ssid));
+        ESP_ERROR_CHECK(nvs_set_str(h, "pass", cfg->password));
+        ESP_ERROR_CHECK(nvs_set_u8(h, "force_ap", 0));
+    } else {
+        /* Station-switch / identity save must not persist an empty ssid over
+         * a failed NVS read. Explicit wipe uses config_store_clear_wifi(). */
+        ESP_LOGW(TAG, "Save skipped empty ssid/pass (use wifi wipe to clear)");
+    }
     ESP_ERROR_CHECK(nvs_set_str(h, "url", cfg->url_key));
     {
         char name[sizeof(cfg->name)];
@@ -327,6 +340,60 @@ bool config_store_has_wifi(const sb_config_t *cfg)
     return cfg && cfg->ssid[0] != 0;
 }
 
+bool config_store_has_identity(const sb_config_t *cfg)
+{
+    return cfg && (cfg->name[0] != 0 || cfg->city[0] != 0);
+}
+
+bool config_store_is_first_setup(const sb_config_t *cfg)
+{
+    if (!cfg) {
+        return true;
+    }
+    return sb_wifi_is_first_setup(cfg->ssid, cfg->name, cfg->city, cfg->url_key);
+}
+
+bool config_store_force_setup(void)
+{
+    nvs_handle_t h;
+    uint8_t v = 0;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+        return false;
+    }
+    nvs_get_u8(h, "force_ap", &v);
+    nvs_close(h);
+    return v != 0;
+}
+
+esp_err_t config_store_save_wifi(const sb_config_t *cfg)
+{
+    if (!cfg || !cfg->ssid[0]) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_str(h, "ssid", cfg->ssid);
+    if (err == ESP_OK) {
+        err = nvs_set_str(h, "pass", cfg->password);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_u8(h, "force_ap", 0);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Saved recovered ssid=%s", cfg->ssid);
+    } else {
+        ESP_LOGE(TAG, "ssid recover save failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
 esp_err_t config_store_clear_wifi(void)
 {
     nvs_handle_t h;
@@ -336,9 +403,10 @@ esp_err_t config_store_clear_wifi(void)
     }
     nvs_set_str(h, "ssid", "");
     nvs_set_str(h, "pass", "");
+    nvs_set_u8(h, "force_ap", 1);
     err = nvs_commit(h);
     nvs_close(h);
-    ESP_LOGW(TAG, "Cleared saved WiFi");
+    ESP_LOGW(TAG, "Cleared saved WiFi (force setup AP)");
     return err;
 }
 
