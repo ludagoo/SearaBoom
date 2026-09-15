@@ -110,6 +110,7 @@ static void handle_pad_gesture(int taps)
         log_shipper_flush();
         led_status_set(SB_LED_BLUE, 80);
         radio_player_beep_limit();
+        volume_buttons_reset_auto();
         config_store_clear_wifi();
         wifi_forget_driver_config();
         vTaskDelay(pdMS_TO_TICKS(400));

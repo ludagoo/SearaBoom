@@ -16,5 +16,8 @@ esp_err_t volume_buttons_calibrate(void);
 void volume_buttons_get_sens(float *up, float *dn);
 esp_err_t volume_buttons_set_sens(float up, float dn);
 void volume_buttons_dump_raw(int ms);
+/* 4-chord: drop rev 4. Restore factory snapshot or the 0.50 boot default. */
+void volume_buttons_reset_auto(void);
+void volume_buttons_log_status(void);
 
 #endif

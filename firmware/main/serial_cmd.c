@@ -162,6 +162,7 @@ static void handle_line(char *line)
         volume_buttons_get_sens(&up, &dn);
         log_shipper_printf("touch sens vol+=%.3f vol-=%.3f need_cal=%d\n",
                up, dn, (int)volume_buttons_needs_cal());
+        volume_buttons_log_status();
         return;
     }
     if (strcasecmp(line, "touch raw") == 0) {
