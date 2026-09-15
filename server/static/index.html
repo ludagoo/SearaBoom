@@ -23,12 +23,12 @@
       padding: 2rem 1rem 3rem;
     }
     h1 { margin: 0 0 .35rem; font-size: 1.75rem; font-weight: 650; }
-    p.lede {
-      margin: 0 0 1.15rem;
+    p.lede, p.how {
+      margin: 0 0 .55rem;
       color: var(--muted);
       line-height: 1.4;
     }
-    p.lede code { color: var(--ink); }
+    p.how { margin-bottom: 1.15rem; }
     main { max-width: 640px; margin: 0 auto; }
     pre.install {
       margin: 0 0 .75rem;
@@ -75,7 +75,8 @@
 <body>
   <main>
     <h1>SearaBoom</h1>
-    <p class="lede">Paste the command to download the TUI. It fetches <code>/api/factory</code> at runtime — firmware is not in the binary.</p>
+    <p class="lede">Run this command in a terminal to download the TUI and flash SearaBoom boxes.</p>
+    <p class="how">Plug boxes in over USB. The TUI finds them. F flashes the box that's in now. Space ARMs a batch, then every box you plug in gets flashed.</p>
     <p class="os" id="os">Linux x86_64</p>
     <pre class="install" id="cmd">curl -fsSL -o searaboom-factory-flasher-linux-amd64 https://searaboom.goossen.dev/api/factory/flasher/linux-amd64 &amp;&amp; chmod +x searaboom-factory-flasher-linux-amd64 &amp;&amp; ./searaboom-factory-flasher-linux-amd64</pre>
     <button type="button" class="copy" id="copy">Copy</button>
