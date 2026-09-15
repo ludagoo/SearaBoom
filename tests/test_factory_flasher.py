@@ -74,7 +74,9 @@ def test_firmware_ignores_old_cal_rev() -> None:
     store_h = (ROOT / "firmware/main/config_store.h").read_text()
     vol = (ROOT / "firmware/main/volume_buttons.c").read_text()
     assert "#define SB_TOUCH_SENS_REV 3" in store_h
-    assert "rev < SB_TOUCH_SENS_REV" in vol
+    assert "#define SB_TOUCH_AUTO_REV 4" in store_h
+    assert "rev >= SB_TOUCH_SENS_REV" in vol
+    assert "rev >= SB_TOUCH_AUTO_REV" in vol
 
 
 def test_udev_copy_matches_scripts() -> None:

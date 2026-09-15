@@ -61,9 +61,10 @@ Dedicated QA nodes (`/dev/searaboom-qa-*` and `qa-boxes.json`) are skipped.
 ## Firmware / cal
 
 USB factory still wipes pad cal (`/spiffs/usb_factory`). The flasher runs
-`touch cal`, which stores NVS values at `tsens_rev` 3. Firmware **loads stored
-cal only when `rev >= 3`**. Older field cal (rev 1/2) is ignored. Boot does not
-auto-calibrate.
+`touch cal`, which stores NVS values at `tsens_rev` 3 (snapshotted in
+`tsens_f_*`). Firmware **loads factory cal when `rev >= 3`**. Rev 4 is field
+auto-cal from real presses. Older field cal (rev 1/2) is ignored. Uncalibrated
+live start is `channel_sens` **0.50**.
 
 ## Build the five binaries
 

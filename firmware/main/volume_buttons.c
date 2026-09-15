@@ -2,6 +2,7 @@
 #include "searaboom.h"
 #include "board.h"
 #include "config_store.h"
+#include "touch_auto_cal.h"
 #include "radio_player.h"
 #include "led_status.h"
 #include "log_shipper.h"
@@ -14,23 +15,20 @@
 #include "freertos/task.h"
 #include <stdio.h>
 #include <stdint.h>
+#include <string.h>
 
 static const char *TAG = "volume_buttons";
 
 /* channel_sens is a press threshold: higher = firmer press needed.
  * Boot does not auto-run calibrate() (field OTA must not prompt).
  * Factory USB wipes NVS cal; the desktop flasher then runs `touch cal`.
- * 0.1 was the pre-cal default; a bit firmer here when nothing is stored. */
-#define SB_TOUCH_SENS 0.13f
+ * QA/product start is clamp max 0.50 — firmer than the 0.5.20 0.13 default.
+ * Auto-cal stays on so boxes can settle to different numbers at or below 0.50. */
+#define SB_TOUCH_SENS 0.50f
 /* Cal: abs(smooth-idle)/idle vs frozen idle (not live benchmark). */
 #define SB_TOUCH_CAL_SEE 0.008f
 #define SB_TOUCH_CAL_MIN_DELTA 40u
 #define SB_TOUCH_CAL_FRAC_V1 0.40f
-#define SB_TOUCH_CAL_FRAC 0.80f
-#define SB_TOUCH_CAL_MIN 0.025f
-#define SB_TOUCH_CAL_MAX 0.50f
-/* Below this peak a dedicated finger is a dead pad, not a sensitivity tweak. */
-#define SB_TOUCH_CAL_FAIL 0.025f
 #define SB_TOUCH_CAL_HOLD_N 15
 #define SB_TOUCH_CAL_TIMEOUT_MS 45000
 #define SB_CHORD_COMMIT_MS 800
@@ -54,6 +52,34 @@ static bool s_need_cal;
 static bool s_calibrating;
 static float s_sens_up = SB_TOUCH_SENS;
 static float s_sens_dn = SB_TOUCH_SENS;
+static uint8_t s_rev;
+static float s_factory_up;
+static float s_factory_dn;
+static bool s_have_factory;
+static bool s_pending_apply;
+static float s_want_up;
+static float s_want_dn;
+static int64_t s_settle_until_ms;
+static int64_t s_chatter_t0_ms;
+static int s_chatter_n;
+static bool s_learn_freeze;
+
+typedef struct {
+    bool tracking;
+    bool tainted;
+    int64_t press_ms;
+    float peak;
+} auto_pad_t;
+
+static auto_pad_t s_auto[2];
+static float s_first_peaks[2][SB_TOUCH_AUTO_FIRST_N];
+static int s_first_n[2];
+static bool s_first_done[2];
+static float s_leak_peaks[2][SB_TOUCH_AUTO_LEAK_N];
+static int s_leak_n[2];
+static int s_leak_i[2];
+static int s_graze_n[2];
+static int64_t s_last_leak_ms[2];
 
 static float peak_to_sens(float peak)
 {
@@ -65,6 +91,38 @@ static float peak_to_sens(float peak)
         sens = SB_TOUCH_CAL_MAX;
     }
     return sens;
+}
+
+static int64_t now_ms(void)
+{
+    return esp_timer_get_time() / 1000;
+}
+
+static float live_sens(int idx)
+{
+    return idx == 0 ? s_sens_up : s_sens_dn;
+}
+
+static void auto_on_press(int idx);
+static void auto_on_release(int idx);
+static void auto_sample(void);
+static void auto_flush(void);
+
+static void auto_clear_learn(void)
+{
+    memset(s_auto, 0, sizeof(s_auto));
+    memset(s_first_peaks, 0, sizeof(s_first_peaks));
+    memset(s_leak_peaks, 0, sizeof(s_leak_peaks));
+    s_first_n[0] = s_first_n[1] = 0;
+    s_first_done[0] = s_first_done[1] = false;
+    s_leak_n[0] = s_leak_n[1] = 0;
+    s_leak_i[0] = s_leak_i[1] = 0;
+    s_graze_n[0] = s_graze_n[1] = 0;
+    s_last_leak_ms[0] = s_last_leak_ms[1] = 0;
+    s_pending_apply = false;
+    s_learn_freeze = false;
+    s_chatter_n = 0;
+    s_chatter_t0_ms = 0;
 }
 
 /* ESP32-S3: TOUCH_PAD_NUMn <-> GPIOn for pads 1..14 */
@@ -143,6 +201,7 @@ static void on_button_event(int delta, touch_button_event_t ev)
             s_chord = true;
             s_vol_held = 0;
         }
+        auto_on_press(delta > 0 ? 0 : 1);
         return;
     }
     if (ev == TOUCH_BUTTON_EVT_ON_RELEASE) {
@@ -151,6 +210,7 @@ static void on_button_event(int delta, touch_button_event_t ev)
         if (s_vol_held == delta) {
             s_vol_held = 0;
         }
+        auto_on_release(delta > 0 ? 0 : 1);
         if (s_chord && both_up()) {
             s_chord = false;
             on_chord_complete(esp_timer_get_time() / 1000);
@@ -177,6 +237,30 @@ static esp_err_t make_button(int gpio, int delta, float sens, touch_button_handl
                                         (void *)(intptr_t)delta);
 }
 
+static esp_err_t apply_sens(void)
+{
+    touch_element_stop();
+    if (s_btn[0]) {
+        touch_button_delete(s_btn[0]);
+        s_btn[0] = NULL;
+    }
+    if (s_btn[1]) {
+        touch_button_delete(s_btn[1]);
+        s_btn[1] = NULL;
+    }
+    esp_err_t err = make_button(board_hw_vol_up_gpio(), +1, s_sens_up, &s_btn[0]);
+    if (err == ESP_OK) {
+        err = make_button(board_hw_vol_down_gpio(), -1, s_sens_dn, &s_btn[1]);
+    }
+    if (err == ESP_OK) {
+        err = touch_element_start();
+    }
+    if (err == ESP_OK) {
+        s_settle_until_ms = now_ms() + SB_TOUCH_AUTO_SETTLE_MS;
+    }
+    return err;
+}
+
 esp_err_t volume_buttons_init(volume_btn_cb_t cb, volume_gesture_cb_t gesture, void *ctx)
 {
     touch_elem_global_config_t global = TOUCH_ELEM_GLOBAL_DEFAULT_CONFIG();
@@ -197,16 +281,38 @@ esp_err_t volume_buttons_init(volume_btn_cb_t cb, volume_gesture_cb_t gesture, v
         return err;
     }
 
-    /* Factory `touch cal` writes SB_TOUCH_SENS_REV (3). Ignore older NVS
-     * values so field OTA keeps the 0.5.20 fixed-threshold graze fix.
-     * Do not set s_need_cal or call volume_buttons_calibrate() from boot. */
+    /* Rev 4 = field auto, use it. Rev 3 factory is snapshotted; live starts
+     * at 0.50 unless auto already committed. Rev < 3 ignored (0.5.20). */
     uint8_t rev = 0;
-    if (!config_store_load_touch_sens(&s_sens_up, &s_sens_dn, &rev)
-        || rev < SB_TOUCH_SENS_REV) {
+    float loaded_up = SB_TOUCH_SENS;
+    float loaded_dn = SB_TOUCH_SENS;
+    bool loaded = config_store_load_touch_sens(&loaded_up, &loaded_dn, &rev);
+    s_have_factory = config_store_load_factory_touch_sens(&s_factory_up,
+                                                         &s_factory_dn);
+    if (loaded && rev >= SB_TOUCH_AUTO_REV) {
+        uint8_t first = 0;
+        s_sens_up = loaded_up;
+        s_sens_dn = loaded_dn;
+        s_rev = rev;
+        /* Missing tsens_first (old one-pad write) → neither pad is done. */
+        (void)config_store_load_touch_auto_first(&first);
+        s_first_done[0] = (first & SB_TOUCH_AUTO_FIRST_UP) != 0;
+        s_first_done[1] = (first & SB_TOUCH_AUTO_FIRST_DN) != 0;
+    } else {
+        if (loaded && rev >= SB_TOUCH_SENS_REV) {
+            if (!s_have_factory) {
+                config_store_ensure_factory_touch_snapshot(loaded_up, loaded_dn);
+                s_factory_up = loaded_up;
+                s_factory_dn = loaded_dn;
+                s_have_factory = true;
+            }
+        }
         s_sens_up = SB_TOUCH_SENS;
         s_sens_dn = SB_TOUCH_SENS;
+        s_rev = 0;
     }
     s_need_cal = false;
+    s_settle_until_ms = now_ms() + 5000;
 
     err = make_button(board_hw_vol_up_gpio(), +1, s_sens_up, &s_btn[0]);
     if (err == ESP_OK) {
@@ -228,10 +334,11 @@ esp_err_t volume_buttons_init(volume_btn_cb_t cb, volume_gesture_cb_t gesture, v
     s_gesture = gesture;
     s_ctx = ctx;
     s_ready = true;
-    ESP_LOGI(TAG, "Touch vol-up=T%d vol-down=T%d sens=%.3f/%.3f cal=%d",
+    ESP_LOGI(TAG, "Touch vol-up=T%d vol-down=T%d sens=%.3f/%.3f rev=%u factory=%d first=%d/%d",
              (int)gpio_to_touch(board_hw_vol_up_gpio()),
              (int)gpio_to_touch(board_hw_vol_down_gpio()),
-             s_sens_up, s_sens_dn, (int)s_need_cal);
+             s_sens_up, s_sens_dn, (unsigned)s_rev, (int)s_have_factory,
+             (int)s_first_done[0], (int)s_first_done[1]);
     return ESP_OK;
 }
 
@@ -262,6 +369,306 @@ static uint32_t pad_smooth(touch_pad_t ch)
     return smooth;
 }
 
+static float pad_rel_now(touch_pad_t ch)
+{
+    uint32_t sm = pad_smooth(ch);
+    uint32_t bm = 0;
+
+    touch_pad_read_benchmark(ch, &bm);
+    if (bm < 50) {
+        return 0;
+    }
+    uint32_t ad = sm > bm ? sm - bm : bm - sm;
+    return (float)ad / (float)bm;
+}
+
+static touch_pad_t auto_ch(int idx)
+{
+    int gpio = idx == 0 ? board_hw_vol_up_gpio() : board_hw_vol_down_gpio();
+    return gpio_to_touch(gpio);
+}
+
+static float auto_propose(int idx, float peak)
+{
+    float proposed = touch_auto_from_peak(peak);
+    if (s_have_factory) {
+        float fac = idx == 0 ? s_factory_up : s_factory_dn;
+        proposed = touch_auto_refine_factory(fac, proposed);
+    }
+    return proposed;
+}
+
+static void auto_note_chatter(int64_t t)
+{
+    if (s_chatter_t0_ms == 0 || (t - s_chatter_t0_ms) > SB_TOUCH_AUTO_CHATTER_MS) {
+        s_chatter_t0_ms = t;
+        s_chatter_n = 0;
+    }
+    s_chatter_n++;
+    if (s_chatter_n >= SB_TOUCH_AUTO_CHATTER_N && !s_learn_freeze) {
+        s_learn_freeze = true;
+        ESP_LOGW(TAG, "touch auto freeze (pocket/chatter n=%d)", s_chatter_n);
+    }
+}
+
+static void auto_queue(int idx, float next, const char *why)
+{
+    float live = live_sens(idx);
+
+    next = touch_auto_clamp_auto(next);
+    if (next > live) {
+        if (next - live < 0.001f) {
+            return;
+        }
+    } else if (live - next < 0.001f) {
+        return;
+    }
+    if (!s_pending_apply) {
+        s_want_up = s_sens_up;
+        s_want_dn = s_sens_dn;
+    }
+    if (idx == 0) {
+        s_want_up = next;
+    } else {
+        s_want_dn = next;
+    }
+    s_pending_apply = true;
+    ESP_LOGI(TAG, "touch auto queue %c %.3f -> %.3f (%s)",
+             idx == 0 ? '+' : '-', live, next, why);
+}
+
+static void auto_commit_first(int idx)
+{
+    float med = touch_auto_median(s_first_peaks[idx], s_first_n[idx]);
+    float next = auto_propose(idx, med);
+    s_first_done[idx] = true;
+    auto_queue(idx, next, "first-N");
+    ESP_LOGI(TAG, "touch auto first-N %c n=%d med=%.3f -> %.3f",
+             idx == 0 ? '+' : '-', s_first_n[idx], med, next);
+}
+
+static void auto_consider_leak(int idx, int64_t t)
+{
+    float med;
+    float target;
+    float next;
+    float live;
+
+    if (s_leak_n[idx] < SB_TOUCH_AUTO_LEAK_N) {
+        return;
+    }
+    if (s_last_leak_ms[idx] && (t - s_last_leak_ms[idx]) < SB_TOUCH_AUTO_LEAK_MIN_MS) {
+        return;
+    }
+    med = touch_auto_median(s_leak_peaks[idx], SB_TOUCH_AUTO_LEAK_N);
+    target = auto_propose(idx, med);
+    live = live_sens(idx);
+    if (s_graze_n[idx] >= 2) {
+        next = live * (1.0f + SB_TOUCH_AUTO_LEAK_STEP_FIRM);
+        if (next < SB_TOUCH_AUTO_FLOOR) {
+            next = SB_TOUCH_AUTO_FLOOR;
+        }
+        if (next > SB_TOUCH_AUTO_CEIL) {
+            next = SB_TOUCH_AUTO_CEIL;
+        }
+        next = touch_auto_clamp_hard(next);
+        if (s_have_factory) {
+            next = touch_auto_refine_factory(idx == 0 ? s_factory_up : s_factory_dn,
+                                             next);
+        }
+        auto_queue(idx, next, "leak-graze");
+        s_last_leak_ms[idx] = t;
+        s_graze_n[idx] = 0;
+        return;
+    }
+    if (!touch_auto_leak_disagrees(live, target)) {
+        return;
+    }
+    next = touch_auto_leak_step(live, target);
+    if (s_have_factory) {
+        next = touch_auto_refine_factory(idx == 0 ? s_factory_up : s_factory_dn, next);
+    }
+    auto_queue(idx, next, "leak");
+    s_last_leak_ms[idx] = t;
+}
+
+static void auto_on_press(int idx)
+{
+    int64_t t = now_ms();
+    s_auto[idx].tracking = true;
+    s_auto[idx].tainted = s_chord || both_down();
+    s_auto[idx].press_ms = t;
+    s_auto[idx].peak = pad_rel_now(auto_ch(idx));
+    if (both_down()) {
+        s_auto[0].tainted = true;
+        s_auto[1].tainted = true;
+    }
+    auto_note_chatter(t);
+}
+
+static void auto_on_release(int idx)
+{
+    int64_t t = now_ms();
+    int hold;
+    float peak;
+    float would;
+    float live;
+    bool tainted;
+    bool clean;
+    bool graze;
+    char which = idx == 0 ? '+' : '-';
+
+    if (!s_auto[idx].tracking) {
+        return;
+    }
+    hold = (int)(t - s_auto[idx].press_ms);
+    peak = s_auto[idx].peak;
+    tainted = s_auto[idx].tainted || s_chord;
+    live = live_sens(idx);
+    would = auto_propose(idx, peak);
+    clean = !tainted && touch_auto_is_clean(hold, peak);
+    graze = !tainted && touch_auto_is_graze(hold, peak, live);
+    s_auto[idx].tracking = false;
+
+    ESP_LOGI(TAG,
+             "touch auto pad=%c hold_ms=%d peak=%.3f trip=%.3f would=%.3f "
+             "live=%.3f first=%d/%d done=%d tainted=%d clean=%d graze=%d",
+             which, hold, peak, touch_auto_idf_trip(live), would, live,
+             s_first_n[idx], SB_TOUCH_AUTO_FIRST_N, (int)s_first_done[idx],
+             (int)tainted, (int)clean, (int)graze);
+
+    if (s_calibrating || s_learn_freeze || t < s_settle_until_ms) {
+        return;
+    }
+    if (tainted || peak > SB_TOUCH_AUTO_PEAK_WET) {
+        return;
+    }
+    if (graze) {
+        s_graze_n[idx]++;
+        return;
+    }
+    if (!clean) {
+        return;
+    }
+    if (!s_first_done[idx]) {
+        if (s_first_n[idx] < SB_TOUCH_AUTO_FIRST_N) {
+            s_first_peaks[idx][s_first_n[idx]++] = peak;
+        }
+        if (s_first_n[idx] >= SB_TOUCH_AUTO_FIRST_N) {
+            auto_commit_first(idx);
+        }
+        return;
+    }
+    s_leak_peaks[idx][s_leak_i[idx]] = peak;
+    s_leak_i[idx] = (s_leak_i[idx] + 1) % SB_TOUCH_AUTO_LEAK_N;
+    if (s_leak_n[idx] < SB_TOUCH_AUTO_LEAK_N) {
+        s_leak_n[idx]++;
+    }
+    auto_consider_leak(idx, t);
+}
+
+static void auto_sample(void)
+{
+    int idx;
+    for (idx = 0; idx < 2; idx++) {
+        if (!s_auto[idx].tracking) {
+            continue;
+        }
+        float rel = pad_rel_now(auto_ch(idx));
+        if (rel > s_auto[idx].peak) {
+            s_auto[idx].peak = rel;
+        }
+    }
+    if (s_auto[0].tracking && s_auto[1].tracking) {
+        s_auto[0].tainted = true;
+        s_auto[1].tainted = true;
+        return;
+    }
+    if (s_auto[0].tracking && pad_rel_now(auto_ch(1)) >= SB_TOUCH_AUTO_DUAL_REL) {
+        s_auto[0].tainted = true;
+    }
+    if (s_auto[1].tracking && pad_rel_now(auto_ch(0)) >= SB_TOUCH_AUTO_DUAL_REL) {
+        s_auto[1].tainted = true;
+    }
+}
+
+static void auto_flush(void)
+{
+    float old_up;
+    float old_dn;
+    esp_err_t err;
+
+    if (!s_pending_apply || s_calibrating || s_chord || !both_up()) {
+        return;
+    }
+    if (s_chord_count > 0) {
+        return;
+    }
+    old_up = s_sens_up;
+    old_dn = s_sens_dn;
+    s_sens_up = s_want_up;
+    s_sens_dn = s_want_dn;
+    err = apply_sens();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "touch auto apply failed (%s), revert %.3f/%.3f",
+                 esp_err_to_name(err), old_up, old_dn);
+        s_sens_up = old_up;
+        s_sens_dn = old_dn;
+        (void)apply_sens();
+        s_pending_apply = false;
+        return;
+    }
+    {
+        uint8_t first = 0;
+        if (s_first_done[0]) {
+            first |= SB_TOUCH_AUTO_FIRST_UP;
+        }
+        if (s_first_done[1]) {
+            first |= SB_TOUCH_AUTO_FIRST_DN;
+        }
+        err = config_store_save_touch_sens_auto(s_sens_up, s_sens_dn, first);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "touch auto persist failed (%s)", esp_err_to_name(err));
+    } else {
+        s_rev = SB_TOUCH_AUTO_REV;
+    }
+    s_pending_apply = false;
+    ESP_LOGI(TAG, "touch auto settled vol+=%.3f vol-=%.3f rev=%u first=%d/%d",
+             s_sens_up, s_sens_dn, (unsigned)s_rev,
+             (int)s_first_done[0], (int)s_first_done[1]);
+}
+
+void volume_buttons_reset_auto(void)
+{
+    (void)config_store_reset_auto_touch_sens();
+    auto_clear_learn();
+    if (config_store_load_factory_touch_sens(&s_factory_up, &s_factory_dn)) {
+        s_have_factory = true;
+        s_sens_up = s_factory_up;
+        s_sens_dn = s_factory_dn;
+        s_rev = SB_TOUCH_SENS_REV;
+    } else {
+        s_have_factory = false;
+        s_sens_up = SB_TOUCH_SENS;
+        s_sens_dn = SB_TOUCH_SENS;
+        s_rev = 0;
+    }
+    ESP_LOGW(TAG, "touch auto reset live=%.3f/%.3f rev=%u", s_sens_up, s_sens_dn,
+             (unsigned)s_rev);
+}
+
+void volume_buttons_log_status(void)
+{
+    log_shipper_printf(
+        "touch auto live +=%.3f -=%.3f rev=%u factory=%d "
+        "f+=%.3f f-=%.3f first=%d/%d %d/%d leak=%d/%d freeze=%d\n",
+        s_sens_up, s_sens_dn, (unsigned)s_rev, (int)s_have_factory,
+        s_factory_up, s_factory_dn, s_first_n[0], SB_TOUCH_AUTO_FIRST_N,
+        s_first_n[1], SB_TOUCH_AUTO_FIRST_N, s_leak_n[0], s_leak_n[1],
+        (int)s_learn_freeze);
+}
+
 static bool pad_seen(uint32_t idle, uint32_t now, float *rel_out)
 {
     if (idle < 50) {
@@ -274,27 +681,6 @@ static bool pad_seen(uint32_t idle, uint32_t now, float *rel_out)
     return (rel >= SB_TOUCH_CAL_SEE) || (ad >= SB_TOUCH_CAL_MIN_DELTA);
 }
 
-static esp_err_t apply_sens(void)
-{
-    touch_element_stop();
-    if (s_btn[0]) {
-        touch_button_delete(s_btn[0]);
-        s_btn[0] = NULL;
-    }
-    if (s_btn[1]) {
-        touch_button_delete(s_btn[1]);
-        s_btn[1] = NULL;
-    }
-    esp_err_t err = make_button(board_hw_vol_up_gpio(), +1, s_sens_up, &s_btn[0]);
-    if (err == ESP_OK) {
-        err = make_button(board_hw_vol_down_gpio(), -1, s_sens_dn, &s_btn[1]);
-    }
-    if (err == ESP_OK) {
-        err = touch_element_start();
-    }
-    return err;
-}
-
 esp_err_t volume_buttons_set_sens(float up, float dn)
 {
     if (!s_ready) {
@@ -304,9 +690,13 @@ esp_err_t volume_buttons_set_sens(float up, float dn)
     if (err != ESP_OK) {
         return err;
     }
-    if (!config_store_load_touch_sens(&s_sens_up, &s_sens_dn, NULL)) {
+    if (!config_store_load_touch_sens(&s_sens_up, &s_sens_dn, &s_rev)) {
         return ESP_FAIL;
     }
+    s_factory_up = s_sens_up;
+    s_factory_dn = s_sens_dn;
+    s_have_factory = true;
+    s_first_done[0] = s_first_done[1] = true;
     s_need_cal = false;
     return apply_sens();
 }
@@ -498,6 +888,11 @@ esp_err_t volume_buttons_calibrate(void)
     s_sens_up = peak_to_sens(peak_up);
     s_sens_dn = peak_to_sens(peak_dn);
     config_store_save_touch_sens(s_sens_up, s_sens_dn);
+    s_factory_up = s_sens_up;
+    s_factory_dn = s_sens_dn;
+    s_have_factory = true;
+    s_rev = SB_TOUCH_SENS_REV;
+    s_first_done[0] = s_first_done[1] = true;
     esp_err_t err = apply_sens();
     s_need_cal = false;
     s_calibrating = false;
@@ -534,11 +929,15 @@ void volume_buttons_poll(void)
         }
     }
 
+    auto_sample();
+
     int64_t now = esp_timer_get_time() / 1000;
     if (s_chord_count > 0 && both_up() && !s_chord
         && (now - s_chord_last_ms) >= SB_CHORD_COMMIT_MS) {
         chord_commit();
     }
+
+    auto_flush();
 
     /* Drain the queue first so a same-cycle overlap becomes a chord, not a
      * volume tick. Stay silent until both pads are up after a chord. */

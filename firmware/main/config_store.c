@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "config_store.h"
+#include "touch_auto_cal.h"
 #include "listen_stats.h"
 #include "wifi_boot.h"
 #include "sdkconfig.h"
@@ -410,6 +411,33 @@ esp_err_t config_store_clear_wifi(void)
     return err;
 }
 
+static void clamp_tsens_milli(int32_t *v)
+{
+    if (*v < 1) {
+        *v = 1;
+    }
+    if (*v > 500) {
+        *v = 500;
+    }
+}
+
+static esp_err_t save_touch_pair(nvs_handle_t h, const char *k_up, const char *k_dn,
+                                const char *k_ok, float up, float dn)
+{
+    int32_t u = (int32_t)(up * 1000.0f + 0.5f);
+    int32_t d = (int32_t)(dn * 1000.0f + 0.5f);
+    clamp_tsens_milli(&u);
+    clamp_tsens_milli(&d);
+    esp_err_t err = nvs_set_i32(h, k_up, u);
+    if (err == ESP_OK) {
+        err = nvs_set_i32(h, k_dn, d);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_u8(h, k_ok, 1);
+    }
+    return err;
+}
+
 bool config_store_load_touch_sens(float *up, float *dn, uint8_t *rev)
 {
     nvs_handle_t h;
@@ -446,43 +474,165 @@ bool config_store_load_touch_sens(float *up, float *dn, uint8_t *rev)
 
 esp_err_t config_store_save_touch_sens(float up, float dn)
 {
-    int32_t u = (int32_t)(up * 1000.0f + 0.5f);
-    int32_t d = (int32_t)(dn * 1000.0f + 0.5f);
-    if (u < 1) {
-        u = 1;
-    }
-    if (u > 500) {
-        u = 500;
-    }
-    if (d < 1) {
-        d = 1;
-    }
-    if (d > 500) {
-        d = 500;
-    }
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
     if (err != ESP_OK) {
         return err;
     }
-    err = nvs_set_i32(h, "tsens_up", u);
-    if (err == ESP_OK) {
-        err = nvs_set_i32(h, "tsens_dn", d);
-    }
-    if (err == ESP_OK) {
-        err = nvs_set_u8(h, "tsens_ok", 1);
-    }
+    err = save_touch_pair(h, "tsens_up", "tsens_dn", "tsens_ok", up, dn);
     if (err == ESP_OK) {
         err = nvs_set_u8(h, "tsens_rev", SB_TOUCH_SENS_REV);
+    }
+    if (err == ESP_OK) {
+        err = save_touch_pair(h, "tsens_f_up", "tsens_f_dn", "tsens_f_ok", up, dn);
+    }
+    if (err == ESP_OK) {
+        (void)nvs_erase_key(h, "tsens_first");
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "touch sens factory up=%.3f dn=%.3f rev=%d", up, dn,
+                 SB_TOUCH_SENS_REV);
+    }
+    return err;
+}
+
+bool config_store_load_touch_auto_first(uint8_t *mask)
+{
+    nvs_handle_t h;
+    uint8_t v = 0;
+
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+        if (mask) {
+            *mask = 0;
+        }
+        return false;
+    }
+    if (nvs_get_u8(h, "tsens_first", &v) != ESP_OK) {
+        nvs_close(h);
+        if (mask) {
+            *mask = 0;
+        }
+        return false;
+    }
+    nvs_close(h);
+    v &= (uint8_t)(SB_TOUCH_AUTO_FIRST_UP | SB_TOUCH_AUTO_FIRST_DN);
+    if (mask) {
+        *mask = v;
+    }
+    return true;
+}
+
+esp_err_t config_store_save_touch_sens_auto(float up, float dn, uint8_t first_mask)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (up < SB_TOUCH_AUTO_FLOOR) {
+        up = SB_TOUCH_AUTO_FLOOR;
+    }
+    if (dn < SB_TOUCH_AUTO_FLOOR) {
+        dn = SB_TOUCH_AUTO_FLOOR;
+    }
+    if (up > SB_TOUCH_AUTO_CEIL) {
+        up = SB_TOUCH_AUTO_CEIL;
+    }
+    if (dn > SB_TOUCH_AUTO_CEIL) {
+        dn = SB_TOUCH_AUTO_CEIL;
+    }
+    first_mask &= (uint8_t)(SB_TOUCH_AUTO_FIRST_UP | SB_TOUCH_AUTO_FIRST_DN);
+    err = save_touch_pair(h, "tsens_up", "tsens_dn", "tsens_ok", up, dn);
+    if (err == ESP_OK) {
+        err = nvs_set_u8(h, "tsens_rev", SB_TOUCH_AUTO_REV);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_u8(h, "tsens_first", first_mask);
     }
     if (err == ESP_OK) {
         err = nvs_commit(h);
     }
     nvs_close(h);
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "touch sens up=%.3f dn=%.3f", (float)u / 1000.0f,
-                 (float)d / 1000.0f);
+        ESP_LOGI(TAG, "touch sens auto up=%.3f dn=%.3f rev=%d first=%u",
+                 up, dn, SB_TOUCH_AUTO_REV, (unsigned)first_mask);
     }
+    return err;
+}
+
+bool config_store_load_factory_touch_sens(float *up, float *dn)
+{
+    nvs_handle_t h;
+    int32_t u = 0;
+    int32_t d = 0;
+    uint8_t ok_flag = 0;
+
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+        return false;
+    }
+    bool ok = nvs_get_u8(h, "tsens_f_ok", &ok_flag) == ESP_OK
+              && ok_flag == 1
+              && nvs_get_i32(h, "tsens_f_up", &u) == ESP_OK
+              && nvs_get_i32(h, "tsens_f_dn", &d) == ESP_OK
+              && u >= 1 && u <= 500 && d >= 1 && d <= 500;
+    nvs_close(h);
+    if (!ok) {
+        return false;
+    }
+    if (up) {
+        *up = (float)u / 1000.0f;
+    }
+    if (dn) {
+        *dn = (float)d / 1000.0f;
+    }
+    return true;
+}
+
+esp_err_t config_store_ensure_factory_touch_snapshot(float up, float dn)
+{
+    if (config_store_load_factory_touch_sens(NULL, NULL)) {
+        return ESP_OK;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = save_touch_pair(h, "tsens_f_up", "tsens_f_dn", "tsens_f_ok", up, dn);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "touch factory snapshot up=%.3f dn=%.3f", up, dn);
+    }
+    return err;
+}
+
+esp_err_t config_store_reset_auto_touch_sens(void)
+{
+    float fu = 0;
+    float fd = 0;
+    if (config_store_load_factory_touch_sens(&fu, &fd)) {
+        ESP_LOGW(TAG, "touch auto reset -> factory %.3f/%.3f", fu, fd);
+        return config_store_save_touch_sens(fu, fd);
+    }
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    (void)nvs_erase_key(h, "tsens_ok");
+    (void)nvs_erase_key(h, "tsens_up");
+    (void)nvs_erase_key(h, "tsens_dn");
+    (void)nvs_erase_key(h, "tsens_rev");
+    (void)nvs_erase_key(h, "tsens_first");
+    err = nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGW(TAG, "touch auto reset -> default (no factory snapshot)");
     return err;
 }
 
@@ -504,6 +654,10 @@ esp_err_t config_store_wipe_touch_if_usb_factory(void)
     (void)nvs_erase_key(h, "tsens_up");
     (void)nvs_erase_key(h, "tsens_dn");
     (void)nvs_erase_key(h, "tsens_rev");
+    (void)nvs_erase_key(h, "tsens_first");
+    (void)nvs_erase_key(h, "tsens_f_ok");
+    (void)nvs_erase_key(h, "tsens_f_up");
+    (void)nvs_erase_key(h, "tsens_f_dn");
     err = nvs_commit(h);
     nvs_close(h);
     if (err != ESP_OK) {
