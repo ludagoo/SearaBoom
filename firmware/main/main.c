@@ -33,6 +33,8 @@ static volatile bool s_sta_got_ip;
 static volatile bool s_wifi_need_reconnect;
 static volatile int s_wifi_disc_reason;
 static volatile int s_wifi_fails;
+static volatile bool s_sta_did_assoc;
+static volatile bool s_ap_seen;
 static volatile int64_t s_wifi_retry_at_ms;
 static esp_timer_handle_t s_wifi_retry_timer;
 static bool s_healthy_marked;
@@ -164,6 +166,10 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         int reason = disc ? (int)disc->reason : 0;
         s_sta_got_ip = false;
         s_wifi_disc_reason = reason;
+        /* Anything but NO_AP_FOUND (201) means the AP was there (auth/DHCP/assoc). */
+        if (reason != WIFI_REASON_NO_AP_FOUND) {
+            s_ap_seen = true;
+        }
         if (s_sta_retry) {
             radio_player_on_sta_lost();
         }
@@ -194,6 +200,8 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
+        s_sta_did_assoc = true;
+        s_ap_seen = true;
         radio_player_arm_rssi_threshold();
         wifi_ap_record_t ap = {0};
         if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK && ap.rssi <= -78) {
@@ -255,6 +263,8 @@ esp_err_t wifi_sta_join(const sb_config_t *cfg)
     wifi.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     s_sta_got_ip = false;
     s_sta_retry = true;
+    s_sta_did_assoc = false;
+    s_ap_seen = false;
     s_wifi_fails = 0;
     s_wifi_need_reconnect = false;
     wifi_retry_timer_init();
@@ -319,6 +329,55 @@ static bool wifi_recover_ssid_from_driver(sb_config_t *cfg)
     return true;
 }
 
+static bool wifi_scan_has_ssid(const char *want)
+{
+    if (!want || !want[0]) {
+        return false;
+    }
+    wifi_scan_config_t scan = {0};
+    if (esp_task_wdt_status(NULL) == ESP_OK) {
+        esp_task_wdt_reset();
+    }
+    if (esp_wifi_scan_start(&scan, true) != ESP_OK) {
+        ESP_LOGW(TAG, "home SSID scan failed");
+        return false;
+    }
+    uint16_t n = 0;
+    esp_wifi_scan_get_ap_num(&n);
+    if (n == 0) {
+        ESP_LOGI(TAG, "scan missed saved ssid=%s (aps=0)", want);
+        return false;
+    }
+    if (n > 20) {
+        n = 20;
+    }
+    wifi_ap_record_t aps[20];
+    memset(aps, 0, sizeof(aps));
+    if (esp_wifi_scan_get_ap_records(&n, aps) != ESP_OK) {
+        return false;
+    }
+    for (uint16_t i = 0; i < n; i++) {
+        if (strncmp((const char *)aps[i].ssid, want, sizeof(aps[i].ssid)) == 0) {
+            ESP_LOGI(TAG, "scan saw saved ssid=%s rssi=%d", want, aps[i].rssi);
+            return true;
+        }
+    }
+    ESP_LOGI(TAG, "scan missed saved ssid=%s (aps=%u)", want, (unsigned)n);
+    return false;
+}
+
+static bool wifi_saved_network_on_air(void)
+{
+    if (s_sta_did_assoc || s_ap_seen) {
+        ESP_LOGI(TAG, "saved ssid seen assoc=%d ap_seen=%d reason=%d",
+                 (int)s_sta_did_assoc, (int)s_ap_seen, s_wifi_disc_reason);
+        return true;
+    }
+    wifi_retry_timer_stop();
+    s_wifi_need_reconnect = false;
+    return wifi_scan_has_ssid(s_cfg.ssid);
+}
+
 static sb_wifi_result_t wifi_sta_wait_for_ip(void)
 {
     led_status_set(SB_LED_RED, 500);
@@ -335,8 +394,6 @@ static sb_wifi_result_t wifi_sta_wait_for_ip(void)
             return SB_WIFI_OK;
         }
     }
-    ESP_LOGW(TAG, "WiFi join timeout ssid=%s fails=%d — STA retry, no setup AP",
-             s_cfg.ssid, s_wifi_fails);
     return SB_WIFI_NO_IP;
 }
 
@@ -366,32 +423,17 @@ static sb_wifi_result_t wifi_connect_or_setup(bool *play_welcome)
         wifi_recover_ssid_from_driver(&s_cfg);
     }
 
-    bool welcome = sb_wifi_should_play_welcome(s_cfg.ssid, s_cfg.name, s_cfg.city,
-                                              s_cfg.url_key, force_ap);
-    if (play_welcome) {
-        *play_welcome = welcome;
-    }
-
-    if (sb_wifi_should_start_portal(s_cfg.ssid, s_cfg.name, s_cfg.city,
-                                   s_cfg.url_key, force_ap)) {
-        if (welcome) {
-            ESP_LOGW(TAG, "No WiFi SSID saved -> setup AP");
+    if (force_ap || !config_store_has_wifi(&s_cfg)) {
+        if (force_ap) {
+            ESP_LOGW(TAG, "WiFi wipe -> setup AP");
         } else {
-            ESP_LOGW(TAG, "WiFi wipe -> setup AP (no welcome) name=%s city=%s",
-                     s_cfg.name[0] ? s_cfg.name : "-",
-                     s_cfg.city[0] ? s_cfg.city : "-");
+            ESP_LOGW(TAG, "No WiFi SSID saved -> setup AP");
+        }
+        if (play_welcome) {
+            *play_welcome = true;
         }
         wifi_start_sta_idle();
         return SB_WIFI_NEED_SETUP;
-    }
-
-    if (!config_store_has_wifi(&s_cfg)) {
-        ESP_LOGW(TAG, "SSID empty but configured name=%s city=%s url=%s — no setup AP",
-                 s_cfg.name[0] ? s_cfg.name : "-",
-                 s_cfg.city[0] ? s_cfg.city : "-",
-                 s_cfg.url_key);
-        wifi_start_sta_idle();
-        return SB_WIFI_NO_IP;
     }
 
     wifi_config_t wifi = {0};
@@ -399,13 +441,33 @@ static sb_wifi_result_t wifi_connect_or_setup(bool *play_welcome)
     strncpy((char *)wifi.sta.password, s_cfg.password, sizeof(wifi.sta.password));
     wifi.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
 
+    s_sta_did_assoc = false;
+    s_ap_seen = false;
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi));
     ESP_ERROR_CHECK(esp_wifi_start());
     /* 20 dBm + 240 MHz + I2S amp sags USB 5V. 17 dBm is enough for STA. */
     esp_wifi_set_max_tx_power(68);
 
-    return wifi_sta_wait_for_ip();
+    if (wifi_sta_wait_for_ip() == SB_WIFI_OK) {
+        return SB_WIFI_OK;
+    }
+
+    bool on_air = wifi_saved_network_on_air();
+    bool welcome = sb_wifi_should_play_welcome(s_cfg.ssid, false, on_air);
+    if (play_welcome) {
+        *play_welcome = welcome;
+    }
+    if (!sb_wifi_should_start_portal(s_cfg.ssid, false, on_air)) {
+        ESP_LOGW(TAG, "WiFi join timeout ssid=%s fails=%d — STA retry, no setup AP",
+                 s_cfg.ssid, s_wifi_fails);
+        s_sta_retry = true;
+        s_wifi_need_reconnect = true;
+        wifi_retry_timer_arm(1000);
+        return SB_WIFI_NO_IP;
+    }
+    ESP_LOGW(TAG, "saved ssid not on air -> setup AP");
+    return SB_WIFI_NEED_SETUP;
 }
 
 static void boot_start_radio(bool play_updated)
@@ -492,8 +554,8 @@ void app_main(void)
             radio_player_stop();
         }
     } else if (wifi_boot == SB_WIFI_NO_IP) {
-        /* Join-fail: keep STA retry (s_sta_retry still on). Empty-ssid
-         * configured box: idle STA, no radio, no welcome. */
+        /* Saved SSID was on the air (or associated) but DHCP/auth missed
+         * the boot window. Keep STA retry. No welcome. */
         wait_for_sta = true;
         ESP_LOGW(TAG, "Configured WiFi not joined — quiet STA retry, no welcome");
     }

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Device E2E: atualizado clip, setup AP welcome, join → connected clip, portal HTTP.
 
-This path is **first-setup only** (NVS erased). A saved SSID that will not join,
-or a named box with an empty ssid, must not play ap_welcome or start SoftAP —
-see tests/test_wifi_boot.py.
+This path is **first-setup and missing-home**. A saved SSID that is on the air
+but misses DHCP/auth must not play ap_welcome. Empty ssid / scan miss still
+does — see tests/test_wifi_boot.py.
 
 Usage:
   python3 tests/e2e_setup.py              # serial + AP join + portal GET

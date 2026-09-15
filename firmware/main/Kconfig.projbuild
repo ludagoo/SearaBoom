@@ -47,11 +47,12 @@ config SEARABOOM_LED_GPIO
     default 21
 
 config SEARABOOM_WIFI_TIMEOUT_MS
-    int "WiFi STA join timeout before quiet retry (ms)"
+    int "WiFi STA join timeout before scan/retry decision (ms)"
     default 25000
     help
-        How long boot waits for a DHCP lease on a saved SSID. A timeout stays
-        in STA retry — it does not start SoftAP or play the welcome clip.
-        SoftAP/welcome is first-setup (or an explicit wifi wipe) only.
+        How long boot waits for a DHCP lease on a saved SSID. If that SSID is
+        seen or was associated, a timeout stays in STA retry (no SoftAP,
+        no welcome). If the SSID is not on the air — or none is saved —
+        boot starts SoftAP and plays welcome so the user can pick a network.
 
 endmenu
