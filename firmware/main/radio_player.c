@@ -69,7 +69,10 @@ static const char *TAG = "radio_player";
 #define SB_ALC_CLICK32_DB 51
 #define SB_ALC_CLICK33_DB 57
 #define SB_ALC_CLICK34_DB 63
-/* Knob 22+ I2S ALC (dB). 1–21 stay v2. */
+#if SB_ALC_CLICK34_DB != 63
+#error "click 34 is listen-locked at I2S ALC max +63"
+#endif
+/* Knob 22+ I2S ALC (dB). 1–21 stay v2. Click 34 / +63 is the product ceiling. */
 static const int s_extra_alc[] = {
     SB_ALC_CLICK22_DB,
     SB_ALC_CLICK23_DB,
@@ -152,6 +155,7 @@ static volatile bool s_pcm_flowing;
 static volatile int s_pcm_peak_max;
 static volatile int64_t s_pcm_last_voice_us;
 static volatile bool s_amp_gated;
+static int64_t s_mix_hold_restart_until_ms;
 static volatile int64_t s_last_pcm_ms;
 static int64_t s_stall_grace_until_ms;
 static int s_restart_backoff_ms = 500;
@@ -180,6 +184,8 @@ static int s_aac_evt_st = -1;
 
 static int http_rb_filled(void);
 static void stream_snap(const char *why);
+static void i2s_alc_gate(void);
+static void drain_mix_evt(void);
 
 static int16_t *s_beep_pcm;
 static int16_t *s_limit_pcm;
@@ -206,7 +212,8 @@ static int volume_to_alc(int volume)
     if (volume > SB_VOLUME_MAX) {
         volume = SB_VOLUME_MAX;
     }
-    /* vol_curve v5: knobs 1–21 match v2. 22–34 add headroom, not a re-span. */
+    /* vol_curve v5: knobs 1–21 match v2. 22–34 add headroom, not a re-span.
+     * Product ceiling is 34 / +63. volume>34 clamps; do not add steps. */
     if (volume <= SB_VOL_CURVE2_MAX) {
         return SB_ALC_MIN_DB
             + ((volume - 1) * (SB_ALC_CURVE2_MAX_DB - SB_ALC_MIN_DB))
@@ -331,14 +338,26 @@ void radio_player_beep_limit(void)
     beep_play(s_limit_pcm, SB_LIMIT_FRAMES);
 }
 
-void radio_player_ungate(void)
+static void amp_gate(void)
+{
+    i2s_alc_gate();
+    s_amp_gated = true;
+}
+
+static void amp_apply_saved(const char *why)
 {
     if (!s_i2s) {
         return;
     }
-    s_amp_gated = false;
     i2s_alc_volume_set(s_i2s, volume_to_alc(s_volume));
-    ESP_LOGI(TAG, "amp ungated alc=%d dB", volume_to_alc(s_volume));
+    s_amp_gated = false;
+    ESP_LOGI(TAG, "amp ungated alc=%d dB%s", volume_to_alc(s_volume),
+             why ? why : "");
+}
+
+void radio_player_ungate(void)
+{
+    amp_apply_saved("");
 }
 
 /* Overlay mix output. ADF tone_stream is a flash-MP3 reader and needs a mix
@@ -429,10 +448,10 @@ static void pcm_note_s16(const int16_t *s, int n, int channels)
     if (!s_pcm_heard) {
         s_pcm_heard = true;
         ESP_LOGI(TAG, "PCM reached amp peak=%d", peak);
-        if (s_amp_gated && s_i2s) {
-            s_amp_gated = false;
-            i2s_alc_volume_set(s_i2s, volume_to_alc(s_volume));
-            ESP_LOGI(TAG, "amp ungated alc=%d dB", volume_to_alc(s_volume));
+        /* Ident/clips may ungate at the saved knob. Stream stays gated
+         * until go_live / ensure_radio applies that knob, then routes. */
+        if (s_amp_gated && s_i2s && s_clip_active && !s_running) {
+            amp_apply_saved(" (clip)");
         }
     }
 }
@@ -710,7 +729,7 @@ static void mix_restart(void)
     }
     i2s_set_clk_gated();
     if (restore) {
-        i2s_alc_volume_set(s_i2s, volume_to_alc(s_volume));
+        amp_apply_saved(" (mix restart)");
     }
     mix_route_clip_and_radio();
 }
@@ -719,6 +738,13 @@ static void mix_restart_if_needed(void)
 {
     if (!s_mix_pipe || !s_downmix) {
         return;
+    }
+    if (s_mix_hold_restart_until_ms) {
+        int64_t now = esp_timer_get_time() / 1000;
+        if (now < s_mix_hold_restart_until_ms) {
+            return;
+        }
+        s_mix_hold_restart_until_ms = 0;
     }
     audio_element_state_t st = audio_element_get_state(s_downmix);
     audio_element_state_t i2s_st = s_i2s ? audio_element_get_state(s_i2s) : AEL_STATE_RUNNING;
@@ -994,6 +1020,8 @@ static esp_err_t ensure_radio(const char *url, int volume, bool hold)
         ESP_LOGI(TAG, "radio prefetch (mixer not reading yet)");
     } else {
         radio_mark_started();
+        /* Saved knob before the mixer reads radio — no 0 dB / leftover burst. */
+        amp_apply_saved(" (stream)");
         ESP_LOGI(TAG, "radio live");
     }
     mix_route_clip_and_radio();
@@ -1091,21 +1119,19 @@ esp_err_t radio_player_go_live(void)
     ESP_LOGI(TAG, "Go live — mixer reads radio");
     /* Always rewind mix here. After the ident clip the mixer may still
      * look RUNNING while wedged on an aborted clip rb; if-needed then
-     * leaves the station silent. Gate through set_clk so the restart
-     * cannot clock analog full scale, then ungate for the station. */
-    i2s_alc_gate();
-    s_amp_gated = true;
+     * leaves the station silent. Stream stays gated through set_clk
+     * until the saved knob is on I2S, then the mixer reads radio. */
+    amp_gate();
     mix_restart();
-    if (s_i2s) {
-        s_amp_gated = false;
-        i2s_alc_volume_set(s_i2s, volume_to_alc(s_volume));
-        ESP_LOGI(TAG, "amp ungated alc=%d dB", volume_to_alc(s_volume));
-    }
+    drain_mix_evt();
     if (!s_running) {
         radio_mark_started();
     }
     s_prefetching = false;
+    amp_apply_saved(" (stream)");
     mix_route_clip_and_radio();
+    drain_mix_evt();
+    s_mix_hold_restart_until_ms = (esp_timer_get_time() / 1000) + 1000;
     return ESP_OK;
 }
 

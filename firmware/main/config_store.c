@@ -119,6 +119,7 @@ esp_err_t config_store_load(sb_config_t *cfg)
      * Curve 3: 1–21 stay v2; 22/23/24 = +4/+6/+9 dB.
      * Curve 4: 1–24 stay v3; 25/26 = +12/+15 dB.
      * Curve 5: 1–26 stay v4; 27–34 = +21…+63 dB (6 dB clicks).
+     * 34 / +63 is the listen-confirmed ceiling; do not add clicks.
      * v1→v2 remaps steps so perceived loudness is preserved.
      * Later curves keep the saved step (do not jump a parked max to the new top).
      */

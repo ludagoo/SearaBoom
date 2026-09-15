@@ -13,10 +13,15 @@
 #define SB_AP_SSID "SearaBoom"
 #define SB_VOLUME_MIN 1
 #define SB_VOLUME_MAX 34
-/* v2 top: 1–21 stay -36…+2 dB. Extra clicks 22–34 add +4…+63, not a re-span. */
+/* v2 top: 1–21 stay -36…+2 dB. Extra clicks 22–34 add +4…+63, not a re-span.
+ * 34 / +63 is the listen-confirmed product ceiling (I2S ALC max).
+ * Do not add clicks past 34. Default 21 stays +2 dB. */
 #define SB_VOL_CURVE2_MAX 21
 #define SB_VOL_CURVE 5
 #define SB_DEFAULT_VOLUME SB_VOL_CURVE2_MAX
+#if SB_VOLUME_MAX != 34 || SB_DEFAULT_VOLUME != 21
+#error "volume ceiling is listen-locked at 34 / +63; default stays 21 / +2"
+#endif
 #define SB_DEBOUNCE_MS 250
 
 void wifi_set_sta_retry(bool on);

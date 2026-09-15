@@ -47,6 +47,10 @@ def test_headers_accept_new_max() -> None:
     assert "#define SB_VOL_CURVE2_MAX 21" in H
     assert "#define SB_VOL_CURVE 5" in H
     assert "#define SB_DEFAULT_VOLUME SB_VOL_CURVE2_MAX" in H
+    assert "listen-confirmed product ceiling" in H
+    assert "default stays 21 / +2" in H
+    assert "SB_ALC_CLICK35" not in H
+    assert "SB_ALC_CLICK35" not in RP
 
 
 def test_v2_steps_unchanged() -> None:
@@ -89,6 +93,15 @@ def test_firmware_wires_curve_and_help() -> None:
     assert "i2s_cfg.chan_cfg.auto_clear = true" in RP
     assert "i2s_set_clk_gated" in RP
     assert "i2s_alc_gate" in RP
+    assert "amp_apply_saved" in RP
+    assert 'amp_apply_saved(" (stream)")' in RP
+    assert 'amp_apply_saved(" (clip)")' in RP
+    assert "s_clip_active && !s_running" in RP
+    assert "s_mix_hold_restart_until_ms" in RP
+    go_live = RP.split("esp_err_t radio_player_go_live(void)", 1)[1]
+    go_live = go_live.split("esp_err_t radio_player_start(", 1)[0]
+    assert go_live.find("amp_apply_saved") < go_live.find("mix_route_clip_and_radio")
+    assert go_live.find("amp_gate") < go_live.find("amp_apply_saved")
 
 
 if __name__ == "__main__":
