@@ -31,12 +31,18 @@ esp_err_t config_store_clear_wifi(void);
  * 3 = factory-flasher `touch cal` / serial `touch sens` on this firmware.
  * 4 = field auto-cal from real presses. Older revs are ignored so field
  * OTA keeps the fixed SB_TOUCH_SENS graze fix from 0.5.20. Factory rev 3
- * is snapshotted in tsens_f_* so a 4-chord reset can drop rev 4. */
+ * is snapshotted in tsens_f_* so a 4-chord reset can drop rev 4.
+ * Rev 4 also stores tsens_first (per-pad first-N done). One pad committing
+ * must not retire the other pad on the next boot. */
 #define SB_TOUCH_SENS_REV 3
 #define SB_TOUCH_AUTO_REV 4
+/* Per-pad first-N done bits stored with rev 4 (`tsens_first`). */
+#define SB_TOUCH_AUTO_FIRST_UP 0x01u
+#define SB_TOUCH_AUTO_FIRST_DN 0x02u
 bool config_store_load_touch_sens(float *up, float *dn, uint8_t *rev);
+bool config_store_load_touch_auto_first(uint8_t *mask);
 esp_err_t config_store_save_touch_sens(float up, float dn);
-esp_err_t config_store_save_touch_sens_auto(float up, float dn);
+esp_err_t config_store_save_touch_sens_auto(float up, float dn, uint8_t first_mask);
 bool config_store_load_factory_touch_sens(float *up, float *dn);
 esp_err_t config_store_ensure_factory_touch_snapshot(float up, float dn);
 /* Restore factory snapshot as live rev 3, or clear live so boot uses SB_TOUCH_SENS. */

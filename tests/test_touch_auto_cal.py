@@ -43,3 +43,33 @@ def test_auto_from_peak_bias() -> None:
     assert from_peak(0.10) == 0.15
     assert abs(from_peak(0.20) - 0.19) < 1e-6
     assert from_peak(0.80) == 0.50
+
+
+def test_factory_refine_cannot_persist_below_floor() -> None:
+    floor_v = 0.15
+    ceil_v = 0.50
+    refine_frac = 0.20
+
+    def refine(factory: float, proposed: float) -> float:
+        lo = factory * (1.0 - refine_frac)
+        hi = factory * (1.0 + refine_frac)
+        p = min(hi, max(lo, proposed))
+        return min(ceil_v, max(floor_v, p))
+
+    assert "return touch_auto_clamp_auto(proposed);" in H
+    assert "SB_TOUCH_AUTO_FLOOR" in ST
+    assert refine(0.10, 0.15) == 0.15
+    assert refine(0.10, 0.08) == 0.15
+    assert abs(refine(0.20, 0.15) - 0.16) < 1e-6
+    assert abs(refine(0.20, 0.19) - 0.19) < 1e-6
+
+
+def test_one_pad_rev4_does_not_retire_other_first_n() -> None:
+    boot = VB.split("rev >= SB_TOUCH_AUTO_REV", 1)[1].split("} else {", 1)[0]
+    assert "s_first_done[0] = s_first_done[1] = true" not in boot
+    assert "config_store_load_touch_auto_first" in boot
+    assert "SB_TOUCH_AUTO_FIRST_UP" in boot
+    assert "SB_TOUCH_AUTO_FIRST_DN" in boot
+    assert "tsens_first" in ST
+    assert "config_store_save_touch_sens_auto(s_sens_up, s_sens_dn, first)" in VB
+    assert "nvs_set_u8(h, \"tsens_first\", first_mask)" in ST

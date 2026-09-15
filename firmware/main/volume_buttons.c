@@ -290,10 +290,14 @@ esp_err_t volume_buttons_init(volume_btn_cb_t cb, volume_gesture_cb_t gesture, v
     s_have_factory = config_store_load_factory_touch_sens(&s_factory_up,
                                                          &s_factory_dn);
     if (loaded && rev >= SB_TOUCH_AUTO_REV) {
+        uint8_t first = 0;
         s_sens_up = loaded_up;
         s_sens_dn = loaded_dn;
         s_rev = rev;
-        s_first_done[0] = s_first_done[1] = true;
+        /* Missing tsens_first (old one-pad write) → neither pad is done. */
+        (void)config_store_load_touch_auto_first(&first);
+        s_first_done[0] = (first & SB_TOUCH_AUTO_FIRST_UP) != 0;
+        s_first_done[1] = (first & SB_TOUCH_AUTO_FIRST_DN) != 0;
     } else {
         if (loaded && rev >= SB_TOUCH_SENS_REV) {
             if (!s_have_factory) {
@@ -330,10 +334,11 @@ esp_err_t volume_buttons_init(volume_btn_cb_t cb, volume_gesture_cb_t gesture, v
     s_gesture = gesture;
     s_ctx = ctx;
     s_ready = true;
-    ESP_LOGI(TAG, "Touch vol-up=T%d vol-down=T%d sens=%.3f/%.3f rev=%u factory=%d",
+    ESP_LOGI(TAG, "Touch vol-up=T%d vol-down=T%d sens=%.3f/%.3f rev=%u factory=%d first=%d/%d",
              (int)gpio_to_touch(board_hw_vol_up_gpio()),
              (int)gpio_to_touch(board_hw_vol_down_gpio()),
-             s_sens_up, s_sens_dn, (unsigned)s_rev, (int)s_have_factory);
+             s_sens_up, s_sens_dn, (unsigned)s_rev, (int)s_have_factory,
+             (int)s_first_done[0], (int)s_first_done[1]);
     return ESP_OK;
 }
 
@@ -410,6 +415,7 @@ static void auto_queue(int idx, float next, const char *why)
 {
     float live = live_sens(idx);
 
+    next = touch_auto_clamp_auto(next);
     if (next > live) {
         if (next - live < 0.001f) {
             return;
@@ -612,7 +618,16 @@ static void auto_flush(void)
         s_pending_apply = false;
         return;
     }
-    err = config_store_save_touch_sens_auto(s_sens_up, s_sens_dn);
+    {
+        uint8_t first = 0;
+        if (s_first_done[0]) {
+            first |= SB_TOUCH_AUTO_FIRST_UP;
+        }
+        if (s_first_done[1]) {
+            first |= SB_TOUCH_AUTO_FIRST_DN;
+        }
+        err = config_store_save_touch_sens_auto(s_sens_up, s_sens_dn, first);
+    }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "touch auto persist failed (%s)", esp_err_to_name(err));
     } else {

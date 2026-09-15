@@ -49,10 +49,9 @@ static inline float touch_auto_clamp_hard(float sens)
     return sens;
 }
 
-/* peak → stored channel_sens, firmer than factory peak*0.80. */
-static inline float touch_auto_from_peak(float peak)
+/* Auto persist never goes below 0.15 / above 0.50. */
+static inline float touch_auto_clamp_auto(float sens)
 {
-    float sens = peak * SB_TOUCH_AUTO_FRAC + SB_TOUCH_AUTO_BIAS;
     if (sens < SB_TOUCH_AUTO_FLOOR) {
         sens = SB_TOUCH_AUTO_FLOOR;
     }
@@ -62,6 +61,14 @@ static inline float touch_auto_from_peak(float peak)
     return touch_auto_clamp_hard(sens);
 }
 
+/* peak → stored channel_sens, firmer than factory peak*0.80. */
+static inline float touch_auto_from_peak(float peak)
+{
+    return touch_auto_clamp_auto(peak * SB_TOUCH_AUTO_FRAC + SB_TOUCH_AUTO_BIAS);
+}
+
+/* ±20% of factory, then auto floor/ceil. A low factory snapshot (0.10)
+ * must not pull persist to 0.12. */
 static inline float touch_auto_refine_factory(float factory, float proposed)
 {
     float lo = factory * (1.0f - SB_TOUCH_AUTO_FACTORY_REFINE);
@@ -72,7 +79,7 @@ static inline float touch_auto_refine_factory(float factory, float proposed)
     if (proposed > hi) {
         proposed = hi;
     }
-    return touch_auto_clamp_hard(proposed);
+    return touch_auto_clamp_auto(proposed);
 }
 
 static inline float touch_auto_idf_trip(float channel_sens)
@@ -136,13 +143,7 @@ static inline float touch_auto_leak_step(float live, float target)
             next = target;
         }
     }
-    if (next < SB_TOUCH_AUTO_FLOOR) {
-        next = SB_TOUCH_AUTO_FLOOR;
-    }
-    if (next > SB_TOUCH_AUTO_CEIL) {
-        next = SB_TOUCH_AUTO_CEIL;
-    }
-    return touch_auto_clamp_hard(next);
+    return touch_auto_clamp_auto(next);
 }
 
 static inline int touch_auto_leak_disagrees(float live, float target)
