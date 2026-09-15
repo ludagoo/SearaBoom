@@ -40,6 +40,7 @@ static int64_t s_last_clip_at;
 static sb_clip_id_t s_want_field = SB_CLIP_COUNT;
 static int64_t s_fields_at;
 static int64_t s_connected_at;
+static bool s_play_welcome;
 
 /* Palette from radioseara.fm: #052C31 bg, #007985 banners, #EC9F17 gold, #009035 WhatsApp. */
 static const char *s_css =
@@ -146,6 +147,9 @@ static void request_ap_clip(sb_clip_id_t id, int delay_ms, bool loop)
     if (s_saving && id != SB_CLIP_AP_SAVED) {
         return;
     }
+    if (id == SB_CLIP_AP_WELCOME && !s_play_welcome) {
+        return;
+    }
     if (id == SB_CLIP_AP_WELCOME && (s_page_said || s_need_page)) {
         return;
     }
@@ -207,6 +211,9 @@ static void ap_clip_tick(void)
             wifi_sta_list_t list = {0};
             esp_wifi_ap_get_sta_list(&list);
             if (list.num == 0) {
+                if (!s_play_welcome) {
+                    return;
+                }
                 id = SB_CLIP_AP_WELCOME;
                 loop = true;
             }
@@ -611,9 +618,10 @@ static void dns_server_task(void *arg)
     vTaskDelete(NULL);
 }
 
-void captive_portal_run(void)
+void captive_portal_run(bool play_welcome)
 {
-    ESP_LOGI(TAG, "Entering setup AP mode");
+    s_play_welcome = play_welcome;
+    ESP_LOGI(TAG, "Entering setup AP mode welcome=%d", (int)play_welcome);
     led_status_set(SB_LED_WHITE, 0);
     wifi_set_sta_retry(false);
 
@@ -669,7 +677,11 @@ void captive_portal_run(void)
     esp_netif_get_ip_info(ap_netif, &got);
     ESP_LOGI(TAG, "AP netif " IPSTR, IP2STR(&got.ip));
     ESP_LOGI(TAG, "AP %s up at http://4.3.2.1/", SB_AP_SSID);
-    clip_player_loop(SB_CLIP_AP_WELCOME);
+    if (play_welcome) {
+        clip_player_loop(SB_CLIP_AP_WELCOME);
+    } else {
+        ESP_LOGI(TAG, "skip welcome clip (not first-setup)");
+    }
 
     if (esp_spiffs_mounted("storage")) {
         ESP_LOGI(TAG, "SPIFFS already mounted");
@@ -750,7 +762,9 @@ void captive_portal_run(void)
                 s_want_field = SB_CLIP_COUNT;
                 s_last_clip = SB_CLIP_COUNT;
                 s_connected_at = 0;
-                request_ap_clip(SB_CLIP_AP_WELCOME, 0, true);
+                if (s_play_welcome) {
+                    request_ap_clip(SB_CLIP_AP_WELCOME, 0, true);
+                }
             }
         }
         clip_player_tick();

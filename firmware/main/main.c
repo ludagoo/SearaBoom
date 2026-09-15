@@ -15,6 +15,7 @@
 #include "searaboom.h"
 #include "board.h"
 #include "config_store.h"
+#include "wifi_boot.h"
 #include "led_status.h"
 #include "volume_buttons.h"
 #include "captive_portal.h"
@@ -32,6 +33,8 @@ static volatile bool s_sta_got_ip;
 static volatile bool s_wifi_need_reconnect;
 static volatile int s_wifi_disc_reason;
 static volatile int s_wifi_fails;
+static volatile bool s_sta_did_assoc;
+static volatile bool s_ap_seen;
 static volatile int64_t s_wifi_retry_at_ms;
 static esp_timer_handle_t s_wifi_retry_timer;
 static bool s_healthy_marked;
@@ -108,6 +111,7 @@ static void handle_pad_gesture(int taps)
         led_status_set(SB_LED_BLUE, 80);
         radio_player_beep_limit();
         config_store_clear_wifi();
+        wifi_forget_driver_config();
         vTaskDelay(pdMS_TO_TICKS(400));
         esp_restart();
     }
@@ -162,6 +166,10 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         int reason = disc ? (int)disc->reason : 0;
         s_sta_got_ip = false;
         s_wifi_disc_reason = reason;
+        /* Anything but NO_AP_FOUND (201) means the AP was there (auth/DHCP/assoc). */
+        if (reason != WIFI_REASON_NO_AP_FOUND) {
+            s_ap_seen = true;
+        }
         if (s_sta_retry) {
             radio_player_on_sta_lost();
         }
@@ -192,6 +200,8 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
+        s_sta_did_assoc = true;
+        s_ap_seen = true;
         radio_player_arm_rssi_threshold();
         wifi_ap_record_t ap = {0};
         if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK && ap.rssi <= -78) {
@@ -253,6 +263,8 @@ esp_err_t wifi_sta_join(const sb_config_t *cfg)
     wifi.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     s_sta_got_ip = false;
     s_sta_retry = true;
+    s_sta_did_assoc = false;
+    s_ap_seen = false;
     s_wifi_fails = 0;
     s_wifi_need_reconnect = false;
     wifi_retry_timer_init();
@@ -271,8 +283,147 @@ void wifi_set_sta_retry(bool on)
     }
 }
 
-static bool wifi_connect_or_setup(void)
+void wifi_forget_driver_config(void)
 {
+    esp_err_t err = esp_wifi_restore();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "wifi restore: %s", esp_err_to_name(err));
+    }
+}
+
+typedef enum {
+    SB_WIFI_OK = 0,
+    SB_WIFI_NEED_SETUP,
+    SB_WIFI_NO_IP,
+} sb_wifi_result_t;
+
+static void wifi_start_sta_idle(void)
+{
+    s_sta_retry = false;
+    ESP_ERROR_CHECK(esp_wifi_start());
+}
+
+static bool wifi_recover_ssid_from_driver(sb_config_t *cfg)
+{
+    wifi_config_t w = {0};
+    if (!cfg || esp_wifi_get_config(WIFI_IF_STA, &w) != ESP_OK) {
+        return false;
+    }
+    if (!w.sta.ssid[0]) {
+        return false;
+    }
+    memset(cfg->ssid, 0, sizeof(cfg->ssid));
+    memcpy(cfg->ssid, w.sta.ssid,
+           sizeof(w.sta.ssid) < sizeof(cfg->ssid) - 1 ? sizeof(w.sta.ssid)
+                                                      : sizeof(cfg->ssid) - 1);
+    memset(cfg->password, 0, sizeof(cfg->password));
+    memcpy(cfg->password, w.sta.password,
+           sizeof(w.sta.password) < sizeof(cfg->password) - 1
+               ? sizeof(w.sta.password)
+               : sizeof(cfg->password) - 1);
+    if (!cfg->ssid[0]) {
+        return false;
+    }
+    ESP_LOGW(TAG, "Restored ssid=%s from WiFi driver NVS", cfg->ssid);
+    (void)config_store_save_wifi(cfg);
+    return true;
+}
+
+static bool wifi_sta_is_associated(void)
+{
+    wifi_ap_record_t ap = {0};
+    return esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+}
+
+/* Retry off + disconnect, then wait until not associated. Scan-while-connecting
+ * must not run (and must not be treated as "gone"). */
+static bool wifi_idle_sta_for_scan(void)
+{
+    wifi_set_sta_retry(false);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    int64_t deadline = (esp_timer_get_time() / 1000) + 2000;
+    while (wifi_sta_is_associated()) {
+        if (esp_task_wdt_status(NULL) == ESP_OK) {
+            esp_task_wdt_reset();
+        }
+        if ((esp_timer_get_time() / 1000) >= deadline) {
+            ESP_LOGW(TAG, "STA still associated before probe scan — stay STA");
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    return true;
+}
+
+/* Directed probe of the saved SSID. Broadcast + "first 20 APs" is not "gone".
+ * Fail (start / ap_num / still connecting) → UNKNOWN, not GONE. */
+static sb_wifi_air_t wifi_probe_saved_ssid(const char *want)
+{
+    if (!want || !want[0]) {
+        return SB_WIFI_AIR_GONE;
+    }
+    uint8_t ssid_buf[33] = {0};
+    strncpy((char *)ssid_buf, want, sizeof(ssid_buf) - 1);
+    wifi_scan_config_t scan = {0};
+    scan.ssid = ssid_buf;
+    scan.show_hidden = true;
+    if (esp_task_wdt_status(NULL) == ESP_OK) {
+        esp_task_wdt_reset();
+    }
+    if (esp_wifi_scan_start(&scan, true) != ESP_OK) {
+        ESP_LOGW(TAG, "home SSID probe scan failed — stay STA");
+        return SB_WIFI_AIR_UNKNOWN;
+    }
+    uint16_t n = 0;
+    if (esp_wifi_scan_get_ap_num(&n) != ESP_OK) {
+        ESP_LOGW(TAG, "home SSID probe ap_num failed — stay STA");
+        return SB_WIFI_AIR_UNKNOWN;
+    }
+    if (n == 0) {
+        ESP_LOGI(TAG, "probe scan: saved ssid=%s not on air", want);
+        return SB_WIFI_AIR_GONE;
+    }
+    ESP_LOGI(TAG, "probe scan saw saved ssid=%s aps=%u", want, (unsigned)n);
+    return SB_WIFI_AIR_SEEN;
+}
+
+static sb_wifi_air_t wifi_saved_network_on_air(void)
+{
+    if (s_sta_did_assoc || s_ap_seen) {
+        ESP_LOGI(TAG, "saved ssid seen assoc=%d ap_seen=%d reason=%d",
+                 (int)s_sta_did_assoc, (int)s_ap_seen, s_wifi_disc_reason);
+        return SB_WIFI_AIR_SEEN;
+    }
+    if (!wifi_idle_sta_for_scan()) {
+        return SB_WIFI_AIR_UNKNOWN;
+    }
+    return wifi_probe_saved_ssid(s_cfg.ssid);
+}
+
+static sb_wifi_result_t wifi_sta_wait_for_ip(void)
+{
+    led_status_set(SB_LED_RED, 500);
+    int64_t deadline_ms = (esp_timer_get_time() / 1000) + CONFIG_SEARABOOM_WIFI_TIMEOUT_MS;
+    EventBits_t bits = 0;
+    while ((esp_timer_get_time() / 1000) < deadline_ms) {
+        if (esp_task_wdt_status(NULL) == ESP_OK) {
+            esp_task_wdt_reset();
+        }
+        wifi_reconnect_tick();
+        bits = xEventGroupWaitBits(s_wifi_events, WIFI_OK_BIT, pdFALSE, pdTRUE,
+                                   pdMS_TO_TICKS(1000));
+        if (bits & WIFI_OK_BIT) {
+            return SB_WIFI_OK;
+        }
+    }
+    return SB_WIFI_NO_IP;
+}
+
+static sb_wifi_result_t wifi_connect_or_setup(bool *play_welcome)
+{
+    if (play_welcome) {
+        *play_welcome = false;
+    }
     s_wifi_events = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -287,12 +438,24 @@ static bool wifi_connect_or_setup(void)
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event, NULL));
     wifi_retry_timer_init();
 
-    if (!config_store_has_wifi(&s_cfg)) {
-        ESP_LOGW(TAG, "No WiFi SSID saved -> setup AP");
-        s_sta_retry = false;
-        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-        ESP_ERROR_CHECK(esp_wifi_start());
-        return false;
+    bool force_ap = config_store_force_setup();
+    /* Mode before get_config so driver NVS is visible for ssid recover. */
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    if (!force_ap && !config_store_has_wifi(&s_cfg)) {
+        wifi_recover_ssid_from_driver(&s_cfg);
+    }
+
+    if (force_ap || !config_store_has_wifi(&s_cfg)) {
+        if (force_ap) {
+            ESP_LOGW(TAG, "WiFi wipe -> setup AP");
+        } else {
+            ESP_LOGW(TAG, "No WiFi SSID saved -> setup AP");
+        }
+        if (play_welcome) {
+            *play_welcome = true;
+        }
+        wifi_start_sta_idle();
+        return SB_WIFI_NEED_SETUP;
     }
 
     wifi_config_t wifi = {0};
@@ -300,27 +463,57 @@ static bool wifi_connect_or_setup(void)
     strncpy((char *)wifi.sta.password, s_cfg.password, sizeof(wifi.sta.password));
     wifi.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
 
+    s_sta_did_assoc = false;
+    s_ap_seen = false;
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi));
     ESP_ERROR_CHECK(esp_wifi_start());
     /* 20 dBm + 240 MHz + I2S amp sags USB 5V. 17 dBm is enough for STA. */
     esp_wifi_set_max_tx_power(68);
 
-    led_status_set(SB_LED_RED, 500);
-    int64_t deadline_ms = (esp_timer_get_time() / 1000) + CONFIG_SEARABOOM_WIFI_TIMEOUT_MS;
-    EventBits_t bits = 0;
-    while ((esp_timer_get_time() / 1000) < deadline_ms) {
-        if (esp_task_wdt_status(NULL) == ESP_OK) {
-            esp_task_wdt_reset();
-        }
-        wifi_reconnect_tick();
-        bits = xEventGroupWaitBits(s_wifi_events, WIFI_OK_BIT, pdFALSE, pdTRUE,
-                                   pdMS_TO_TICKS(1000));
-        if (bits & WIFI_OK_BIT) {
-            break;
-        }
+    if (wifi_sta_wait_for_ip() == SB_WIFI_OK) {
+        return SB_WIFI_OK;
     }
-    return (bits & WIFI_OK_BIT) != 0;
+
+    sb_wifi_air_t air = wifi_saved_network_on_air();
+    bool welcome = sb_wifi_should_play_welcome(s_cfg.ssid, false, air);
+    if (play_welcome) {
+        *play_welcome = welcome;
+    }
+    if (!sb_wifi_should_start_portal(s_cfg.ssid, false, air)) {
+        ESP_LOGW(TAG, "WiFi join timeout ssid=%s fails=%d air=%d — STA retry, no setup AP",
+                 s_cfg.ssid, s_wifi_fails, (int)air);
+        s_sta_retry = true;
+        s_wifi_need_reconnect = true;
+        wifi_retry_timer_arm(1000);
+        return SB_WIFI_NO_IP;
+    }
+    ESP_LOGW(TAG, "saved ssid not on air -> setup AP");
+    return SB_WIFI_NEED_SETUP;
+}
+
+static void boot_start_radio(bool play_updated)
+{
+    if (radio_player_is_running()) {
+        return;
+    }
+    const char *url = config_store_stream_url(&s_cfg);
+    sb_clip_id_t tune = (strncmp(s_cfg.url_key, "URL2", 4) == 0)
+        ? SB_CLIP_TUNE_104 : SB_CLIP_TUNE_102;
+    ESP_LOGI(TAG, "Prefetch stream %s (%s) vol=%d", s_cfg.url_key, url, s_cfg.volume);
+    if (radio_player_prefetch(url, s_cfg.volume) != ESP_OK) {
+        ESP_LOGE(TAG, "Radio prefetch failed");
+    }
+    if (play_updated) {
+        ESP_LOGI(TAG, "First boot after update — playing atualizado");
+        clip_player_play_wait(SB_CLIP_OTA_DONE, 20000);
+    } else {
+        clip_player_play_wait(tune, 15000);
+    }
+    if (radio_player_go_live() != ESP_OK) {
+        ESP_LOGE(TAG, "Radio go_live failed");
+    }
+    clip_player_release_idle();
 }
 
 void app_main(void)
@@ -363,15 +556,18 @@ void app_main(void)
 
     bool play_updated = config_store_take_play_updated();
     play_updated = config_store_consume_fw_change(app->version) || play_updated;
-    if (play_updated && !config_store_has_wifi(&s_cfg)) {
+    if (play_updated && config_store_is_first_setup(&s_cfg)) {
         ESP_LOGI(TAG, "First boot after update, no Wi-Fi — atualizado then setup AP");
         radio_player_start_idle(s_cfg.volume);
         clip_player_play_wait(SB_CLIP_OTA_DONE, 20000);
     }
 
-    if (!wifi_connect_or_setup()) {
-        ESP_LOGW(TAG, "Starting captive portal");
-        captive_portal_run(); /* returns after save when the phone leaves the AP */
+    bool play_welcome = false;
+    bool wait_for_sta = false;
+    sb_wifi_result_t wifi_boot = wifi_connect_or_setup(&play_welcome);
+    if (wifi_boot == SB_WIFI_NEED_SETUP) {
+        ESP_LOGW(TAG, "Starting captive portal welcome=%d", (int)play_welcome);
+        captive_portal_run(play_welcome); /* returns after save when the phone leaves the AP */
         config_store_load(&s_cfg);
         s_pad_taps = 0;
         /* Portal used to start the station before AP teardown. If that
@@ -379,28 +575,17 @@ void app_main(void)
         if (!radio_player_has_music_info()) {
             radio_player_stop();
         }
+    } else if (wifi_boot == SB_WIFI_NO_IP) {
+        /* Saved SSID was on the air (or associated) but DHCP/auth missed
+         * the boot window. Keep STA retry. No welcome. */
+        wait_for_sta = true;
+        ESP_LOGW(TAG, "Configured WiFi not joined — quiet STA retry, no welcome");
     }
 
-    if (!radio_player_is_running()) {
-        const char *url = config_store_stream_url(&s_cfg);
-        sb_clip_id_t tune = (strncmp(s_cfg.url_key, "URL2", 4) == 0)
-            ? SB_CLIP_TUNE_104 : SB_CLIP_TUNE_102;
-        ESP_LOGI(TAG, "Prefetch stream %s (%s) vol=%d", s_cfg.url_key, url, s_cfg.volume);
-        if (radio_player_prefetch(url, s_cfg.volume) != ESP_OK) {
-            ESP_LOGE(TAG, "Radio prefetch failed");
-        }
-        if (play_updated) {
-            ESP_LOGI(TAG, "First boot after update — playing atualizado");
-            clip_player_play_wait(SB_CLIP_OTA_DONE, 20000);
-        } else {
-            clip_player_play_wait(tune, 15000);
-        }
-        if (radio_player_go_live() != ESP_OK) {
-            ESP_LOGE(TAG, "Radio go_live failed");
-        }
-        clip_player_release_idle();
+    if (!wait_for_sta) {
+        boot_start_radio(play_updated);
+        led_status_set(SB_LED_OFF, 0);
     }
-    led_status_set(SB_LED_OFF, 0);
 
     /* Version check after the stream is up. If an update is found the OTA
      * task stops radio, speaks, then downloads with audio off. */
@@ -409,6 +594,12 @@ void app_main(void)
 
     while (true) {
         wifi_reconnect_tick();
+        if (wait_for_sta && wifi_sta_got_ip() && !radio_player_is_running()) {
+            wait_for_sta = false;
+            boot_start_radio(play_updated);
+            led_status_set(SB_LED_OFF, 0);
+            live_at_ms = esp_timer_get_time() / 1000;
+        }
         if (!s_healthy_marked && (esp_timer_get_time() / 1000) >= WIFI_HEALTHY_MS) {
             log_shipper_mark_healthy();
             ota_update_mark_healthy();
