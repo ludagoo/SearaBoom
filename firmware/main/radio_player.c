@@ -111,12 +111,23 @@ _Static_assert(
 
 #define SB_BEEP_HZ 2000
 #define SB_BEEP_MS 55
-#define SB_BEEP_AMP 4200
+/* Peak ~-3.5 dBFS. Old 4200 was ~-17.8 dBFS and vanished under a hot mix. */
+#define SB_BEEP_AMP 22000
 #define SB_BEEP_FRAMES ((SB_MIX_SR * SB_BEEP_MS) / 1000)
 #define SB_LIMIT_HZ 880
 #define SB_LIMIT_MS 120
-#define SB_LIMIT_AMP 5200
+#define SB_LIMIT_AMP 26000
 #define SB_LIMIT_FRAMES ((SB_MIX_SR * SB_LIMIT_MS) / 1000)
+/* Stream duck while a beep overlays (pre-ALC). 4 = -12 dB. Add-only
+ * overlay cannot sit above a 0 dBFS station. */
+#define SB_BEEP_CONTENT_DUCK 4
+#define SB_BEEP_DUCK_FULL 256
+/* Radio 0 dB when listening. Spoken clips duck the station 18 dB (was
+ * -12) so ident/prompts sit well above the stream. Same I2S ALC after. */
+#define SB_MIX_RADIO_GAIN_DB 0
+#define SB_MIX_RADIO_DUCK_DB (-18)
+#define SB_MIX_CLIP_MUTE_DB (-60)
+#define SB_MIX_CLIP_GAIN_DB 0
 
 #define SB_PROBE_WIN 512
 #define SB_PROBE_START_LO 5500
@@ -367,7 +378,26 @@ void radio_player_ungate(void)
 
 /* Overlay mix output. ADF tone_stream is a flash-MP3 reader and needs a mix
  * slot; radio-only BYPASS ignores extra slots, so a pipeline tone would duck
- * the station or stay silent. */
+ * the station or stay silent. Duck content with the same edge as fill_tone
+ * so the beep sits well above a hot stream without a clicky gain jump. */
+static int beep_content_scale(int pos, int len)
+{
+    int edge = len / 3;
+    int ducked = SB_BEEP_DUCK_FULL / SB_BEEP_CONTENT_DUCK;
+    if (edge < 1) {
+        edge = 1;
+    }
+    if (pos < edge) {
+        return SB_BEEP_DUCK_FULL
+            - ((SB_BEEP_DUCK_FULL - ducked) * pos) / edge;
+    }
+    if (pos > len - 1 - edge) {
+        return SB_BEEP_DUCK_FULL
+            - ((SB_BEEP_DUCK_FULL - ducked) * (len - 1 - pos)) / edge;
+    }
+    return ducked;
+}
+
 static void mix_beep_s16le(int16_t *samples, int frames, int channels)
 {
     int pos = s_beep_pos;
@@ -378,9 +408,11 @@ static void mix_beep_s16le(int16_t *samples, int frames, int channels)
     }
     for (int i = 0; i < frames && pos < len; i++, pos++) {
         int16_t tone = src[pos];
+        int scale = beep_content_scale(pos, len);
         for (int ch = 0; ch < channels; ch++) {
             int idx = i * channels + ch;
-            int32_t mixed = (int32_t)samples[idx] + tone;
+            int32_t mixed = ((int32_t)samples[idx] * scale) / SB_BEEP_DUCK_FULL
+                            + tone;
             if (mixed > 32767) {
                 mixed = 32767;
             } else if (mixed < -32768) {
@@ -899,8 +931,10 @@ static esp_err_t ensure_mix(int volume)
     mix_cfg.out_rb_size = 8 * 1024;
     s_downmix = downmix_init(&mix_cfg);
     esp_downmix_input_info_t src[2] = {
-        {.samplerate = SB_MIX_SR, .channel = 2, .bits_num = 16, .gain = {0, -12}, .transit_time = 150},
-        {.samplerate = SB_MIX_SR, .channel = 2, .bits_num = 16, .gain = {-60, 0}, .transit_time = 150},
+        {.samplerate = SB_MIX_SR, .channel = 2, .bits_num = 16,
+         .gain = {SB_MIX_RADIO_GAIN_DB, SB_MIX_RADIO_DUCK_DB}, .transit_time = 150},
+        {.samplerate = SB_MIX_SR, .channel = 2, .bits_num = 16,
+         .gain = {SB_MIX_CLIP_MUTE_DB, SB_MIX_CLIP_GAIN_DB}, .transit_time = 150},
     };
     source_info_init(s_downmix, src);
     s_mute_radio = rb_create(256, 4);
