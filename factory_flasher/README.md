@@ -64,7 +64,7 @@ USB factory still wipes pad cal (`/spiffs/usb_factory`). The flasher runs
 `touch cal`, which stores NVS values at `tsens_rev` 3 (snapshotted in
 `tsens_f_*`). Firmware **loads factory cal when `rev >= 3`**. Rev 4 is field
 auto-cal from real presses. Older field cal (rev 1/2) is ignored. Uncalibrated
-live start is `channel_sens` **0.50**.
+live start is `channel_sens` **0.25**.
 
 ## Build the five binaries
 
