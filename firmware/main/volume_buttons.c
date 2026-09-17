@@ -22,9 +22,10 @@ static const char *TAG = "volume_buttons";
 /* channel_sens is a press threshold: higher = firmer press needed.
  * Boot does not auto-run calibrate() (field OTA must not prompt).
  * Factory USB wipes NVS cal; the desktop flasher then runs `touch cal`.
- * QA/product start is clamp max 0.50 — firmer than the 0.5.20 0.13 default.
+ * QA/product start is 0.25 — softer than the 0.5.23 0.50 default, still
+ * firmer than the 0.5.20 0.13 graze default.
  * Auto-cal stays on so boxes can settle to different numbers at or below 0.50. */
-#define SB_TOUCH_SENS 0.50f
+#define SB_TOUCH_SENS 0.25f
 /* Cal: abs(smooth-idle)/idle vs frozen idle (not live benchmark). */
 #define SB_TOUCH_CAL_SEE 0.008f
 #define SB_TOUCH_CAL_MIN_DELTA 40u
@@ -282,7 +283,8 @@ esp_err_t volume_buttons_init(volume_btn_cb_t cb, volume_gesture_cb_t gesture, v
     }
 
     /* Rev 4 = field auto, use it. Rev 3 factory is snapshotted; live starts
-     * at 0.50 unless auto already committed. Rev < 3 ignored (0.5.20). */
+     * at SB_TOUCH_SENS (0.25) unless auto already committed. Rev < 3 ignored
+     * (0.5.20). */
     uint8_t rev = 0;
     float loaded_up = SB_TOUCH_SENS;
     float loaded_dn = SB_TOUCH_SENS;

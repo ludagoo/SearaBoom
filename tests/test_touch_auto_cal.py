@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Auto-cal policy numbers: start 0.50, settle 0.15–0.50, not 0.13."""
+"""Auto-cal policy numbers: start 0.25, settle 0.15–0.50, not 0.13."""
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,8 +10,9 @@ ST = (ROOT / "firmware/main/config_store.c").read_text()
 MAIN = (ROOT / "firmware/main/main.c").read_text()
 
 
-def test_start_is_clamp_max_not_013() -> None:
-    assert "#define SB_TOUCH_SENS 0.50f" in VB
+def test_start_is_025_not_013() -> None:
+    assert "#define SB_TOUCH_SENS 0.25f" in VB
+    assert "#define SB_TOUCH_SENS 0.50f" not in VB
     assert "#define SB_TOUCH_SENS 0.13f" not in VB
     assert "#define SB_TOUCH_SENS 0.10f" not in VB
     assert "#define SB_TOUCH_AUTO_CEIL 0.50f" in H
@@ -73,3 +74,12 @@ def test_one_pad_rev4_does_not_retire_other_first_n() -> None:
     assert "tsens_first" in ST
     assert "config_store_save_touch_sens_auto(s_sens_up, s_sens_dn, first)" in VB
     assert "nvs_set_u8(h, \"tsens_first\", first_mask)" in ST
+
+
+if __name__ == "__main__":
+    test_start_is_025_not_013()
+    test_rev4_keeps_factory_snapshot()
+    test_auto_from_peak_bias()
+    test_factory_refine_cannot_persist_below_floor()
+    test_one_pad_rev4_does_not_retire_other_first_n()
+    print("ok")

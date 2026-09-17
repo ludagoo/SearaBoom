@@ -12,8 +12,8 @@
 #endif
 
 /* Field auto-cal from real presses (rev 4). Factory `touch cal` stays rev 3.
- * Higher channel_sens = firmer. Boot live at SB_TOUCH_SENS 0.50 (clamp
- * max). Auto floor 0.15 / ceil 0.50 so boxes can settle on different
+ * Higher channel_sens = firmer. Boot live at SB_TOUCH_SENS 0.25. Auto
+ * floor 0.15 / ceil 0.50 (clamp unchanged) so boxes can settle on different
  * numbers without using 0.13 as the start. */
 
 #define SB_TOUCH_AUTO_FIRST_N 7
