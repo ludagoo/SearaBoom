@@ -33,6 +33,10 @@ static const char *TAG = "radio_player";
 #define SB_STREAM_STALL_GRACE_MS 35000
 /* HTTP Icecast with no music_info by then → HTTPS (TLS). */
 #define SB_HTTP_FALLBACK_MS 8000
+/* HTTPS (or native http:// URL) with no music_info: DNS/open can die
+ * after fallback. Stall check needs music_info; HTTP fallback needs
+ * s_using_http; a live STA never hits "wifi back". Retry the join. */
+#define SB_JOIN_RETRY_MS 20000
 #define SB_STREAM_HARD_RESTART_AFTER 3
 #define SB_HTTP_RB_SIZE (256 * 1024)
 #define SB_WIFI_RSSI_WEAK_DBM (-78)
@@ -186,6 +190,7 @@ static int http_rb_filled(void);
 static void stream_snap(const char *why);
 static void i2s_alc_gate(void);
 static void drain_mix_evt(void);
+static bool sta_associated(void);
 
 static int16_t *s_beep_pcm;
 static int16_t *s_limit_pcm;
@@ -1260,6 +1265,35 @@ static void check_stream_stall(void)
     radio_soft_restart("stream stall");
 }
 
+/* s_running && !s_got_music_info after HTTPS fallback / DNS fail.
+ * Periodic soft then hard restart so a dead HTTP element does not stay
+ * silent until power-cycle. */
+static bool check_stream_join(void)
+{
+    if (!s_running || s_got_music_info || s_clip_active || s_hold_radio) {
+        return false;
+    }
+    if (!s_radio_pipe || !s_radio_open_ms || s_using_http) {
+        return false;
+    }
+    if (!sta_associated()) {
+        return false;
+    }
+    int64_t now = esp_timer_get_time() / 1000;
+    if (now - s_radio_open_ms < SB_JOIN_RETRY_MS) {
+        return false;
+    }
+    s_stall_strikes++;
+    if (s_stall_strikes >= SB_STREAM_HARD_RESTART_AFTER && s_url[0]) {
+        /* Rebuild and try HTTP Icecast first, then HTTPS fallback again. */
+        s_force_https = false;
+        radio_hard_restart("join fail");
+        return true;
+    }
+    radio_soft_restart("join fail");
+    return true;
+}
+
 static void drain_mix_evt(void)
 {
     if (!s_mix_evt) {
@@ -1602,6 +1636,9 @@ void radio_player_loop(void)
     if (s_running && !s_clip_active && !s_hold_radio && !s_wifi_weak_latched) {
         check_stream_stall();
     }
+    if (check_stream_join()) {
+        return;
+    }
     if (!s_radio_evt) {
         return;
     }
@@ -1667,8 +1704,10 @@ void radio_player_loop(void)
     if (!bad) {
         return;
     }
+    /* Empty HTTP rb is normal before the first music_info. Ignoring
+     * ERROR_OPEN then left HTTPS-fallback / DNS fail silent forever. */
     if (s_clip_active || s_hold_radio || s_wifi_weak_latched
-        || http_buf_critical()) {
+        || (s_got_music_info && http_buf_critical())) {
         ESP_LOGW(TAG, "stream err ignored hold=%d clip=%d weak=%d rb=%d st=%d",
                  (int)s_hold_radio, (int)s_clip_active, (int)s_wifi_weak_latched,
                  http_rb_filled(), (int)msg.data);
@@ -1681,6 +1720,9 @@ void radio_player_loop(void)
     s_stall_strikes++;
     if (s_stall_strikes >= SB_STREAM_HARD_RESTART_AFTER && s_url[0]) {
         ESP_LOGW(TAG, "stream/decoder error — hard restart");
+        if (!s_got_music_info) {
+            s_force_https = false;
+        }
         int vol = s_volume;
         char url[sizeof(s_url)];
         memcpy(url, s_url, sizeof(url));
