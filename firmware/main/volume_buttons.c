@@ -44,6 +44,7 @@ static bool s_up_down;
 static bool s_dn_down;
 static bool s_chord;
 static int s_vol_held;
+static bool s_hold_armed;
 static int s_chord_count;
 static int64_t s_chord_first_ms;
 static int64_t s_chord_last_ms;
@@ -124,6 +125,8 @@ static void auto_clear_learn(void)
     s_learn_freeze = false;
     s_chatter_n = 0;
     s_chatter_t0_ms = 0;
+    s_vol_held = 0;
+    s_hold_armed = false;
 }
 
 /* ESP32-S3: TOUCH_PAD_NUMn <-> GPIOn for pads 1..14 */
@@ -201,6 +204,7 @@ static void on_button_event(int delta, touch_button_event_t ev)
         if (both_down()) {
             s_chord = true;
             s_vol_held = 0;
+            s_hold_armed = false;
         }
         auto_on_press(delta > 0 ? 0 : 1);
         return;
@@ -211,6 +215,7 @@ static void on_button_event(int delta, touch_button_event_t ev)
         if (s_vol_held == delta) {
             s_vol_held = 0;
         }
+        s_hold_armed = false;
         auto_on_release(delta > 0 ? 0 : 1);
         if (s_chord && both_up()) {
             s_chord = false;
@@ -821,6 +826,7 @@ esp_err_t volume_buttons_calibrate(void)
     s_dn_down = false;
     s_chord = false;
     s_vol_held = 0;
+    s_hold_armed = false;
     chord_reset();
     led_status_set(SB_LED_YELLOW, 0);
     radio_player_ungate();
@@ -908,6 +914,31 @@ esp_err_t volume_buttons_calibrate(void)
     return err;
 }
 
+static void hold_disarm(int delta, int hold_ms, bool maybe_firm, const char *why)
+{
+    int idx = delta > 0 ? 0 : 1;
+    float next;
+
+    if (!s_hold_armed) {
+        return;
+    }
+    s_hold_armed = false;
+    ESP_LOGW(TAG, "pad vol stop-repeat %c hold_ms=%d (%s)",
+             delta > 0 ? '+' : '-', hold_ms, why);
+    if (!maybe_firm || s_learn_freeze || s_calibrating) {
+        return;
+    }
+    if (!touch_vol_stuck_should_firm(s_auto[idx].peak, live_sens(idx))) {
+        return;
+    }
+    next = touch_vol_stuck_sens(live_sens(idx), s_auto[idx].peak);
+    if (s_have_factory) {
+        next = touch_auto_refine_factory(idx == 0 ? s_factory_up : s_factory_dn,
+                                         next);
+    }
+    auto_queue(idx, next, "stuck-hold");
+}
+
 void volume_buttons_poll(void)
 {
     if (!s_ready) {
@@ -945,10 +976,14 @@ void volume_buttons_poll(void)
      * volume tick. Stay silent until both pads are up after a chord. */
     if (s_chord || both_down() || s_chord_count > 0) {
         s_vol_held = 0;
+        s_hold_armed = false;
         return;
     }
 
     int delta = 0;
+    int idx;
+    int hold_ms;
+
     if (s_up_down && !s_dn_down) {
         delta = +1;
     } else if (s_dn_down && !s_up_down) {
@@ -956,13 +991,31 @@ void volume_buttons_poll(void)
     }
     if (delta == 0) {
         s_vol_held = 0;
+        s_hold_armed = false;
         return;
     }
 
+    idx = delta > 0 ? 0 : 1;
+    hold_ms = s_auto[idx].tracking ? (int)(now - s_auto[idx].press_ms) : 0;
+
+    /* One PRESS edge = one step. Hold-to-ramp only after that edge, and
+     * never past CLEAN_HOLD_MAX or once chatter freeze trips. A stuck IDF
+     * pad then needs RELEASE + a new PRESS before fire() runs again. */
     if (s_vol_held != delta) {
         s_vol_held = delta;
+        s_hold_armed = (bool)touch_vol_may_repeat(hold_ms, (int)s_learn_freeze);
         fire(delta);
-    } else if ((now - s_last_ms) >= SB_DEBOUNCE_MS) {
+        return;
+    }
+    if (!s_hold_armed) {
+        return;
+    }
+    if (!touch_vol_may_repeat(hold_ms, (int)s_learn_freeze)) {
+        hold_disarm(delta, hold_ms, !s_learn_freeze,
+                    s_learn_freeze ? "chatter" : "stuck");
+        return;
+    }
+    if ((now - s_last_ms) >= SB_DEBOUNCE_MS) {
         fire(delta);
     }
 }

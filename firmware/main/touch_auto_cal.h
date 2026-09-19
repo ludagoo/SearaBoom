@@ -37,6 +37,10 @@
 #define SB_TOUCH_AUTO_GRAZE_OVER 1.3f
 #define SB_TOUCH_AUTO_CHATTER_N 20
 #define SB_TOUCH_AUTO_CHATTER_MS 30000
+/* Ghost/stuck IDF "holds" used to auto-repeat fire() every SB_DEBOUNCE_MS
+ * until RELEASE. Cap the ramp at the same clean-hold window auto-cal uses.
+ * Peaks below this multiple of the IDF trip look like linger, not a mash. */
+#define SB_TOUCH_VOL_STUCK_PEAK_OVER 2.0f
 
 static inline float touch_auto_clamp_hard(float sens)
 {
@@ -158,6 +162,37 @@ static inline int touch_auto_leak_disagrees(float live, float target)
         d = -d;
     }
     return (d / live) > SB_TOUCH_AUTO_LEAK_DISAGREE;
+}
+
+/* Hold-to-ramp after a fresh PRESS only. Stop if the pad never RELEASE'd
+ * past CLEAN_HOLD_MAX (stuck/ghost) or pocket chatter froze learning. */
+static inline int touch_vol_may_repeat(int hold_ms, int chatter_freeze)
+{
+    return hold_ms >= 0
+           && hold_ms < SB_TOUCH_AUTO_CLEAN_HOLD_MAX_MS
+           && !chatter_freeze;
+}
+
+static inline int touch_vol_stuck_should_firm(float peak, float live_sens)
+{
+    float trip = touch_auto_idf_trip(live_sens);
+
+    return peak > 0
+           && peak <= SB_TOUCH_AUTO_PEAK_WET
+           && peak < trip * SB_TOUCH_VOL_STUCK_PEAK_OVER;
+}
+
+/* Raise channel_sens so this lingering peak would not trip. If that would
+ * go softer (or nowhere), take the same +4% firm step as leak-graze. */
+static inline float touch_vol_stuck_sens(float live, float peak)
+{
+    float next = touch_auto_clamp_auto(peak / SB_TOUCH_AUTO_IDF_DIV
+                                       + SB_TOUCH_AUTO_BIAS);
+
+    if (next <= live) {
+        next = touch_auto_clamp_auto(live * (1.0f + SB_TOUCH_AUTO_LEAK_STEP_FIRM));
+    }
+    return next;
 }
 
 #endif

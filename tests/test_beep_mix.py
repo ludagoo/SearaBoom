@@ -43,8 +43,8 @@ def test_firmware_constants() -> None:
     assert "#define SB_LIMIT_AMP 5200" not in RP
     assert ".gain = {0, -12}" not in RP
     assert "SB_MIX_RADIO_DUCK_DB" in RP
-    assert VER == "0.5.25"
-    assert 'CONFIG_SEARABOOM_FW_VERSION="0.5.25"' in SDK
+    assert VER == "0.5.26"
+    assert 'CONFIG_SEARABOOM_FW_VERSION="0.5.26"' in SDK
 
 
 def test_beep_sits_above_hot_stream() -> None:
