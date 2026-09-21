@@ -18,6 +18,7 @@
 #include "config_store.h"
 #include "clip_player.h"
 #include "radio_player.h"
+#include "radio_buf.h"
 #include "log_shipper.h"
 #include "listen_stats.h"
 #include "volume_buttons.h"
@@ -216,7 +217,8 @@ static void handle_line(char *line)
     }
     if (strcasecmp(line, "wifi weak") == 0) {
         radio_player_on_rssi_low(-90);
-        log_shipper_printf("wifi weak latched (holds stream + prompt until HTTP rb >= 224k)\n");
+        log_shipper_printf("wifi weak latched (holds stream + prompt until HTTP rb >= %dk)\n",
+                           SB_WIFI_HTTP_RESUME_BYTES / 1024);
         return;
     }
     if (strcasecmp(line, "http") == 0) {

@@ -6,9 +6,11 @@ Live 0.5.25 on Lucas QA Zero (d0:cf:13:07:de:fc):
 
 Root cause encoded here:
   mixer consume ≈ Icecast produce, so fill hovers where play started.
-  Start/resume at ~100–128 KB therefore sits on the 128 KB rb-drop line.
+  Start/resume at ~100 KB with need=128 KB sits on the 96 KB log-band edge.
 
 Firmware policy lives in firmware/main/radio_buf.h (compiled below).
+Start/recover 112 KB, underrun 96 KB — not 224 KB (that mute was ~15 s
+after ident / ~20–28 s after soft restart).
 """
 from __future__ import annotations
 
@@ -26,6 +28,11 @@ OLD_START_HOVER = 100 * 1024  # post-ident prefetch, then go_live immediately
 OLD_NEED = 128 * 1024  # SB_HTTP_SLOW_RESUME_BYTES — need=131072 in logs
 OLD_RB_DROP_LINE = 128 * 1024
 CAPACITY = 256 * 1024
+# Policy this PR checks (must match radio_buf.h).
+START = 112 * 1024
+RECOVER = 112 * 1024
+UNDERRUN = 96 * 1024
+WIFI_RESUME = 200 * 1024
 
 
 def parse_c_int_defines(path: Path) -> dict[str, int]:
@@ -55,17 +62,23 @@ def parse_c_int_defines(path: Path) -> dict[str, int]:
 def test_header_numbers() -> dict[str, int]:
     d = parse_c_int_defines(HEADER)
     assert d["SB_HTTP_RB_SIZE"] == CAPACITY
-    assert d["SB_HTTP_START_BYTES"] == 224 * 1024
-    assert d["SB_HTTP_RECOVER_BYTES"] == 224 * 1024
-    assert d["SB_HTTP_UNDERRUN_BYTES"] == OLD_RB_DROP_LINE
+    assert d["SB_HTTP_START_BYTES"] == START
+    assert d["SB_HTTP_RECOVER_BYTES"] == RECOVER
+    assert d["SB_HTTP_UNDERRUN_BYTES"] == UNDERRUN
+    assert d["SB_HTTP_SLOW_LOW_BYTES"] == 64 * 1024
     assert d["SB_HTTP_SLOW_RESUME_BYTES"] == d["SB_HTTP_RECOVER_BYTES"]
-    assert d["SB_WIFI_HTTP_RESUME_BYTES"] == d["SB_HTTP_RECOVER_BYTES"]
+    assert d["SB_WIFI_HTTP_RESUME_BYTES"] == WIFI_RESUME
     assert d["SB_WIFI_HTTP_LOW_BYTES"] == d["SB_HTTP_UNDERRUN_BYTES"]
-    # Almost full: at least 7/8 of the 256 KB rb, but leave writer slack.
-    assert d["SB_HTTP_START_BYTES"] * 8 >= d["SB_HTTP_RB_SIZE"] * 7
     assert d["SB_HTTP_START_BYTES"] < d["SB_HTTP_RB_SIZE"]
-    assert d["SB_HTTP_RECOVER_BYTES"] > OLD_NEED
-    assert d["SB_HTTP_RECOVER_BYTES"] > d["SB_HTTP_UNDERRUN_BYTES"]
+    # Above the live hover so go_live does not start on the 96 KB band edge.
+    assert d["SB_HTTP_START_BYTES"] > OLD_START_HOVER
+    # Below the 224 KB mute Lucas rejected (~15 s / ~28 s).
+    assert d["SB_HTTP_START_BYTES"] < 160 * 1024
+    # Live 98–101 KB hover must stay PLAYING (underrun is the 96 KB line).
+    assert d["SB_HTTP_UNDERRUN_BYTES"] <= 96 * 1024
+    assert d["SB_HTTP_UNDERRUN_BYTES"] < d["SB_HTTP_RECOVER_BYTES"]
+    # Prompt threshold stays below the mute line.
+    assert d["SB_HTTP_SLOW_LOW_BYTES"] < d["SB_HTTP_UNDERRUN_BYTES"]
     return d
 
 
@@ -74,9 +87,7 @@ def test_python_hysteresis(d: dict[str, int]) -> None:
     recover = d["SB_HTTP_RECOVER_BYTES"]
     underrun = d["SB_HTTP_UNDERRUN_BYTES"]
 
-    # Live hover must not start audible play.
     assert OLD_START_HOVER < start
-    assert OLD_NEED < recover
 
     def gate(now: int, filled: int) -> int:
         if now == d["RADIO_BUF_PLAY"]:
@@ -85,25 +96,34 @@ def test_python_hysteresis(d: dict[str, int]) -> None:
             return d["RADIO_BUF_PLAY"] if filled >= recover else d["RADIO_BUF_REFILL"]
         return d["RADIO_BUF_PLAY"] if filled >= start else d["RADIO_BUF_WAIT"]
 
-    # Boot: 100 KB after ident stays silent; 224 KB goes live.
+    # Boot: 100 KB after ident stays silent; 112 KB goes live.
     st = d["RADIO_BUF_WAIT"]
-    for filled in (0, 64 * 1024, OLD_START_HOVER, OLD_NEED, start - 1):
+    for filled in (0, 64 * 1024, OLD_START_HOVER, start - 1):
         st = gate(st, filled)
         assert st == d["RADIO_BUF_WAIT"], f"started too early at {filled}"
     st = gate(st, start)
     assert st == d["RADIO_BUF_PLAY"]
 
-    # Playing at ~100 KB (the live storm) must drop into refill, not stay PLAY.
+    # Live hover ~100 KB is above 96 KB: stay PLAY, do not mute.
     st = gate(d["RADIO_BUF_PLAY"], OLD_START_HOVER)
-    assert st == d["RADIO_BUF_REFILL"]
-    # Old resume watermark is still skinny — stay muted.
-    st = gate(st, OLD_NEED)
-    assert st == d["RADIO_BUF_REFILL"], "must not resume at need=131072"
-    st = gate(st, recover)
+    assert st == d["RADIO_BUF_PLAY"], "must not mute the live 100 KB hover"
+    st = gate(d["RADIO_BUF_PLAY"], 98 * 1024)
+    assert st == d["RADIO_BUF_PLAY"]
+    st = gate(d["RADIO_BUF_PLAY"], 101 * 1024)
     assert st == d["RADIO_BUF_PLAY"]
 
-    # Healthy hover just under full stays PLAY (above the 128 KB rb-drop line).
-    for filled in (recover, 200 * 1024, underrun):
+    # Dip under 96 KB: mute and refill to 112 KB, not the old 128 KB need.
+    st = gate(d["RADIO_BUF_PLAY"], underrun - 1)
+    assert st == d["RADIO_BUF_REFILL"]
+    st = gate(st, OLD_START_HOVER)
+    assert st == d["RADIO_BUF_REFILL"], "100 KB is still below 112 KB recover"
+    st = gate(st, OLD_NEED)
+    assert st == d["RADIO_BUF_PLAY"], "128 KB is already above 112 KB recover"
+    st = gate(d["RADIO_BUF_REFILL"], recover)
+    assert st == d["RADIO_BUF_PLAY"]
+
+    # Healthy hover at start/recover stays PLAY.
+    for filled in (recover, underrun, 200 * 1024):
         st = gate(d["RADIO_BUF_PLAY"], filled)
         assert st == d["RADIO_BUF_PLAY"], f"false underrun at {filled}"
 
@@ -116,7 +136,7 @@ int main(void) {
     printf("cap=%d start=%d recover=%d underrun=%d need0=%d need1=%d\n",
            SB_HTTP_RB_SIZE, SB_HTTP_START_BYTES, SB_HTTP_RECOVER_BYTES,
            SB_HTTP_UNDERRUN_BYTES, radio_buf_play_need(0), radio_buf_play_need(1));
-    int samples[] = {0, 65536, 102400, 131072, 204800, 229376, 262144};
+    int samples[] = {0, 65536, 98304, 102400, 114688, 131072, 204800, 229376, 262144};
     const char *names[] = {"wait", "play", "refill"};
     for (int n = 0; n < 3; n++) {
         for (int i = 0; i < (int)(sizeof(samples)/sizeof(samples[0])); i++) {
@@ -165,12 +185,13 @@ int main(void) {
         assert got == want, f"{line}: expected {want}"
 
     # Explicit live-bug cases against the C gate.
-    assert "wait 102400 -> 0" in out
-    assert "wait 131072 -> 0" in out
-    assert "wait 229376 -> 1" in out
-    assert "play 102400 -> 2" in out
-    assert "refill 131072 -> 2" in out
-    assert "refill 229376 -> 1" in out
+    assert "wait 102400 -> 0" in out  # old ident hover: still wait
+    assert "wait 114688 -> 1" in out  # 112 KB: play
+    assert "play 102400 -> 1" in out  # live 100 KB hover: do not mute
+    assert "play 98304 -> 1" in out   # underrun line is < 96 KB
+    assert "play 65536 -> 2" in out   # 64 KB: refill
+    assert "refill 102400 -> 2" in out  # 100 KB still shy of 112
+    assert "refill 114688 -> 1" in out
 
 
 def main() -> int:
@@ -189,6 +210,7 @@ def main() -> int:
     print(
         f"  after:  start={d['SB_HTTP_START_BYTES']} "
         f"recover={d['SB_HTTP_RECOVER_BYTES']} "
+        f"underrun={d['SB_HTTP_UNDERRUN_BYTES']} "
         f"(need={d['SB_HTTP_RECOVER_BYTES']}) / {CAPACITY}"
     )
     return 0
