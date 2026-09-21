@@ -18,6 +18,7 @@
 #include "config_store.h"
 #include "clip_player.h"
 #include "radio_player.h"
+#include "radio_buf.h"
 #include "log_shipper.h"
 #include "listen_stats.h"
 #include "volume_buttons.h"
@@ -216,13 +217,16 @@ static void handle_line(char *line)
     }
     if (strcasecmp(line, "wifi weak") == 0) {
         radio_player_on_rssi_low(-90);
-        log_shipper_printf("wifi weak latched (holds stream + prompt until HTTP rb >= 200k)\n");
+        log_shipper_printf("wifi weak latched (holds stream + prompt until HTTP rb >= %dk)\n",
+                           SB_WIFI_HTTP_RESUME_BYTES / 1024);
         return;
     }
     if (strcasecmp(line, "http") == 0) {
-        log_shipper_printf("http rb=%d hold=%d music=%d\n", radio_player_http_buffered(),
+        log_shipper_printf("http rb=%d hold=%d music=%d prebuf=%d\n",
+               radio_player_http_buffered(),
                radio_player_wifi_weak_holding() ? 1 : 0,
-               radio_player_has_music_info() ? 1 : 0);
+               radio_player_has_music_info() ? 1 : 0,
+               radio_player_is_prebuffering() ? 1 : 0);
         radio_player_log_health("serial");
         return;
     }

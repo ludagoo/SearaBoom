@@ -644,7 +644,8 @@ void app_main(void)
             clip_player_stop();
         }
         int64_t now = esp_timer_get_time() / 1000;
-        if (!ota_started && (now - live_at_ms) > 15000 && radio_player_has_music_info()) {
+        if (!ota_started && (now - live_at_ms) > 15000 && radio_player_has_music_info()
+            && !radio_player_is_prebuffering()) {
             if (ota_update_skip_boot()) {
                 ESP_LOGW(TAG, "OTA in-flight crash loop — skipping boot OTA");
             } else {
