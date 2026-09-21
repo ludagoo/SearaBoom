@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "radio_player.h"
+#include "radio_buf.h"
 #include "listen_stats.h"
 #include "pcm_upmix.h"
 #include "audio_element.h"
@@ -38,14 +39,7 @@ static const char *TAG = "radio_player";
  * s_using_http; a live STA never hits "wifi back". Retry the join. */
 #define SB_JOIN_RETRY_MS 20000
 #define SB_STREAM_HARD_RESTART_AFTER 3
-#define SB_HTTP_RB_SIZE (256 * 1024)
-#define SB_WIFI_RSSI_WEAK_DBM (-78)
-#define SB_WIFI_HTTP_LOW_BYTES (128 * 1024)
-#define SB_WIFI_HTTP_RESUME_BYTES (200 * 1024)
-/* Live 64 kbps: 64 KB is ~8 s left. Lower than wifi-weak (128 KB) so a
- * healthy post-prefetch fill (~100 KB) does not loop the prompt. */
-#define SB_HTTP_SLOW_LOW_BYTES (64 * 1024)
-#define SB_HTTP_SLOW_RESUME_BYTES (128 * 1024)
+/* HTTP rb watermarks live in radio_buf.h (start/recover 224 KB of 256 KB). */
 #define SB_HTTP_SLOW_RECONNECT_MS 25000
 #define SB_HTTP_SLOW_GROW_BYTES (16 * 1024)
 #define SB_HTTP_SLOW_RECONNECT_MAX 3
@@ -161,6 +155,11 @@ static ringbuf_handle_t s_clip_pcm;
 static int s_volume = SB_DEFAULT_VOLUME;
 static bool s_running;
 static bool s_prefetching;
+static bool s_prebuffering;
+static int64_t s_prebuffer_since_ms;
+static int s_prebuffer_last_filled;
+static int s_prebuffer_reconnects;
+static int64_t s_prebuffer_snap_ms;
 static bool s_got_music_info;
 static bool s_have_out;
 static bool s_clip_active;
@@ -202,6 +201,7 @@ static void stream_snap(const char *why);
 static void i2s_alc_gate(void);
 static void drain_mix_evt(void);
 static bool sta_associated(void);
+static void mix_route_clip_and_radio(void);
 
 static int16_t *s_beep_pcm;
 static int16_t *s_limit_pcm;
@@ -680,6 +680,42 @@ static void radio_flush_pcm(void)
     }
 }
 
+static void radio_prebuffer_begin(const char *why)
+{
+    int64_t now = esp_timer_get_time() / 1000;
+    s_prebuffering = true;
+    s_prebuffer_since_ms = now;
+    s_prebuffer_last_filled = http_rb_filled();
+    s_prebuffer_reconnects = 0;
+    s_prebuffer_snap_ms = 0;
+    ESP_LOGI(TAG, "prebuffer %s until rb>=%d (now=%d/%d)",
+             why ? why : "start", SB_HTTP_START_BYTES, s_prebuffer_last_filled,
+             SB_HTTP_RB_SIZE);
+    stream_snap(why ? why : "prebuffer");
+}
+
+static bool radio_prebuffer_release_if_ready(void)
+{
+    if (!s_prebuffering) {
+        return false;
+    }
+    if (!s_got_music_info || s_hold_radio || s_clip_active) {
+        return false;
+    }
+    int filled = http_rb_filled();
+    /* WAIT and REFILL share the 224 KB high-water (see radio_buf.h). */
+    if (radio_buf_gate(RADIO_BUF_WAIT, filled) != RADIO_BUF_PLAY) {
+        return false;
+    }
+    s_prebuffering = false;
+    s_prebuffer_since_ms = 0;
+    s_last_pcm_ms = esp_timer_get_time() / 1000;
+    ESP_LOGI(TAG, "prebuffer ready rb=%d/%d", filled, SB_HTTP_RB_SIZE);
+    stream_snap("prebuffer-ready");
+    mix_route_clip_and_radio();
+    return true;
+}
+
 static void radio_mark_started(void)
 {
     s_running = true;
@@ -689,6 +725,8 @@ static void radio_mark_started(void)
     s_stall_grace_until_ms = now + SB_STREAM_STALL_GRACE_MS;
     s_stall_strikes = 0;
     s_restart_backoff_ms = 500;
+    /* Mixer stays off the radio slot until HTTP rb is almost full. */
+    radio_prebuffer_begin("start");
 }
 
 static audio_event_iface_handle_t make_evt(void)
@@ -712,8 +750,6 @@ static void mix_mute_slot(int slot)
     mix_use_rb(slot, slot == SB_SLOT_RADIO ? s_mute_radio : s_mute_clip,
                SB_MIX_MUTE_TIMEOUT);
 }
-
-static void mix_route_clip_and_radio(void);
 
 /* Software ALC does not cover leftover DMA. Keep the ALC field at -36
  * across driver start and set_clk; IDF 5 auto_clear wipes TX DMA. */
@@ -797,6 +833,8 @@ static void teardown_radio(void)
     s_radio_pcm = NULL;
     s_running = false;
     s_prefetching = false;
+    s_prebuffering = false;
+    s_prebuffer_since_ms = 0;
     s_hold_radio = false;
     s_hold_started_ms = 0;
     s_hold_reconnects = 0;
@@ -853,6 +891,8 @@ static void teardown_radio(void)
     }
     s_running = false;
     s_prefetching = false;
+    s_prebuffering = false;
+    s_prebuffer_since_ms = 0;
     s_got_music_info = false;
     s_using_http = false;
     s_radio_open_ms = 0;
@@ -1061,7 +1101,7 @@ static esp_err_t ensure_radio(const char *url, int volume, bool hold)
         radio_mark_started();
         /* Saved knob before the mixer reads radio — no 0 dB / leftover burst. */
         amp_apply_saved(" (stream)");
-        ESP_LOGI(TAG, "radio live");
+        ESP_LOGI(TAG, "radio live (audible after HTTP rb>=%d)", SB_HTTP_START_BYTES);
     }
     mix_route_clip_and_radio();
     return ESP_OK;
@@ -1074,9 +1114,10 @@ static void mix_route_clip_and_radio(void)
     }
     /* Prefetch fills the radio pipe but must not feed the mixer — otherwise
      * go_live finds an empty PCM rb and the station underruns. */
-    /* Hold keeps HTTP/AAC running but mix must not eat radio PCM, so the
-     * 256 KB HTTP rb can refill while the weak-Wi-Fi clip speaks. */
-    bool radio = s_running && s_radio_pcm && s_got_music_info && !s_hold_radio;
+    /* Hold / prebuffer keep HTTP/AAC running but mix must not eat radio PCM,
+     * so the 256 KB HTTP rb can reach the start/recover high-water. */
+    bool radio = s_running && s_radio_pcm && s_got_music_info && !s_hold_radio
+        && !s_prebuffering;
     bool clip = s_clip_active && s_clip_pcm;
     if (clip && radio) {
         mix_use_rb(SB_SLOT_RADIO, s_radio_pcm, SB_MIX_MUTE_TIMEOUT);
@@ -1144,6 +1185,11 @@ bool radio_player_is_prefetching(void)
     return s_prefetching;
 }
 
+bool radio_player_is_prebuffering(void)
+{
+    return s_prebuffering;
+}
+
 esp_err_t radio_player_go_live(void)
 {
     if (!s_have_out) {
@@ -1155,7 +1201,8 @@ esp_err_t radio_player_go_live(void)
         }
         return ensure_radio(s_url, s_volume, false);
     }
-    ESP_LOGI(TAG, "Go live — mixer reads radio");
+    ESP_LOGI(TAG, "Go live — mixer reads radio after HTTP rb>=%d",
+             SB_HTTP_START_BYTES);
     /* Always rewind mix here. After the ident clip the mixer may still
      * look RUNNING while wedged on an aborted clip rb; if-needed then
      * leaves the station silent. Stream stays gated through set_clk
@@ -1165,10 +1212,15 @@ esp_err_t radio_player_go_live(void)
     drain_mix_evt();
     if (!s_running) {
         radio_mark_started();
+    } else if (!s_prebuffering) {
+        /* Prefetch already marked running? Still wait for almost-full. */
+        radio_prebuffer_begin("go-live");
     }
     s_prefetching = false;
     amp_apply_saved(" (stream)");
-    mix_route_clip_and_radio();
+    if (!radio_prebuffer_release_if_ready()) {
+        mix_route_clip_and_radio();
+    }
     drain_mix_evt();
     s_mix_hold_restart_until_ms = (esp_timer_get_time() / 1000) + 1000;
     return ESP_OK;
@@ -1246,6 +1298,7 @@ static void radio_soft_restart(const char *reason)
     s_stall_grace_until_ms = now + SB_STREAM_STALL_GRACE_MS;
     s_radio_open_ms = now;
     s_got_music_info = false;
+    radio_prebuffer_begin("soft-restart");
     mix_route_clip_and_radio();
 }
 
@@ -1277,7 +1330,7 @@ static void radio_fallback_https(const char *reason)
 
 static void check_stream_stall(void)
 {
-    if (!s_running || !s_got_music_info || s_clip_active) {
+    if (!s_running || !s_got_music_info || s_clip_active || s_prebuffering) {
         return;
     }
     int64_t now = esp_timer_get_time() / 1000;
@@ -1369,7 +1422,7 @@ static int http_rb_filled(void)
 
 int radio_player_http_buffered(void)
 {
-    if (!s_running) {
+    if (!s_running && !s_prefetching && !s_prebuffering) {
         return -1;
     }
     return http_rb_filled();
@@ -1384,15 +1437,15 @@ static void stream_snap(const char *why)
     int64_t now = esp_timer_get_time() / 1000;
     int pcm_idle = s_last_pcm_ms ? (int)(now - s_last_pcm_ms) : -1;
     int hold_ms = s_hold_started_ms ? (int)(now - s_hold_started_ms) : 0;
-    int need = s_wifi_weak_latched ? SB_WIFI_HTTP_RESUME_BYTES
-                                   : SB_HTTP_SLOW_RESUME_BYTES;
+    int need = radio_buf_play_need((int)s_wifi_weak_latched);
     /* W so log_shipper flushes. One line: rb vs PCM vs Wi-Fi vs element. */
     ESP_LOGW(TAG,
-             "stall %s rb=%d/%d need=%d pcmrb=%d music=%d hold=%d weak=%d "
+             "stall %s rb=%d/%d need=%d pcmrb=%d music=%d hold=%d prebuf=%d weak=%d "
              "hold_ms=%d recon=%d rssi=%d assoc=%d pcm_idle=%d http_el=%d aac_el=%d "
              "tls=%d clip=%d run=%d",
              why ? why : "-", filled, SB_HTTP_RB_SIZE, need, pcm,
-             (int)s_got_music_info, (int)s_hold_radio, (int)s_wifi_weak_latched,
+             (int)s_got_music_info, (int)s_hold_radio, (int)s_prebuffering,
+             (int)s_wifi_weak_latched,
              hold_ms, s_hold_reconnects, assoc ? ap.rssi : 0, (int)assoc, pcm_idle,
              s_http ? (int)audio_element_get_state(s_http) : -1,
              s_aac ? (int)audio_element_get_state(s_aac) : -1,
@@ -1506,8 +1559,7 @@ bool radio_player_wifi_weak_resume_ready(void)
         return false;
     }
     int filled = http_rb_filled();
-    int need = s_wifi_weak_latched ? SB_WIFI_HTTP_RESUME_BYTES
-                                   : SB_HTTP_SLOW_RESUME_BYTES;
+    int need = radio_buf_play_need((int)s_wifi_weak_latched);
     if (filled >= need) {
         stream_snap("refill-ready");
         return true;
@@ -1517,7 +1569,7 @@ bool radio_player_wifi_weak_resume_ready(void)
 
 bool radio_player_wifi_weak_should_speak(void)
 {
-    if (s_hold_radio || s_clip_active || s_prefetching) {
+    if (s_hold_radio || s_clip_active || s_prefetching || s_prebuffering) {
         return false;
     }
     int64_t now = esp_timer_get_time() / 1000;
@@ -1546,7 +1598,7 @@ bool radio_player_wifi_weak_should_speak(void)
 
 bool radio_player_http_slow_should_speak(void)
 {
-    if (s_hold_radio || s_clip_active || s_prefetching) {
+    if (s_hold_radio || s_clip_active || s_prefetching || s_prebuffering) {
         return false;
     }
     if (!s_running || !s_got_music_info) {
@@ -1624,14 +1676,29 @@ void radio_player_loop(void)
     mix_restart_if_needed();
     {
         int filled = http_rb_filled();
-        if (s_hold_radio) {
-            int64_t now = esp_timer_get_time() / 1000;
+        int64_t now = esp_timer_get_time() / 1000;
+        if (s_prebuffering) {
+            if (radio_prebuffer_release_if_ready()) {
+                s_rb_drop_band = -1;
+            } else if (s_prebuffer_snap_ms == 0 || (now - s_prebuffer_snap_ms) >= 2000) {
+                s_prebuffer_snap_ms = now;
+                stream_snap("prebuffer-tick");
+            }
+        } else if (s_hold_radio) {
             int hold_ms = s_hold_started_ms ? (int)(now - s_hold_started_ms) : 0;
             int period = (!sta_associated() || hold_ms > 30000) ? 30000 : 5000;
             if (s_hold_snap_ms == 0 || (now - s_hold_snap_ms) >= period) {
                 s_hold_snap_ms = now;
                 stream_snap("hold-tick");
             }
+        } else if (s_running && filled >= 0 && s_got_music_info && !s_clip_active
+                   && radio_buf_underrun(filled)
+                   && !s_wifi_weak_latched && !sta_rssi_is_weak()) {
+            /* Good Wi-Fi but skinny HTTP rb: mute mixer and refill to 224 KB.
+             * Do not speak — this is jitter, not wifi-weak / internet-lenta. */
+            radio_prebuffer_begin("rb-drop");
+            mix_route_clip_and_radio();
+            s_rb_drop_band = filled / (32 * 1024);
         } else if (s_running && filled >= 0) {
             if (filled < SB_WIFI_HTTP_LOW_BYTES) {
                 int band = filled / (32 * 1024);
@@ -1641,6 +1708,28 @@ void radio_player_loop(void)
                 }
             } else {
                 s_rb_drop_band = -1;
+            }
+        }
+    }
+    if (s_prebuffering && !s_hold_radio && s_running && s_http
+        && s_prebuffer_since_ms > 0 && sta_associated() && !s_need_hard_on_wifi) {
+        int64_t now = esp_timer_get_time() / 1000;
+        int filled = http_rb_filled();
+        if (now - s_prebuffer_since_ms >= SB_HTTP_SLOW_RECONNECT_MS
+            && filled >= 0 && filled < SB_HTTP_RECOVER_BYTES) {
+            int grew = filled - s_prebuffer_last_filled;
+            s_prebuffer_last_filled = filled;
+            if (grew >= SB_HTTP_SLOW_GROW_BYTES) {
+                s_prebuffer_since_ms = now;
+                ESP_LOGW(TAG, "prebuffer filling rb=%d grew=%d — wait",
+                         filled, grew);
+            } else if (s_prebuffer_reconnects + 1 >= SB_HTTP_SLOW_RECONNECT_MAX) {
+                radio_hard_restart("prebuffer — still empty");
+                return;
+            } else {
+                s_prebuffer_reconnects++;
+                radio_soft_restart("prebuffer — reconnect");
+                return;
             }
         }
     }
@@ -1704,8 +1793,10 @@ void radio_player_loop(void)
         s_restart_backoff_ms = 500;
         s_stall_strikes = 0;
         s_last_pcm_ms = esp_timer_get_time() / 1000;
-        mix_route_clip_and_radio();
-        if (s_hold_radio) {
+        if (!radio_prebuffer_release_if_ready()) {
+            mix_route_clip_and_radio();
+        }
+        if (s_hold_radio || s_prebuffering) {
             stream_snap("music-info");
         }
         ESP_LOGI(TAG, "heap after music: free=%u spiram=%u internal=%u tls=%d",

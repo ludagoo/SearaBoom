@@ -9,6 +9,8 @@
 esp_err_t radio_player_start_idle(int volume);
 esp_err_t radio_player_prefetch(const char *url, int volume);
 bool radio_player_is_prefetching(void);
+/* Mixer is muted until HTTP rb reaches the start/recover high-water. */
+bool radio_player_is_prebuffering(void);
 esp_err_t radio_player_go_live(void);
 esp_err_t radio_player_start(const char *url, int volume);
 void radio_player_stop(void);
