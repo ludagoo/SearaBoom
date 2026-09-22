@@ -52,6 +52,7 @@ idf_component_register(
         "../clips/ota_available.aac"
         "../clips/ota_rebooting.aac"
         "../clips/ota_done.aac"
+        "../clips/prebuf.aac"
 )
 
 spiffs_create_partition_image(storage ../spiffs_image FLASH_IN_PROJECT)

@@ -17,6 +17,9 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT_DIR = ROOT / "firmware" / "clips"
 AUTH = Path.home() / ".grok" / "auth.json"
 
+# Synthesized fill chime (not TTS). Keep it when pruning stale AAC.
+KEEP_EXTRA = {"prebuf.aac"}
+
 # Spoken as a person from Ceará: warm, direct, not a caricature.
 # One idea per clip. Welcome does not mention the portal or the IP.
 CLIPS = [
@@ -227,7 +230,7 @@ def main() -> int:
             raise SystemExit("unknown clip ids: " + ", ".join(sorted(missing)))
     key = grok_key()
     session = requests.Session()
-    keep = {f"{c['id']}.aac" for c in CLIPS}
+    keep = {f"{c['id']}.aac" for c in CLIPS} | KEEP_EXTRA
     for clip in clips:
         mp3 = OUT_DIR / f"{clip['id']}.mp3"
         aac = OUT_DIR / f"{clip['id']}.aac"

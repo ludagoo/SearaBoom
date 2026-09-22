@@ -45,6 +45,30 @@ static bool s_healthy_marked;
 static volatile int s_pad_taps;
 static unsigned s_flag_seq;
 
+/* Fill: sintonizando once, then a looping multi-note activity jingle. */
+#define SB_PREBUF_FILL_PAUSE_MS 400
+static bool s_fill_tune_done;
+static int64_t s_fill_gap_until_ms;
+
+static sb_clip_id_t fill_tune_clip(void)
+{
+    return (strncmp(s_cfg.url_key, "URL2", 4) == 0)
+        ? SB_CLIP_TUNE_104 : SB_CLIP_TUNE_102;
+}
+
+static bool clip_is_fill_pattern(sb_clip_id_t id)
+{
+    return id == SB_CLIP_PREBUF
+        || id == SB_CLIP_TUNE_102
+        || id == SB_CLIP_TUNE_104;
+}
+
+static void fill_pattern_reset(void)
+{
+    s_fill_tune_done = false;
+    s_fill_gap_until_ms = 0;
+}
+
 static void volume_cb(int delta, void *ctx)
 {
     (void)ctx;
@@ -91,6 +115,8 @@ static void handle_pad_gesture(int taps)
             ESP_LOGE(TAG, "Station switch prefetch failed");
         }
         clip_player_play_wait(tune, 15000);
+        s_fill_tune_done = true;
+        s_fill_gap_until_ms = 0;
         if (radio_player_go_live() != ESP_OK) {
             ESP_LOGE(TAG, "Station switch go_live failed");
         }
@@ -508,8 +534,11 @@ static void boot_start_radio(bool play_updated)
     if (play_updated) {
         ESP_LOGI(TAG, "First boot after update — playing atualizado");
         clip_player_play_wait(SB_CLIP_OTA_DONE, 20000);
+        fill_pattern_reset();
     } else {
         clip_player_play_wait(tune, 15000);
+        s_fill_tune_done = true;
+        s_fill_gap_until_ms = 0;
     }
     if (radio_player_go_live() != ESP_OK) {
         ESP_LOGE(TAG, "Radio go_live failed");
@@ -610,6 +639,7 @@ void app_main(void)
         clip_player_tick();
         volume_buttons_poll();
         if (radio_player_take_stop_clip()) {
+            fill_pattern_reset();
             clip_player_stop();
         }
         if (s_pad_taps) {
@@ -618,30 +648,71 @@ void app_main(void)
             handle_pad_gesture(taps);
         }
         if (radio_player_wifi_weak_resume_ready()) {
+            fill_pattern_reset();
             clip_player_stop();
             radio_player_hold_stream(false);
-        } else if (!ota_update_is_busy() && !clip_player_is_active()) {
-            if (radio_player_wifi_weak_should_speak()) {
-                /* Speak first so the warning is not lost in a mute gap, then
-                 * stop consuming radio PCM so HTTP can refill. Skip during OTA
-                 * so the download does not fight a UI clip for Wi-Fi/CPU. */
-                clip_player_loop(SB_CLIP_WIFI_WEAK);
-                radio_player_hold_stream(true);
-            } else if (radio_player_http_slow_should_speak()) {
-                /* Hold first: only ~8 s of AAC left. Speaking over the
-                 * station would finish the ring during the prompt. */
-                radio_player_hold_stream(true);
-                clip_player_loop(SB_CLIP_NET_SLOW);
+        } else if (!ota_update_is_busy()) {
+            sb_clip_id_t playing = clip_player_playing();
+            bool fill = clip_is_fill_pattern(playing);
+            bool spoken = (playing == SB_CLIP_OTA_DONE
+                           || playing == SB_CLIP_NET_SLOW
+                           || playing == SB_CLIP_WIFI_WEAK);
+            /* Prompts may interrupt the fill pattern. Do not stack it on
+             * ota_done / net_slow / wifi_weak. Sintonizando plays once per
+             * fill, then the activity jingle loops — not an alternate. */
+            if (!clip_player_is_active() || fill) {
+                if (radio_player_wifi_weak_should_speak()) {
+                    /* Speak first so the warning is not lost in a mute gap, then
+                     * stop consuming radio PCM so HTTP can refill. Skip during OTA
+                     * so the download does not fight a UI clip for Wi-Fi/CPU. */
+                    fill_pattern_reset();
+                    clip_player_loop(SB_CLIP_WIFI_WEAK);
+                    radio_player_hold_stream(true);
+                } else if (radio_player_http_slow_should_speak()) {
+                    /* Hold first: only ~8 s of AAC left. Speaking over the
+                     * station would finish the ring during the prompt. */
+                    fill_pattern_reset();
+                    radio_player_hold_stream(true);
+                    clip_player_loop(SB_CLIP_NET_SLOW);
+                } else if (!spoken
+                           && radio_player_is_prebuffering()
+                           && !radio_player_wifi_weak_holding()) {
+                    if (clip_player_is_active()) {
+                        s_fill_gap_until_ms = 0;
+                    } else if (!s_fill_tune_done) {
+                        s_fill_tune_done = true;
+                        s_fill_gap_until_ms = 0;
+                        clip_player_play(fill_tune_clip(), false);
+                    } else {
+                        int64_t now_ms = esp_timer_get_time() / 1000;
+                        if (s_fill_gap_until_ms == 0) {
+                            s_fill_gap_until_ms = now_ms + SB_PREBUF_FILL_PAUSE_MS;
+                        }
+                        if (now_ms >= s_fill_gap_until_ms) {
+                            s_fill_gap_until_ms = 0;
+                            clip_player_loop(SB_CLIP_PREBUF);
+                        }
+                    }
+                }
             }
-        } else if (!radio_player_wifi_weak_holding()
-                   && (clip_player_playing() == SB_CLIP_WIFI_WEAK
-                       || clip_player_playing() == SB_CLIP_NET_SLOW)) {
-            /* Prompt clips only run during hold. teardown_radio() clears
-             * hold without stopping the clip; without this the loop
-             * keeps saying "internet lenta" over a healthy station. */
-            ESP_LOGI(TAG, "stop %s clip - not holding",
-                     clip_player_name(clip_player_playing()));
-            clip_player_stop();
+            playing = clip_player_playing();
+            if (!radio_player_wifi_weak_holding()
+                && (playing == SB_CLIP_WIFI_WEAK
+                    || playing == SB_CLIP_NET_SLOW)) {
+                /* Prompt clips only run during hold. teardown_radio() clears
+                 * hold without stopping the clip; without this the loop
+                 * keeps saying "internet lenta" over a healthy station. */
+                ESP_LOGI(TAG, "stop %s clip - not holding",
+                         clip_player_name(playing));
+                clip_player_stop();
+            }
+            if (!radio_player_is_prebuffering()
+                && (clip_is_fill_pattern(playing) || s_fill_gap_until_ms)) {
+                if (clip_is_fill_pattern(playing)) {
+                    clip_player_stop();
+                }
+                fill_pattern_reset();
+            }
         }
         int64_t now = esp_timer_get_time() / 1000;
         if (!ota_started && (now - live_at_ms) > 15000 && radio_player_has_music_info()

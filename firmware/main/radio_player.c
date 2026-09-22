@@ -39,14 +39,21 @@ static const char *TAG = "radio_player";
  * s_using_http; a live STA never hits "wifi back". Retry the join. */
 #define SB_JOIN_RETRY_MS 20000
 #define SB_STREAM_HARD_RESTART_AFTER 3
-/* HTTP rb watermarks live in radio_buf.h (start/recover 112 KB, mute below 96 KB). */
+/* HTTP rb watermarks live in radio_buf.h (start/recover 224 KB, mute below 64 KB). */
 #define SB_HTTP_SLOW_RECONNECT_MS 25000
 #define SB_HTTP_SLOW_GROW_BYTES (16 * 1024)
 #define SB_HTTP_SLOW_RECONNECT_MAX 3
 #define SB_HTTP_SLOW_DEBOUNCE_MS 2000
-/* Speak "internet lenta" if prebuffer mute has not reached recover by then.
- * Shorter than 12 s of unexplained silence; longer than a 96→112 KB jitter refill. */
-#define SB_HTTP_SLOW_PREBUF_SPEAK_MS 8000
+/* Growth window for "internet lenta" while prebuffering. Speak if fill
+ * grew less than SB_HTTP_SLOW_GROW_BYTES over this window. Must stay
+ * below SB_HTTP_SLOW_RECONNECT_MS: the loop resets s_prebuffer_since_ms
+ * (and stall grace) on every 25 s reconnect. Healthy 8 KB/s grows
+ * ~96 KB in 12 s. The critical path (fill < 64 KB while PLAYING) is
+ * separate. */
+#define SB_HTTP_SLOW_PREBUF_SPEAK_MS 12000
+#if SB_HTTP_SLOW_PREBUF_SPEAK_MS >= SB_HTTP_SLOW_RECONNECT_MS
+#error SB_HTTP_SLOW_PREBUF_SPEAK_MS must be below the 25 s reconnect reset
+#endif
 #define SB_BUFFER_PROMPT_COOLDOWN_MS (3 * 60 * 1000)
 #define SB_MIX_SR 44100
 #define SB_SLOT_RADIO 0
@@ -714,7 +721,7 @@ static bool radio_prebuffer_release_if_ready(void)
         return false;
     }
     int filled = http_rb_filled();
-    /* WAIT and REFILL share the 112 KB start/recover watermark. */
+    /* WAIT and REFILL share the 224 KB start/recover watermark. */
     if (radio_buf_gate(RADIO_BUF_WAIT, filled) != RADIO_BUF_PLAY) {
         return false;
     }
@@ -736,7 +743,7 @@ static void radio_mark_started(void)
     s_stall_grace_until_ms = now + SB_STREAM_STALL_GRACE_MS;
     s_stall_strikes = 0;
     s_restart_backoff_ms = 500;
-    /* Mixer stays off the radio slot until HTTP rb reaches start (112 KB). */
+    /* Mixer stays off the radio slot until HTTP rb reaches start (224 KB). */
     radio_prebuffer_begin("start");
 }
 
@@ -1625,15 +1632,18 @@ bool radio_player_http_slow_should_speak(void)
     }
     int filled = http_rb_filled();
     bool critical = filled >= 0 && filled < SB_HTTP_SLOW_LOW_BYTES;
+    /* last_filled is the rb at prebuffer_begin; the 25 s reconnect loop
+     * does not touch it until then. Healthy 8 KB/s grows ~96 KB in 12 s. */
     bool stuck = s_prebuffering && s_prebuffer_since_ms
         && (now - s_prebuffer_since_ms) >= SB_HTTP_SLOW_PREBUF_SPEAK_MS
-        && filled >= 0 && filled < SB_HTTP_RECOVER_BYTES;
+        && filled >= 0 && filled < SB_HTTP_RECOVER_BYTES
+        && (filled - s_prebuffer_last_filled) < SB_HTTP_SLOW_GROW_BYTES;
     if (!critical && !stuck) {
         s_http_slow_low_since = 0;
         return false;
     }
-    /* Stall grace is for post-start jitter. A stuck prebuffer mute already
-     * waited 8 s; do not let 35 s of grace hide the prompt. */
+    /* Stall grace is for post-start jitter. Growth-based stuck already
+     * waited ~12 s with no fill; do not let 35 s of grace hide it. */
     if (!stuck && now < s_stall_grace_until_ms) {
         s_http_slow_low_since = 0;
         return false;
@@ -1717,7 +1727,7 @@ void radio_player_loop(void)
         } else if (s_running && filled >= 0 && s_got_music_info && !s_clip_active
                    && radio_buf_underrun(filled)
                    && !s_wifi_weak_latched && !sta_rssi_is_weak()) {
-            /* Good Wi-Fi but fill dipped under 96 KB: mute and refill to 112 KB.
+            /* Good Wi-Fi but fill dipped under 64 KB: mute and refill to 224 KB.
              * A real slow server can still speak internet lenta while muted. */
             radio_prebuffer_begin("rb-drop");
             mix_route_clip_and_radio();

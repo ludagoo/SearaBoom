@@ -31,6 +31,7 @@ EXPECTED_MS = {
     "ota_available.aac": 5874,
     "ota_rebooting.aac": 2832,
     "ota_done.aac": 4527,
+    "prebuf.aac": 1625,
 }
 
 
