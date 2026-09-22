@@ -44,10 +44,16 @@ static const char *TAG = "radio_player";
 #define SB_HTTP_SLOW_GROW_BYTES (16 * 1024)
 #define SB_HTTP_SLOW_RECONNECT_MAX 3
 #define SB_HTTP_SLOW_DEBOUNCE_MS 2000
-/* Speak "internet lenta" if prebuffer mute has not reached recover by then.
- * Must be longer than a healthy 0→224 KB fill (~28 s at ~8 KB/s). The
- * critical path (fill < 64 KB while PLAYING) is separate. */
-#define SB_HTTP_SLOW_PREBUF_SPEAK_MS 35000
+/* Growth window for "internet lenta" while prebuffering. Speak if fill
+ * grew less than SB_HTTP_SLOW_GROW_BYTES over this window. Must stay
+ * below SB_HTTP_SLOW_RECONNECT_MS: the loop resets s_prebuffer_since_ms
+ * (and stall grace) on every 25 s reconnect. Healthy 8 KB/s grows
+ * ~96 KB in 12 s. The critical path (fill < 64 KB while PLAYING) is
+ * separate. */
+#define SB_HTTP_SLOW_PREBUF_SPEAK_MS 12000
+#if SB_HTTP_SLOW_PREBUF_SPEAK_MS >= SB_HTTP_SLOW_RECONNECT_MS
+#error SB_HTTP_SLOW_PREBUF_SPEAK_MS must be below the 25 s reconnect reset
+#endif
 #define SB_BUFFER_PROMPT_COOLDOWN_MS (3 * 60 * 1000)
 #define SB_MIX_SR 44100
 #define SB_SLOT_RADIO 0
@@ -1626,15 +1632,18 @@ bool radio_player_http_slow_should_speak(void)
     }
     int filled = http_rb_filled();
     bool critical = filled >= 0 && filled < SB_HTTP_SLOW_LOW_BYTES;
+    /* last_filled is the rb at prebuffer_begin; the 25 s reconnect loop
+     * does not touch it until then. Healthy 8 KB/s grows ~96 KB in 12 s. */
     bool stuck = s_prebuffering && s_prebuffer_since_ms
         && (now - s_prebuffer_since_ms) >= SB_HTTP_SLOW_PREBUF_SPEAK_MS
-        && filled >= 0 && filled < SB_HTTP_RECOVER_BYTES;
+        && filled >= 0 && filled < SB_HTTP_RECOVER_BYTES
+        && (filled - s_prebuffer_last_filled) < SB_HTTP_SLOW_GROW_BYTES;
     if (!critical && !stuck) {
         s_http_slow_low_since = 0;
         return false;
     }
-    /* Stall grace is for post-start jitter. A stuck prebuffer mute already
-     * waited past a healthy fill; do not let 35 s of grace hide the prompt. */
+    /* Stall grace is for post-start jitter. Growth-based stuck already
+     * waited ~12 s with no fill; do not let 35 s of grace hide it. */
     if (!stuck && now < s_stall_grace_until_ms) {
         s_http_slow_low_since = 0;
         return false;

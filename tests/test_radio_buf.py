@@ -213,31 +213,69 @@ int main(void) {
     assert "refill 229376 -> 1" in out
 
 
-def test_prebuf_speak_waits_for_healthy_fill() -> int:
-    """8 s used to fire internet lenta during a healthy 15–28 s fill to 224 KB."""
+def _radio_player_int(rp: str, name: str) -> int:
+    m = re.search(rf"^#define {name} (?:\((\d+)\s*\*\s*(\d+)\)|(\d+))\s*$", rp, re.M)
+    assert m, f"{name} missing"
+    if m.group(1) and m.group(2):
+        return int(m.group(1)) * int(m.group(2))
+    return int(m.group(3))
+
+
+def test_prebuf_speak_is_growth_based() -> int:
+    """Speak on a stuck prebuffer before the 25 s reconnect resets the clock.
+
+    A timer ≥ 25 s never fires: radio_player_loop soft-restarts and resets
+    s_prebuffer_since_ms. Healthy 8 KB/s grows ~96 KB in 12 s, so a
+    growth check stays silent on a climb toward 224 KB.
+    """
     rp = (ROOT / "firmware" / "main" / "radio_player.c").read_text()
-    m = re.search(r"^#define SB_HTTP_SLOW_PREBUF_SPEAK_MS (\d+)\s*$", rp, re.M)
-    assert m, "SB_HTTP_SLOW_PREBUF_SPEAK_MS missing"
-    ms = int(m.group(1))
-    assert ms > 30000, (
-        f"prebuf speak {ms} ms must exceed a healthy 0→224 KB fill (~28 s at ~8 KB/s)"
+    speak_ms = _radio_player_int(rp, "SB_HTTP_SLOW_PREBUF_SPEAK_MS")
+    reconnect_ms = _radio_player_int(rp, "SB_HTTP_SLOW_RECONNECT_MS")
+    grow = _radio_player_int(rp, "SB_HTTP_SLOW_GROW_BYTES")
+    assert reconnect_ms == 25000
+    assert grow == 16 * 1024
+    assert speak_ms < reconnect_ms, (
+        f"prebuf speak {speak_ms} ms must be below reconnect {reconnect_ms} ms"
     )
-    assert ms != 8000
+    assert 10000 <= speak_ms <= 20000, f"growth window should be ~12 s, got {speak_ms}"
     speak = rp[rp.index("bool radio_player_http_slow_should_speak(void)"):]
     speak = speak.split("\nvoid ", 1)[0]
     assert "SB_HTTP_SLOW_PREBUF_SPEAK_MS" in speak
+    assert "s_prebuffer_last_filled" in speak
+    assert "SB_HTTP_SLOW_GROW_BYTES" in speak
     assert "s_prebuffering" in speak
     assert "SB_HTTP_RECOVER_BYTES" in speak
-    # Critical path (fill < 64 KB) still speaks when the buffer is actually stuck.
     assert "SB_HTTP_SLOW_LOW_BYTES" in speak
-    return ms
+
+    recover = FILL
+    last = 0
+
+    def stuck(now_ms: int, filled: int, last_filled: int) -> bool:
+        return (
+            now_ms >= speak_ms
+            and filled >= 0
+            and filled < recover
+            and (filled - last_filled) < grow
+        )
+
+    # Healthy 8 KB/s from empty: 12 s → ~96 KB, not stuck; ready at ~28 s.
+    healthy_12 = int(8 * 1024 * (speak_ms / 1000))
+    assert healthy_12 > grow
+    assert not stuck(speak_ms, healthy_12, last)
+    assert not stuck(speak_ms, FILL - 1, last)  # still climbing
+    # Stuck 0 B/s from empty, and stuck at the ~100 KB ident hover.
+    assert stuck(speak_ms, 0, 0)
+    assert stuck(speak_ms, OLD_START_HOVER, OLD_START_HOVER)
+    # Trickle 1 KB/s: 12 KB < 16 KB grow floor → speak.
+    assert stuck(speak_ms, int(1 * 1024 * (speak_ms / 1000)), 0)
+    return speak_ms
 
 
 def main() -> int:
     d = test_header_numbers()
     test_python_hysteresis(d)
     test_c_gate_matches(d)
-    speak_ms = test_prebuf_speak_waits_for_healthy_fill()
+    speak_ms = test_prebuf_speak_is_growth_based()
     print("test_radio_buf: ok")
     print(
         f"  start={d['SB_HTTP_START_BYTES']} recover={d['SB_HTTP_RECOVER_BYTES']} "
