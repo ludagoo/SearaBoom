@@ -45,8 +45,9 @@ static const char *TAG = "radio_player";
 #define SB_HTTP_SLOW_RECONNECT_MAX 3
 #define SB_HTTP_SLOW_DEBOUNCE_MS 2000
 /* Speak "internet lenta" if prebuffer mute has not reached recover by then.
- * 8 s is shorter than a 64→224 KB refill (~20 s at ~8 KB/s). */
-#define SB_HTTP_SLOW_PREBUF_SPEAK_MS 8000
+ * Must be longer than a healthy 0→224 KB fill (~28 s at ~8 KB/s). The
+ * critical path (fill < 64 KB while PLAYING) is separate. */
+#define SB_HTTP_SLOW_PREBUF_SPEAK_MS 35000
 #define SB_BUFFER_PROMPT_COOLDOWN_MS (3 * 60 * 1000)
 #define SB_MIX_SR 44100
 #define SB_SLOT_RADIO 0
@@ -1633,7 +1634,7 @@ bool radio_player_http_slow_should_speak(void)
         return false;
     }
     /* Stall grace is for post-start jitter. A stuck prebuffer mute already
-     * waited 8 s; do not let 35 s of grace hide the prompt. */
+     * waited past a healthy fill; do not let 35 s of grace hide the prompt. */
     if (!stuck && now < s_stall_grace_until_ms) {
         s_http_slow_low_since = 0;
         return false;

@@ -213,10 +213,31 @@ int main(void) {
     assert "refill 229376 -> 1" in out
 
 
+def test_prebuf_speak_waits_for_healthy_fill() -> int:
+    """8 s used to fire internet lenta during a healthy 15–28 s fill to 224 KB."""
+    rp = (ROOT / "firmware" / "main" / "radio_player.c").read_text()
+    m = re.search(r"^#define SB_HTTP_SLOW_PREBUF_SPEAK_MS (\d+)\s*$", rp, re.M)
+    assert m, "SB_HTTP_SLOW_PREBUF_SPEAK_MS missing"
+    ms = int(m.group(1))
+    assert ms > 30000, (
+        f"prebuf speak {ms} ms must exceed a healthy 0→224 KB fill (~28 s at ~8 KB/s)"
+    )
+    assert ms != 8000
+    speak = rp[rp.index("bool radio_player_http_slow_should_speak(void)"):]
+    speak = speak.split("\nvoid ", 1)[0]
+    assert "SB_HTTP_SLOW_PREBUF_SPEAK_MS" in speak
+    assert "s_prebuffering" in speak
+    assert "SB_HTTP_RECOVER_BYTES" in speak
+    # Critical path (fill < 64 KB) still speaks when the buffer is actually stuck.
+    assert "SB_HTTP_SLOW_LOW_BYTES" in speak
+    return ms
+
+
 def main() -> int:
     d = test_header_numbers()
     test_python_hysteresis(d)
     test_c_gate_matches(d)
+    speak_ms = test_prebuf_speak_waits_for_healthy_fill()
     print("test_radio_buf: ok")
     print(
         f"  start={d['SB_HTTP_START_BYTES']} recover={d['SB_HTTP_RECOVER_BYTES']} "
@@ -234,6 +255,7 @@ def main() -> int:
         f"slow_resume={d['SB_HTTP_SLOW_RESUME_BYTES']} "
         f"(need={FILL}) / {CAPACITY}"
     )
+    print(f"  prebuf_speak_ms={speak_ms}")
     return 0
 
 
