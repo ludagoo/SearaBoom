@@ -620,28 +620,46 @@ void app_main(void)
         if (radio_player_wifi_weak_resume_ready()) {
             clip_player_stop();
             radio_player_hold_stream(false);
-        } else if (!ota_update_is_busy() && !clip_player_is_active()) {
-            if (radio_player_wifi_weak_should_speak()) {
-                /* Speak first so the warning is not lost in a mute gap, then
-                 * stop consuming radio PCM so HTTP can refill. Skip during OTA
-                 * so the download does not fight a UI clip for Wi-Fi/CPU. */
-                clip_player_loop(SB_CLIP_WIFI_WEAK);
-                radio_player_hold_stream(true);
-            } else if (radio_player_http_slow_should_speak()) {
-                /* Hold first: only ~8 s of AAC left. Speaking over the
-                 * station would finish the ring during the prompt. */
-                radio_player_hold_stream(true);
-                clip_player_loop(SB_CLIP_NET_SLOW);
+        } else if (!ota_update_is_busy()) {
+            sb_clip_id_t playing = clip_player_playing();
+            bool jingle = (playing == SB_CLIP_PREBUF);
+            bool spoken = (playing == SB_CLIP_OTA_DONE
+                           || playing == SB_CLIP_NET_SLOW
+                           || playing == SB_CLIP_WIFI_WEAK);
+            /* Prompts may interrupt the fill chime. Do not stack the
+             * chime on ota_done / net_slow / wifi_weak. */
+            if (!clip_player_is_active() || jingle) {
+                if (radio_player_wifi_weak_should_speak()) {
+                    /* Speak first so the warning is not lost in a mute gap, then
+                     * stop consuming radio PCM so HTTP can refill. Skip during OTA
+                     * so the download does not fight a UI clip for Wi-Fi/CPU. */
+                    clip_player_loop(SB_CLIP_WIFI_WEAK);
+                    radio_player_hold_stream(true);
+                } else if (radio_player_http_slow_should_speak()) {
+                    /* Hold first: only ~8 s of AAC left. Speaking over the
+                     * station would finish the ring during the prompt. */
+                    radio_player_hold_stream(true);
+                    clip_player_loop(SB_CLIP_NET_SLOW);
+                } else if (!spoken && !clip_player_is_active()
+                           && radio_player_is_prebuffering()
+                           && !radio_player_wifi_weak_holding()) {
+                    clip_player_loop(SB_CLIP_PREBUF);
+                }
             }
-        } else if (!radio_player_wifi_weak_holding()
-                   && (clip_player_playing() == SB_CLIP_WIFI_WEAK
-                       || clip_player_playing() == SB_CLIP_NET_SLOW)) {
-            /* Prompt clips only run during hold. teardown_radio() clears
-             * hold without stopping the clip; without this the loop
-             * keeps saying "internet lenta" over a healthy station. */
-            ESP_LOGI(TAG, "stop %s clip - not holding",
-                     clip_player_name(clip_player_playing()));
-            clip_player_stop();
+            playing = clip_player_playing();
+            if (!radio_player_wifi_weak_holding()
+                && (playing == SB_CLIP_WIFI_WEAK
+                    || playing == SB_CLIP_NET_SLOW)) {
+                /* Prompt clips only run during hold. teardown_radio() clears
+                 * hold without stopping the clip; without this the loop
+                 * keeps saying "internet lenta" over a healthy station. */
+                ESP_LOGI(TAG, "stop %s clip - not holding",
+                         clip_player_name(playing));
+                clip_player_stop();
+            }
+            if (playing == SB_CLIP_PREBUF && !radio_player_is_prebuffering()) {
+                clip_player_stop();
+            }
         }
         int64_t now = esp_timer_get_time() / 1000;
         if (!ota_started && (now - live_at_ms) > 15000 && radio_player_has_music_info()
