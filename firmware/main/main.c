@@ -45,9 +45,9 @@ static bool s_healthy_marked;
 static volatile int s_pad_taps;
 static unsigned s_flag_seq;
 
-/* Fill pattern: sintonizando (tune_102 / tune_104) then the short chime. */
+/* Fill: sintonizando once, then a looping multi-note activity jingle. */
 #define SB_PREBUF_FILL_PAUSE_MS 400
-static sb_clip_id_t s_fill_last = SB_CLIP_COUNT;
+static bool s_fill_tune_done;
 static int64_t s_fill_gap_until_ms;
 
 static sb_clip_id_t fill_tune_clip(void)
@@ -63,18 +63,9 @@ static bool clip_is_fill_pattern(sb_clip_id_t id)
         || id == SB_CLIP_TUNE_104;
 }
 
-static sb_clip_id_t fill_next_clip(void)
-{
-    sb_clip_id_t tune = fill_tune_clip();
-    if (s_fill_last == tune) {
-        return SB_CLIP_PREBUF;
-    }
-    return tune;
-}
-
 static void fill_pattern_reset(void)
 {
-    s_fill_last = SB_CLIP_COUNT;
+    s_fill_tune_done = false;
     s_fill_gap_until_ms = 0;
 }
 
@@ -124,7 +115,7 @@ static void handle_pad_gesture(int taps)
             ESP_LOGE(TAG, "Station switch prefetch failed");
         }
         clip_player_play_wait(tune, 15000);
-        s_fill_last = tune;
+        s_fill_tune_done = true;
         s_fill_gap_until_ms = 0;
         if (radio_player_go_live() != ESP_OK) {
             ESP_LOGE(TAG, "Station switch go_live failed");
@@ -546,7 +537,7 @@ static void boot_start_radio(bool play_updated)
         fill_pattern_reset();
     } else {
         clip_player_play_wait(tune, 15000);
-        s_fill_last = tune;
+        s_fill_tune_done = true;
         s_fill_gap_until_ms = 0;
     }
     if (radio_player_go_live() != ESP_OK) {
@@ -667,8 +658,8 @@ void app_main(void)
                            || playing == SB_CLIP_NET_SLOW
                            || playing == SB_CLIP_WIFI_WEAK);
             /* Prompts may interrupt the fill pattern. Do not stack it on
-             * ota_done / net_slow / wifi_weak. Sintonizando is the fill
-             * voice, not a blocker. */
+             * ota_done / net_slow / wifi_weak. Sintonizando plays once per
+             * fill, then the activity jingle loops — not an alternate. */
             if (!clip_player_is_active() || fill) {
                 if (radio_player_wifi_weak_should_speak()) {
                     /* Speak first so the warning is not lost in a mute gap, then
@@ -688,17 +679,18 @@ void app_main(void)
                            && !radio_player_wifi_weak_holding()) {
                     if (clip_player_is_active()) {
                         s_fill_gap_until_ms = 0;
+                    } else if (!s_fill_tune_done) {
+                        s_fill_tune_done = true;
+                        s_fill_gap_until_ms = 0;
+                        clip_player_play(fill_tune_clip(), false);
                     } else {
                         int64_t now_ms = esp_timer_get_time() / 1000;
-                        bool need_gap = clip_is_fill_pattern(s_fill_last);
-                        if (need_gap && s_fill_gap_until_ms == 0) {
+                        if (s_fill_gap_until_ms == 0) {
                             s_fill_gap_until_ms = now_ms + SB_PREBUF_FILL_PAUSE_MS;
                         }
-                        if (!need_gap || now_ms >= s_fill_gap_until_ms) {
-                            sb_clip_id_t next = fill_next_clip();
-                            s_fill_last = next;
+                        if (now_ms >= s_fill_gap_until_ms) {
                             s_fill_gap_until_ms = 0;
-                            clip_player_play(next, false);
+                            clip_player_loop(SB_CLIP_PREBUF);
                         }
                     }
                 }

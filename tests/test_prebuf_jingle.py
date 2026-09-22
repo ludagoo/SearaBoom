@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host spec: fill pattern is sintonizando + chime, fill policy unchanged."""
+"""Host spec: sintonizando once, then looping activity jingle. Fill policy unchanged."""
 from __future__ import annotations
 
 import sys
@@ -53,54 +53,56 @@ def test_fill_policy_unchanged() -> None:
     assert "SB_HTTP_SLOW_GROW_BYTES" in rp
 
 
-def test_sintonizando_clip_name() -> None:
+def test_sintonizando_once() -> None:
     assert "Sintonizando Rádio Seara" in TTS
-    assert '"id": "tune_102"' in TTS
-    assert '"id": "tune_104"' in TTS
-    assert "SB_CLIP_TUNE_102" in CH
-    assert "SB_CLIP_TUNE_104" in CH
     assert "fill_tune_clip" in MAIN
-    assert "SB_CLIP_TUNE_104" in MAIN
-    assert "SB_CLIP_TUNE_102" in MAIN
-    # Station pick matches boot ident (URL2 → 104.7).
-    assert MAIN.count("? SB_CLIP_TUNE_104 : SB_CLIP_TUNE_102") >= 2
-
-
-def test_clip_wired() -> None:
-    assert "SB_CLIP_PREBUF" in CH
-    assert '"../clips/prebuf.aac"' in CMAKE
-    assert '[SB_CLIP_PREBUF] = "prebuf"' in CP
-    assert AAC.is_file()
-    data = AAC.read_bytes()
-    ms = adts_duration_ms(data)
-    assert 800 <= ms <= 1200, f"chime duration {ms} ms, want ~1 s"
-
-
-def test_alternates_with_short_gap() -> None:
-    assert "#define SB_PREBUF_FILL_PAUSE_MS 400" in MAIN
-    assert "5000" not in MAIN.split("SB_PREBUF_FILL_PAUSE_MS", 1)[1][:80]
-    assert "fill_next_clip" in MAIN
-    nxt = MAIN[MAIN.index("static sb_clip_id_t fill_next_clip"):]
-    nxt = nxt.split("static void fill_pattern_reset", 1)[0]
-    assert "SB_CLIP_PREBUF" in nxt
-    assert "fill_tune_clip" in nxt
-    helpers = MAIN[MAIN.index("static bool clip_is_fill_pattern"):MAIN.index("static sb_clip_id_t fill_next_clip")]
-    assert "SB_CLIP_PREBUF" in helpers
-    assert "SB_CLIP_TUNE_102" in helpers
-    assert "SB_CLIP_TUNE_104" in helpers
-    assert "clip_player_play(next, false)" in MAIN
-    assert "clip_player_loop(SB_CLIP_PREBUF)" not in MAIN
-    assert "SB_PREBUF_CHIME_PAUSE_MS" not in CP
-
-
-def test_main_trigger() -> None:
-    assert "radio_player_is_prebuffering()" in MAIN
-    # Spoken blockers do not include sintonizando.
+    assert "clip_player_play(fill_tune_clip(), false)" in MAIN
+    assert "s_fill_tune_done" in MAIN
+    # Tune is one-shot, not looped as the fill activity.
+    assert "clip_player_loop(fill_tune_clip()" not in MAIN
+    assert "clip_player_loop(SB_CLIP_TUNE_102)" not in MAIN
+    assert "fill_next_clip" not in MAIN
     spoken = MAIN[MAIN.index("bool spoken = "):MAIN.index("bool spoken = ") + 220]
     assert "SB_CLIP_OTA_DONE" in spoken
     assert "SB_CLIP_NET_SLOW" in spoken
     assert "SB_CLIP_WIFI_WEAK" in spoken
     assert "TUNE" not in spoken
+
+
+def test_jingle_loops_after_tune() -> None:
+    assert "clip_player_loop(SB_CLIP_PREBUF)" in MAIN
+    assert "s_fill_tune_done" in MAIN
+    body = MAIN[MAIN.index("else if (!s_fill_tune_done)"):]
+    body = body.split("playing = clip_player_playing()", 1)[0]
+    assert "clip_player_play(fill_tune_clip(), false)" in body
+    assert "clip_player_loop(SB_CLIP_PREBUF)" in body
+    # Tune starts first; jingle only in the tune_done branch.
+    assert body.index("clip_player_play(fill_tune_clip(), false)") < body.index(
+        "clip_player_loop(SB_CLIP_PREBUF)"
+    )
+    assert "#define SB_PREBUF_JINGLE_PAUSE_MS 400" in CP
+    pause = CP[CP.index("static int clip_loop_pause_ms"):]
+    pause = pause.split("esp_err_t clip_player_init", 1)[0]
+    assert "SB_CLIP_PREBUF" in pause
+    assert "SB_PREBUF_JINGLE_PAUSE_MS" in pause
+    tick = CP[CP.index("void clip_player_tick(void)"):]
+    tick = tick.split("\nstatic bool clip_is_field", 1)[0]
+    assert "SB_CLIP_PREBUF" not in tick  # no max_plays; loop until stop
+
+
+def test_jingle_asset() -> None:
+    assert '"../clips/prebuf.aac"' in CMAKE
+    assert AAC.is_file()
+    data = AAC.read_bytes()
+    ms = adts_duration_ms(data)
+    assert 1400 <= ms <= 2000, f"jingle duration {ms} ms, want a short multi-note phrase"
+    sidx = (data[2] >> 2) & 0x0F
+    ch = ((data[2] & 0x01) << 2) | ((data[3] >> 6) & 0x03)
+    assert sidx == 4, f"sample rate index {sidx}, want 44100 (4)"
+    assert ch == 1, f"channels {ch}, want mono"
+
+
+def test_stops_when_audible() -> None:
     assert "if (!clip_player_is_active() || fill)" in MAIN
     assert "clip_is_fill_pattern(playing)" in MAIN
     assert "!radio_player_is_prebuffering()" in MAIN
@@ -108,10 +110,10 @@ def test_main_trigger() -> None:
 
 def main() -> int:
     test_fill_policy_unchanged()
-    test_sintonizando_clip_name()
-    test_clip_wired()
-    test_alternates_with_short_gap()
-    test_main_trigger()
+    test_sintonizando_once()
+    test_jingle_loops_after_tune()
+    test_jingle_asset()
+    test_stops_when_audible()
     print("test_prebuf_jingle: ok")
     return 0
 

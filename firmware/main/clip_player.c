@@ -29,6 +29,8 @@ static const char *TAG = "clip_player";
 #define SB_NET_SLOW_WINDOW_MS 25000
 #define SB_NET_SLOW_PLAYS 3
 #define SB_WIFI_WEAK_PLAYS 4
+/* Fill jingle: repeat the multi-note phrase with a short breath. */
+#define SB_PREBUF_JINGLE_PAUSE_MS 400
 
 #define SB_PROBE_SR 44100
 #define SB_PROBE_MS 1000
@@ -222,6 +224,9 @@ int clip_player_duration_ms(sb_clip_id_t id)
 
 static int clip_loop_pause_ms(sb_clip_id_t id)
 {
+    if (id == SB_CLIP_PREBUF) {
+        return SB_PREBUF_JINGLE_PAUSE_MS;
+    }
     if (id != SB_CLIP_NET_SLOW) {
         return SB_CLIP_LOOP_PAUSE_MS;
     }
