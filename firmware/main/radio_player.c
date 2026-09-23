@@ -101,9 +101,10 @@ _Static_assert(
     "extra ALC table must cover knobs 22..max");
 /* Downmix reads slots in series. A mute-slot wait of 20 ticks (20 ms at
  * 1 kHz) on an empty rb adds 20 ms to every 256-sample block (~6 ms) and
- * I2S underruns — choppy welcome. Unused slots must be timeout 0: ADF
- * treats TIMEOUT as silence and continues. Mix then blocks on I2S/clip. */
-/* 0 busy-spins mix (current + rb-swap races at 240 MHz). 1 tick yields. */
+ * I2S underruns — choppy welcome. Unused slots must not block: ADF treats
+ * TIMEOUT as silence and continues. Mix then blocks on I2S/clip.
+ * Timeout 0 on the BYPASS base slot cuts audio (ADF #1010/#1069). 1 tick
+ * yields without that. */
 #define SB_MIX_MUTE_TIMEOUT 1
 #define SB_MIX_CLIP_TIMEOUT 40
 /* Increased from 50 to 200 ticks to tolerate transient HTTP/network jitter.
@@ -213,7 +214,6 @@ static void i2s_alc_gate(void);
 static void drain_mix_evt(void);
 static bool sta_associated(void);
 static void mix_route_clip_and_radio(void);
-static void mix_restart(void);
 
 static int16_t *s_beep_pcm;
 static int16_t *s_limit_pcm;
@@ -736,7 +736,11 @@ static bool radio_prebuffer_release_if_ready(void)
     if (!s_prebuffering) {
         return false;
     }
-    if (!s_got_music_info || s_hold_radio || s_clip_active) {
+    /* Do not wait for !s_clip_active. The fill jingle holds clip_active;
+     * clip-off then mix_routes while still prebuffering and mutes slot 0.
+     * HTTP-full should bind radio under the jingle (clip&&radio), so the
+     * next clip-off mix_routes radio instead of mute. */
+    if (!s_got_music_info || s_hold_radio) {
         return false;
     }
     int filled = http_rb_filled();
@@ -749,9 +753,7 @@ static bool radio_prebuffer_release_if_ready(void)
     s_last_pcm_ms = esp_timer_get_time() / 1000;
     ESP_LOGI(TAG, "prebuffer ready rb=%d/%d", filled, SB_HTTP_RB_SIZE);
     stream_snap("prebuffer-ready");
-    /* downmix_set_input_rb on a running BYPASS mixer does not rebind
-     * slot 0. Restart so slot 0 actually reads s_radio_pcm. */
-    mix_restart();
+    mix_route_clip_and_radio();
     return true;
 }
 
@@ -779,7 +781,9 @@ static void mix_use_rb(int slot, ringbuf_handle_t rb, int timeout)
     if (!s_downmix || !rb) {
         return;
     }
-    downmix_set_input_rb_timeout(s_downmix, 0, slot);
+    /* Bind first, then timeout. A timeout-0 poke on the live base slot
+     * cuts BYPASS audio (ADF #1010/#1069) and does not abort an in-flight
+     * rb_read anyway. */
     downmix_set_input_rb(s_downmix, rb, slot);
     downmix_set_input_rb_timeout(s_downmix, timeout, slot);
 }
@@ -844,8 +848,6 @@ static void mix_restart(void)
         amp_apply_saved(" (mix restart)");
     }
     mix_route_clip_and_radio();
-    drain_mix_evt();
-    s_mix_hold_restart_until_ms = (esp_timer_get_time() / 1000) + 1000;
 }
 
 static void mix_restart_if_needed(void)
@@ -1156,14 +1158,14 @@ static void mix_route_clip_and_radio(void)
     /* Prefetch fills the radio pipe but must not feed the mixer — otherwise
      * go_live finds an empty PCM rb and the station underruns. */
     /* Hold / prebuffer keep HTTP/AAC running but mix must not eat radio PCM,
-     * so the 256 KB HTTP rb can reach the start/recover high-water.
-     * Callers that swap mute ↔ radio on a running BYPASS mixer must
-     * mix_restart(): downmix_set_input_rb does not rebind slot 0. */
+     * so the 256 KB HTTP rb can reach the start/recover high-water. */
     bool radio = s_running && s_radio_pcm && s_got_music_info && !s_hold_radio
         && !s_prebuffering;
     bool clip = s_clip_active && s_clip_pcm;
     if (clip && radio) {
-        mix_use_rb(SB_SLOT_RADIO, s_radio_pcm, SB_MIX_MUTE_TIMEOUT);
+        /* Eat radio PCM under the clip. Mute-timeout here left pcmrb full
+         * (16 KB) during the fill jingle, then HTTP froze behind it. */
+        mix_use_rb(SB_SLOT_RADIO, s_radio_pcm, SB_MIX_RADIO_TIMEOUT);
         mix_use_rb(SB_SLOT_CLIP, s_clip_pcm, SB_MIX_CLIP_TIMEOUT);
         downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_SWITCH_ON);
         return;
@@ -1171,7 +1173,7 @@ static void mix_route_clip_and_radio(void)
     if (clip) {
         /* BYPASS dies on any non-TIMEOUT on slot 0. Clip EOS/ABORT would
          * finish mix+I2S, so clip-only always uses SWITCH_ON: mute slot 0
-         * (timeout 0 → silence) plus clip on slot 1. */
+         * (timeout 1 → silence) plus clip on slot 1. */
         mix_mute_slot(SB_SLOT_RADIO);
         mix_use_rb(SB_SLOT_CLIP, s_clip_pcm, SB_MIX_CLIP_TIMEOUT);
         downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_SWITCH_ON);
@@ -1342,7 +1344,7 @@ static void radio_soft_restart(const char *reason)
     s_radio_open_ms = now;
     s_got_music_info = false;
     radio_prebuffer_begin("soft-restart");
-    mix_restart();
+    mix_route_clip_and_radio();
 }
 
 static void radio_hard_restart(const char *reason)
@@ -1590,7 +1592,7 @@ void radio_player_hold_stream(bool on)
         s_wifi_weak_latched = false;
         radio_player_arm_rssi_threshold();
     }
-    mix_restart();
+    mix_route_clip_and_radio();
 }
 
 bool radio_player_wifi_weak_holding(void)
@@ -1757,7 +1759,7 @@ void radio_player_loop(void)
             /* Good Wi-Fi but fill dipped under 64 KB: mute and refill to 224 KB.
              * A real slow server can still speak internet lenta while muted. */
             radio_prebuffer_begin("rb-drop");
-            mix_restart();
+            mix_route_clip_and_radio();
             s_rb_drop_band = filled / (32 * 1024);
         } else if (s_running && filled >= 0) {
             if (filled < SB_WIFI_HTTP_LOW_BYTES) {
@@ -1769,6 +1771,14 @@ void radio_player_loop(void)
             } else {
                 s_rb_drop_band = -1;
             }
+        }
+        /* Re-assert BYPASS radio while live and clip-off. Fill-jingle
+         * clip-off can mute after HTTP is full; mix_route is a pointer
+         * store, not mix_restart. Skip while a clip is up so SWITCH_ON
+         * gain ramps are not reset every 20 ms. */
+        if (s_running && s_radio_pcm && s_got_music_info && !s_hold_radio
+            && !s_prebuffering && !s_clip_active) {
+            mix_route_clip_and_radio();
         }
     }
     if (s_prebuffering && !s_hold_radio && s_running && s_http

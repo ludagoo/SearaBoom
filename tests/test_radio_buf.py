@@ -277,12 +277,14 @@ def _fn_until(rp: str, start_token: str, end_token: str) -> str:
     return rp[start:end]
 
 
-def test_prebuf_release_restarts_mix() -> None:
-    """QA Zero: PLAY + beeps + silent radio after 224 KB. Slot 0 stayed on mute.
+def test_prebuf_release_binds_radio_under_clip() -> None:
+    """QA Zero: PLAY + beeps + silent radio after 224 KB. Mixer not eating PCM.
 
-    downmix_set_input_rb on a running BYPASS mixer does not rebind slot 0.
-    Release must mix_restart() after clearing s_prebuffering so mix_route
-    binds s_radio_pcm. Mix-route-only is the 0.5.27 bug.
+    Cause: release waited for !s_clip_active. Fill-jingle clip-off then
+    mix_routed while still prebuffering and muted slot 0. clip&&radio used
+    mute timeout so pcmrb filled. Timeout-0 on BYPASS base cuts audio
+    (ADF #1010). mix_restart() is not the fix (rebinds the same way and
+    cuts clips).
     """
     rp = (ROOT / "firmware/main/radio_player.c").read_text()
     sc = (ROOT / "firmware/main/serial_cmd.c").read_text()
@@ -296,28 +298,43 @@ def test_prebuf_release_restarts_mix() -> None:
         "static void radio_mark_started(void)",
     )
     assert "s_prebuffering = false" in release
-    assert "mix_restart()" in release
-    assert release.index("s_prebuffering = false") < release.index("mix_restart()")
-    assert "mix_route_clip_and_radio()" not in release
+    assert "mix_route_clip_and_radio()" in release
+    assert "if (!s_got_music_info || s_hold_radio)" in release
+    assert "|| s_clip_active" not in release
+    assert "mix_restart()" not in release
 
-    restart = _fn_until(rp, "static void mix_restart(void)\n{", "static void mix_restart_if_needed(void)")
-    assert "mix_route_clip_and_radio()" in restart
-    assert "audio_pipeline_run(s_mix_pipe)" in restart
+    route = _fn_until(rp, "static void mix_route_clip_and_radio(void)",
+                      "esp_err_t radio_player_attach_clip_pcm")
+    both = route.split("if (clip && radio)")[1].split("if (clip)")[0]
+    assert "SB_MIX_RADIO_TIMEOUT" in both
+    assert "SB_MIX_MUTE_TIMEOUT" not in both
+
+    use_rb = _fn_until(rp, "static void mix_use_rb(int slot, ringbuf_handle_t rb, int timeout)",
+                       "static void mix_mute_slot(int slot)")
+    assert "downmix_set_input_rb(s_downmix, rb, slot)" in use_rb
+    assert use_rb.index("downmix_set_input_rb(s_downmix, rb, slot)") < use_rb.index(
+        "downmix_set_input_rb_timeout"
+    )
+    assert "downmix_set_input_rb_timeout(s_downmix, 0, slot)" not in use_rb
 
     loop = rp.split("void radio_player_loop(void)", 1)[1]
     drop = loop.split('radio_prebuffer_begin("rb-drop")', 1)[1][:350]
-    assert "mix_restart()" in drop
-    assert "mix_route_clip_and_radio()" not in drop.split("s_rb_drop_band", 1)[0]
+    assert "mix_route_clip_and_radio()" in drop
+    assert "mix_restart()" not in drop.split("s_rb_drop_band", 1)[0]
+    live = loop.split("Re-assert BYPASS radio while live", 1)[1][:500]
+    assert "mix_route_clip_and_radio()" in live
+    assert "!s_clip_active" in live
+    assert "mix_restart()" not in live
 
-    soft = _fn_until(rp, "static void radio_soft_restart(const char *reason)",
+    soft = _fn_until(rp, "static void radio_soft_restart(const char *reason)\n{",
                      "static void radio_hard_restart(const char *reason)")
-    assert "mix_restart()" in soft
-    assert soft.rindex("mix_restart()") > soft.index('radio_prebuffer_begin("soft-restart")')
+    assert "mix_route_clip_and_radio()" in soft
+    assert "mix_restart()" not in soft
 
     hold = _fn_until(rp, "void radio_player_hold_stream(bool on)",
                      "bool radio_player_wifi_weak_holding(void)")
-    assert "mix_restart()" in hold
-    assert "mix_route_clip_and_radio()" not in hold
+    assert "mix_route_clip_and_radio()" in hold
+    assert "mix_restart()" not in hold
 
     snap = _fn_until(rp, "static void stream_snap(const char *why)",
                      "void radio_player_log_health(const char *why)")
@@ -334,8 +351,6 @@ def test_prebuf_release_restarts_mix() -> None:
     station = _fn_until(ls, "static bool station_pcm_now(void)", "void listen_stats_poll(void)")
     assert "radio_player_pcm_flowing()" in station
     assert "radio_player_pcm_has_energy()" in station
-    assert "radio_player_pcm_has_energy" in rp
-    # Mute-slot zeros keep the tap "flowing" — that is not audible radio.
     assert "s_pcm_last_voice_us" in rp[rp.index("bool radio_player_pcm_has_energy(void)"):
                                       rp.index("bool radio_player_pcm_finished")]
 
@@ -345,7 +360,7 @@ def main() -> int:
     test_python_hysteresis(d)
     test_c_gate_matches(d)
     speak_ms = test_prebuf_speak_is_growth_based()
-    test_prebuf_release_restarts_mix()
+    test_prebuf_release_binds_radio_under_clip()
     print("test_radio_buf: ok")
     print(
         f"  start={d['SB_HTTP_START_BYTES']} recover={d['SB_HTTP_RECOVER_BYTES']} "
