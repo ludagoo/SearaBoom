@@ -306,8 +306,8 @@ def test_prebuf_release_binds_radio_under_clip() -> None:
     route = _fn_until(rp, "static void mix_route_clip_and_radio(void)",
                       "esp_err_t radio_player_attach_clip_pcm")
     both = route.split("if (clip && radio)")[1].split("if (clip)")[0]
-    assert "SB_MIX_RADIO_TIMEOUT" in both
-    assert "SB_MIX_MUTE_TIMEOUT" not in both
+    assert "SB_MIX_MUTE_TIMEOUT" in both
+    assert "SB_MIX_RADIO_TIMEOUT" not in both
 
     use_rb = _fn_until(rp, "static void mix_use_rb(int slot, ringbuf_handle_t rb, int timeout)",
                        "static void mix_mute_slot(int slot)")

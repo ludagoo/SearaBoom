@@ -1163,9 +1163,7 @@ static void mix_route_clip_and_radio(void)
         && !s_prebuffering;
     bool clip = s_clip_active && s_clip_pcm;
     if (clip && radio) {
-        /* Eat radio PCM under the clip. Mute-timeout here left pcmrb full
-         * (16 KB) during the fill jingle, then HTTP froze behind it. */
-        mix_use_rb(SB_SLOT_RADIO, s_radio_pcm, SB_MIX_RADIO_TIMEOUT);
+        mix_use_rb(SB_SLOT_RADIO, s_radio_pcm, SB_MIX_MUTE_TIMEOUT);
         mix_use_rb(SB_SLOT_CLIP, s_clip_pcm, SB_MIX_CLIP_TIMEOUT);
         downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_SWITCH_ON);
         return;
