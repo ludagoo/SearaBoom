@@ -33,6 +33,10 @@ void radio_player_pcm_arm(void);
 bool radio_player_pcm_heard(void);
 bool radio_player_pcm_flowing(void);
 int radio_player_pcm_peak(void);
+/* Last mixer-tap block peak (before beep overlay). Mute-slot zeros stay 0. */
+int radio_player_pcm_tap_peak(void);
+/* True when the tap recently saw radio/clip energy, not mute-slot silence. */
+bool radio_player_pcm_has_energy(void);
 bool radio_player_pcm_finished(int silence_ms);
 
 /* Clip pipeline attaches its PCM ringbuf as mixer slot 1. */

@@ -271,11 +271,81 @@ def test_prebuf_speak_is_growth_based() -> int:
     return speak_ms
 
 
+def _fn_until(rp: str, start_token: str, end_token: str) -> str:
+    start = rp.index(start_token)
+    end = rp.index(end_token, start + 10)
+    return rp[start:end]
+
+
+def test_prebuf_release_restarts_mix() -> None:
+    """QA Zero: PLAY + beeps + silent radio after 224 KB. Slot 0 stayed on mute.
+
+    downmix_set_input_rb on a running BYPASS mixer does not rebind slot 0.
+    Release must mix_restart() after clearing s_prebuffering so mix_route
+    binds s_radio_pcm. Mix-route-only is the 0.5.27 bug.
+    """
+    rp = (ROOT / "firmware/main/radio_player.c").read_text()
+    sc = (ROOT / "firmware/main/serial_cmd.c").read_text()
+    ls = (ROOT / "firmware/main/listen_stats.c").read_text()
+    uh = (ROOT / "firmware/main/pcm_upmix.h").read_text()
+    uc = (ROOT / "firmware/main/pcm_upmix.c").read_text()
+
+    release = _fn_until(
+        rp,
+        "static bool radio_prebuffer_release_if_ready(void)",
+        "static void radio_mark_started(void)",
+    )
+    assert "s_prebuffering = false" in release
+    assert "mix_restart()" in release
+    assert release.index("s_prebuffering = false") < release.index("mix_restart()")
+    assert "mix_route_clip_and_radio()" not in release
+
+    restart = _fn_until(rp, "static void mix_restart(void)\n{", "static void mix_restart_if_needed(void)")
+    assert "mix_route_clip_and_radio()" in restart
+    assert "audio_pipeline_run(s_mix_pipe)" in restart
+
+    loop = rp.split("void radio_player_loop(void)", 1)[1]
+    drop = loop.split('radio_prebuffer_begin("rb-drop")', 1)[1][:350]
+    assert "mix_restart()" in drop
+    assert "mix_route_clip_and_radio()" not in drop.split("s_rb_drop_band", 1)[0]
+
+    soft = _fn_until(rp, "static void radio_soft_restart(const char *reason)",
+                     "static void radio_hard_restart(const char *reason)")
+    assert "mix_restart()" in soft
+    assert soft.rindex("mix_restart()") > soft.index('radio_prebuffer_begin("soft-restart")')
+
+    hold = _fn_until(rp, "void radio_player_hold_stream(bool on)",
+                     "bool radio_player_wifi_weak_holding(void)")
+    assert "mix_restart()" in hold
+    assert "mix_route_clip_and_radio()" not in hold
+
+    snap = _fn_until(rp, "static void stream_snap(const char *why)",
+                     "void radio_player_log_health(const char *why)")
+    assert "pcmrb=%d/%d" in snap
+    assert "peak=%d" in snap
+    assert "s_pcm_peak_now" in snap
+    assert "PCM_UPMIX_OUT_RB_SIZE" in snap
+
+    assert "#define PCM_UPMIX_OUT_RB_SIZE (16 * 1024)" in uh
+    assert "PCM_UPMIX_OUT_RB_SIZE" in uc
+    assert "radio_player_pcm_tap_peak()" in sc
+    assert "peak=%d" in sc[sc.index('if (strcasecmp(line, "http")'):]
+
+    station = _fn_until(ls, "static bool station_pcm_now(void)", "void listen_stats_poll(void)")
+    assert "radio_player_pcm_flowing()" in station
+    assert "radio_player_pcm_has_energy()" in station
+    assert "radio_player_pcm_has_energy" in rp
+    # Mute-slot zeros keep the tap "flowing" — that is not audible radio.
+    assert "s_pcm_last_voice_us" in rp[rp.index("bool radio_player_pcm_has_energy(void)"):
+                                      rp.index("bool radio_player_pcm_finished")]
+
+
 def main() -> int:
     d = test_header_numbers()
     test_python_hysteresis(d)
     test_c_gate_matches(d)
     speak_ms = test_prebuf_speak_is_growth_based()
+    test_prebuf_release_restarts_mix()
     print("test_radio_buf: ok")
     print(
         f"  start={d['SB_HTTP_START_BYTES']} recover={d['SB_HTTP_RECOVER_BYTES']} "

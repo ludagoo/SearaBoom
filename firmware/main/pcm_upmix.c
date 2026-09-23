@@ -100,7 +100,7 @@ audio_element_handle_t pcm_upmix_init_core(const char *tag, int core)
     cfg.open = upmix_open;
     cfg.process = upmix_process;
     cfg.tag = tag ? tag : "m2s";
-    cfg.out_rb_size = 16 * 1024;
+    cfg.out_rb_size = PCM_UPMIX_OUT_RB_SIZE;
     cfg.task_stack = 3 * 1024;
     cfg.task_prio = 5;
     cfg.task_core = (core == 1) ? 1 : 0;
