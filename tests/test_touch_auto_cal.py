@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Auto-cal policy numbers: start 0.25, settle 0.15–0.50, not 0.13."""
+"""Auto-cal policy numbers: start 0.25, settle 0.08–0.50, not 0.13."""
 import subprocess
 import tempfile
 from pathlib import Path
@@ -18,7 +18,8 @@ def test_start_is_025_not_013() -> None:
     assert "#define SB_TOUCH_SENS 0.13f" not in VB
     assert "#define SB_TOUCH_SENS 0.10f" not in VB
     assert "#define SB_TOUCH_AUTO_CEIL 0.50f" in H
-    assert "#define SB_TOUCH_AUTO_FLOOR 0.15f" in H
+    assert "#define SB_TOUCH_AUTO_FLOOR 0.08f" in H
+    assert "#define SB_TOUCH_CAL_FAIL 0.025f" in H
     assert "#define SB_TOUCH_AUTO_FIRST_N 7" in H
 
 
@@ -34,7 +35,7 @@ def test_rev4_keeps_factory_snapshot() -> None:
 def test_auto_from_peak_bias() -> None:
     frac = 0.85
     bias = 0.02
-    floor_v = 0.15
+    floor_v = 0.08
     ceil_v = 0.50
     assert "#define SB_TOUCH_AUTO_FRAC 0.85f" in H
     assert "#define SB_TOUCH_AUTO_BIAS 0.02f" in H
@@ -43,13 +44,14 @@ def test_auto_from_peak_bias() -> None:
         s = peak * frac + bias
         return min(ceil_v, max(floor_v, s))
 
-    assert from_peak(0.10) == 0.15
+    assert from_peak(0.05) == 0.08
+    assert abs(from_peak(0.10) - 0.105) < 1e-6
     assert abs(from_peak(0.20) - 0.19) < 1e-6
     assert from_peak(0.80) == 0.50
 
 
 def test_factory_refine_cannot_persist_below_floor() -> None:
-    floor_v = 0.15
+    floor_v = 0.08
     ceil_v = 0.50
     refine_frac = 0.20
 
@@ -61,8 +63,9 @@ def test_factory_refine_cannot_persist_below_floor() -> None:
 
     assert "return touch_auto_clamp_auto(proposed);" in H
     assert "SB_TOUCH_AUTO_FLOOR" in ST
-    assert refine(0.10, 0.15) == 0.15
-    assert refine(0.10, 0.08) == 0.15
+    assert abs(refine(0.10, 0.15) - 0.12) < 1e-6
+    assert abs(refine(0.10, 0.08) - 0.08) < 1e-6
+    assert refine(0.05, 0.04) == 0.08
     assert abs(refine(0.20, 0.15) - 0.16) < 1e-6
     assert abs(refine(0.20, 0.19) - 0.19) < 1e-6
 
@@ -121,8 +124,19 @@ int main(void)
         return fail("second weak step");
     }
     s = touch_auto_step_softer(s, 0.04f);
-    if (!near(s, 0.15f)) {
+    if (!near(s, 0.10f)) {
+        return fail("third weak step");
+    }
+    s = touch_auto_step_softer(s, 0.04f);
+    if (!near(s, 0.08f)) {
         return fail("floor");
+    }
+    s = touch_auto_step_softer(s, 0.04f);
+    if (!near(s, 0.08f)) {
+        return fail("floor sticks");
+    }
+    if (!near(touch_auto_idf_trip(0.08f), 0.064f)) {
+        return fail("floor trip");
     }
     if (!near(touch_auto_step_softer(0.25f, 0.80f), 0.25f)) {
         return fail("hard press must not firm");
@@ -144,16 +158,18 @@ int main(void)
     if (!near(touch_auto_step_softer(0.10f, 0.90f), 0.10f)) {
         return fail("do not raise a low live");
     }
-    if (!near(touch_auto_step_softer(0.16f, 0.04f), 0.15f)) {
+    if (!near(touch_auto_step_softer(0.10f, 0.04f), 0.08f)) {
         return fail("floor on the last bit");
     }
     /* Factory ±20% of 0.25 would stop at 0.20. The step does not. */
     s = touch_auto_step_softer(0.25f, 0.05f);
     s = touch_auto_step_softer(s, 0.05f);
-    if (!near(s, 0.15f)) {
+    s = touch_auto_step_softer(s, 0.05f);
+    s = touch_auto_step_softer(s, 0.05f);
+    if (!near(s, 0.08f)) {
         return fail("down to floor despite factory window");
     }
-    if (touch_auto_step_softer(0.15f, 0.03f) < 0.15f - 0.0001f) {
+    if (touch_auto_step_softer(0.08f, 0.03f) < 0.08f - 0.0001f) {
         return fail("below floor");
     }
     return 0;

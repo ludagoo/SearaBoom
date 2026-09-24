@@ -13,7 +13,7 @@
 
 /* Field auto-cal from real presses (rev 4). Factory `touch cal` stays rev 3.
  * Higher channel_sens = firmer. Boot live at SB_TOUCH_SENS 0.25. Auto
- * floor 0.15 / ceil 0.50 (clamp unchanged) so boxes can settle on different
+ * floor 0.08 / ceil 0.50 (clamp unchanged) so boxes can settle on different
  * numbers without using 0.13 as the start. */
 
 #define SB_TOUCH_AUTO_FIRST_N 7
@@ -31,13 +31,14 @@
 #define SB_TOUCH_AUTO_FACTORY_REFINE 0.20f
 #define SB_TOUCH_AUTO_FRAC 0.85f
 #define SB_TOUCH_AUTO_BIAS 0.02f
-#define SB_TOUCH_AUTO_FLOOR 0.15f
+#define SB_TOUCH_AUTO_FLOOR 0.08f
 #define SB_TOUCH_AUTO_CEIL 0.50f
 #define SB_TOUCH_AUTO_IDF_DIV 0.8f
 #define SB_TOUCH_AUTO_GRAZE_OVER 1.3f
 #define SB_TOUCH_AUTO_CHATTER_N 20
 #define SB_TOUCH_AUTO_CHATTER_MS 30000
-/* One softer step, absolute. Two weak bumps: 0.250 → 0.200 → 0.150. */
+/* One softer step, absolute. Two weak bumps: 0.250 → 0.200 → 0.150.
+ * Floor is 0.08, so the trip there is 0.064 and later bumps can continue. */
 #define SB_TOUCH_AUTO_STEP_MAX 0.05f
 /* Desired IDF trip sits this far under the measured peak. */
 #define SB_TOUCH_AUTO_TRIP_UNDER 0.02f
@@ -53,7 +54,7 @@ static inline float touch_auto_clamp_hard(float sens)
     return sens;
 }
 
-/* Auto persist never goes below 0.15 / above 0.50. */
+/* Auto persist never goes below 0.08 / above 0.50. */
 static inline float touch_auto_clamp_auto(float sens)
 {
     if (sens < SB_TOUCH_AUTO_FLOOR) {
@@ -71,8 +72,8 @@ static inline float touch_auto_from_peak(float peak)
     return touch_auto_clamp_auto(peak * SB_TOUCH_AUTO_FRAC + SB_TOUCH_AUTO_BIAS);
 }
 
-/* ±20% of factory, then auto floor/ceil. A low factory snapshot (0.10)
- * must not pull persist to 0.12. */
+/* ±20% of factory, then auto floor/ceil. A factory window under 0.08
+ * is raised to the floor. */
 static inline float touch_auto_refine_factory(float factory, float proposed)
 {
     float lo = factory * (1.0f - SB_TOUCH_AUTO_FACTORY_REFINE);
@@ -93,7 +94,7 @@ static inline float touch_auto_idf_trip(float channel_sens)
 
 /* Next channel_sens, down only, toward a trip just under `peak`.
  * One call moves at most SB_TOUCH_AUTO_STEP_MAX. Never raises.
- * Floor 0.15 / ceil 0.50. Factory ±20% is not applied, so that window
+ * Floor 0.08 / ceil 0.50. Factory ±20% is not applied, so that window
  * cannot block a downward step and a low factory snapshot cannot pull
  * below the floor. */
 static inline float touch_auto_step_softer(float live, float peak)
