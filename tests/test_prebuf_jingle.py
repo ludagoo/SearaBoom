@@ -19,8 +19,8 @@ TTS = (ROOT / "scripts/gen_ui_clips.py").read_text()
 
 
 def test_fill_policy_unchanged() -> None:
-    assert VER == "0.5.28"
-    assert 'CONFIG_SEARABOOM_FW_VERSION="0.5.28"' in SDK
+    assert VER == "0.5.29"
+    assert 'CONFIG_SEARABOOM_FW_VERSION="0.5.29"' in SDK
     assert "#define SB_HTTP_START_BYTES (224 * 1024)" in BUF
     assert "#define SB_HTTP_UNDERRUN_BYTES (64 * 1024)" in BUF
     assert "#define SB_HTTP_RB_SIZE (256 * 1024)" in BUF

@@ -7,6 +7,7 @@
 #include "led_status.h"
 #include "log_shipper.h"
 #include "sdkconfig.h"
+#include "esp_app_desc.h"
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "driver/touch_pad.h"
@@ -64,12 +65,20 @@ static int64_t s_settle_until_ms;
 static int64_t s_chatter_t0_ms;
 static int s_chatter_n;
 static bool s_learn_freeze;
+static int s_seed_n[2];
+static float s_seed_t[2][SB_TOUCH_AUTO_SEED_N];
 
 typedef struct {
     bool tracking;
     bool tainted;
     int64_t press_ms;
     float peak;
+    /* Bump above the noise floor that may never fire the button. */
+    bool watch;
+    bool watch_taint;
+    bool watch_armed;
+    int64_t watch_ms;
+    float watch_peak;
 } auto_pad_t;
 
 static auto_pad_t s_auto[2];
@@ -108,6 +117,7 @@ static void auto_on_press(int idx);
 static void auto_on_release(int idx);
 static void auto_sample(void);
 static void auto_flush(void);
+static void auto_disarm_watch(void);
 
 static void auto_clear_learn(void)
 {
@@ -240,6 +250,7 @@ static esp_err_t make_button(int gpio, int delta, float sens, touch_button_handl
 
 static esp_err_t apply_sens(void)
 {
+    auto_disarm_watch();
     touch_element_stop();
     if (s_btn[0]) {
         touch_button_delete(s_btn[0]);
@@ -260,6 +271,51 @@ static esp_err_t apply_sens(void)
         s_settle_until_ms = now_ms() + SB_TOUCH_AUTO_SETTLE_MS;
     }
     return err;
+}
+
+static void auto_load_image_seed(void)
+{
+    uint8_t running[SB_TOUCH_AUTO_IMAGE_LEN];
+    uint8_t stored[SB_TOUCH_AUTO_IMAGE_LEN];
+    const esp_app_desc_t *app = esp_app_get_description();
+    int n_up = 0;
+    int n_dn = 0;
+    bool have;
+    bool same;
+
+    memcpy(running, app->app_elf_sha256, SB_TOUCH_AUTO_IMAGE_LEN);
+    /* Absent tsens_img (field OTA of this binary onto a box that has never
+     * stored an image id) takes the seed path. Not a version compare, and
+     * not the USB reset reason. */
+    have = config_store_load_touch_image(stored, SB_TOUCH_AUTO_IMAGE_LEN);
+    same = have && touch_auto_same_image(stored, SB_TOUCH_AUTO_IMAGE_LEN,
+                                         running, SB_TOUCH_AUTO_IMAGE_LEN);
+    if (touch_auto_needs_seed(have, same)) {
+        s_seed_n[0] = s_seed_n[1] = 0;
+        memset(s_seed_t, 0, sizeof(s_seed_t));
+        (void)config_store_save_touch_image(running, SB_TOUCH_AUTO_IMAGE_LEN);
+        (void)config_store_save_touch_seed(s_seed_t[0], 0, s_seed_t[1], 0);
+        ESP_LOGI(TAG, "touch auto new image, seed each pad");
+        return;
+    }
+    if (!config_store_load_touch_seed(s_seed_t[0], &n_up, s_seed_t[1], &n_dn)) {
+        n_up = n_dn = 0;
+    }
+    if (n_up < 0) {
+        n_up = 0;
+    }
+    if (n_dn < 0) {
+        n_dn = 0;
+    }
+    if (n_up > SB_TOUCH_AUTO_SEED_N) {
+        n_up = SB_TOUCH_AUTO_SEED_N;
+    }
+    if (n_dn > SB_TOUCH_AUTO_SEED_N) {
+        n_dn = SB_TOUCH_AUTO_SEED_N;
+    }
+    s_seed_n[0] = n_up;
+    s_seed_n[1] = n_dn;
+    ESP_LOGI(TAG, "touch auto same image seed=%d/%d", n_up, n_dn);
 }
 
 esp_err_t volume_buttons_init(volume_btn_cb_t cb, volume_gesture_cb_t gesture, void *ctx)
@@ -314,7 +370,8 @@ esp_err_t volume_buttons_init(volume_btn_cb_t cb, volume_gesture_cb_t gesture, v
         s_rev = 0;
     }
     s_need_cal = false;
-    s_settle_until_ms = now_ms() + 5000;
+    auto_load_image_seed();
+    s_settle_until_ms = now_ms() + SB_TOUCH_AUTO_SETTLE_MS;
 
     err = make_button(board_hw_vol_up_gpio(), +1, s_sens_up, &s_btn[0]);
     if (err == ESP_OK) {
@@ -390,16 +447,6 @@ static touch_pad_t auto_ch(int idx)
     return gpio_to_touch(gpio);
 }
 
-static float auto_propose(int idx, float peak)
-{
-    float proposed = touch_auto_from_peak(peak);
-    if (s_have_factory) {
-        float fac = idx == 0 ? s_factory_up : s_factory_dn;
-        proposed = touch_auto_refine_factory(fac, proposed);
-    }
-    return proposed;
-}
-
 static void auto_note_chatter(int64_t t)
 {
     if (s_chatter_t0_ms == 0 || (t - s_chatter_t0_ms) > SB_TOUCH_AUTO_CHATTER_MS) {
@@ -439,68 +486,74 @@ static void auto_queue(int idx, float next, const char *why)
              idx == 0 ? '+' : '-', live, next, why);
 }
 
-static void auto_commit_first(int idx)
+static void auto_learn_peak(int idx, float peak, int fired)
 {
-    float med = touch_auto_median(s_first_peaks[idx], s_first_n[idx]);
-    float next = auto_propose(idx, med);
-    s_first_done[idx] = true;
-    auto_queue(idx, next, "first-N");
-    ESP_LOGI(TAG, "touch auto first-N %c n=%d med=%.3f -> %.3f",
-             idx == 0 ? '+' : '-', s_first_n[idx], med, next);
+    float live = live_sens(idx);
+    float next = fired ? touch_auto_step_fired(live, peak)
+                       : touch_auto_step_missed(live, peak);
+    const char *why;
+
+    if (next > live) {
+        if (!fired) {
+            return;
+        }
+        why = "fired-up";
+    } else if (next < live) {
+        why = fired ? "fired-down" : "missed-down";
+    } else {
+        return;
+    }
+    auto_queue(idx, next, why);
 }
 
-static void auto_consider_leak(int idx, int64_t t)
+static void auto_seed_one(int idx, float peak)
 {
-    float med;
-    float target;
     float next;
-    float live;
 
-    if (s_leak_n[idx] < SB_TOUCH_AUTO_LEAK_N) {
+    if (s_seed_n[idx] >= SB_TOUCH_AUTO_SEED_N) {
         return;
     }
-    if (s_last_leak_ms[idx] && (t - s_last_leak_ms[idx]) < SB_TOUCH_AUTO_LEAK_MIN_MS) {
+    s_seed_t[idx][s_seed_n[idx]++] = touch_auto_target(peak);
+    next = touch_auto_seed_sens(s_seed_t[idx], s_seed_n[idx]);
+    (void)config_store_save_touch_seed(s_seed_t[0], s_seed_n[0],
+                                      s_seed_t[1], s_seed_n[1]);
+    auto_queue(idx, next, "seed");
+}
+
+/* Seed presses ignore the 30 s settle. Slow tune still waits. */
+static void auto_accept(int idx, float peak, int64_t t, int fired)
+{
+    if (s_seed_n[idx] < SB_TOUCH_AUTO_SEED_N) {
+        auto_seed_one(idx, peak);
         return;
     }
-    med = touch_auto_median(s_leak_peaks[idx], SB_TOUCH_AUTO_LEAK_N);
-    target = auto_propose(idx, med);
-    live = live_sens(idx);
-    if (s_graze_n[idx] >= 2) {
-        next = live * (1.0f + SB_TOUCH_AUTO_LEAK_STEP_FIRM);
-        if (next < SB_TOUCH_AUTO_FLOOR) {
-            next = SB_TOUCH_AUTO_FLOOR;
-        }
-        if (next > SB_TOUCH_AUTO_CEIL) {
-            next = SB_TOUCH_AUTO_CEIL;
-        }
-        next = touch_auto_clamp_hard(next);
-        if (s_have_factory) {
-            next = touch_auto_refine_factory(idx == 0 ? s_factory_up : s_factory_dn,
-                                             next);
-        }
-        auto_queue(idx, next, "leak-graze");
-        s_last_leak_ms[idx] = t;
-        s_graze_n[idx] = 0;
+    if (t < s_settle_until_ms) {
         return;
     }
-    if (!touch_auto_leak_disagrees(live, target)) {
-        return;
-    }
-    next = touch_auto_leak_step(live, target);
-    if (s_have_factory) {
-        next = touch_auto_refine_factory(idx == 0 ? s_factory_up : s_factory_dn, next);
-    }
-    auto_queue(idx, next, "leak");
-    s_last_leak_ms[idx] = t;
+    auto_learn_peak(idx, peak, fired);
 }
 
 static void auto_on_press(int idx)
 {
     int64_t t = now_ms();
+    float rel = pad_rel_now(auto_ch(idx));
+
     s_auto[idx].tracking = true;
-    s_auto[idx].tainted = s_chord || both_down();
-    s_auto[idx].press_ms = t;
-    s_auto[idx].peak = pad_rel_now(auto_ch(idx));
+    s_auto[idx].tainted = s_chord || both_down() || s_auto[idx].watch_taint;
+    if (s_auto[idx].watch) {
+        s_auto[idx].press_ms = s_auto[idx].watch_ms;
+        s_auto[idx].peak = s_auto[idx].watch_peak;
+    } else {
+        s_auto[idx].press_ms = t;
+        s_auto[idx].peak = rel;
+    }
+    if (rel > s_auto[idx].peak) {
+        s_auto[idx].peak = rel;
+    }
+    /* Button owns this contact. Do not also count the falling tail. */
+    s_auto[idx].watch = false;
+    s_auto[idx].watch_armed = false;
+    s_auto[idx].watch_taint = false;
     if (both_down()) {
         s_auto[0].tainted = true;
         s_auto[1].tainted = true;
@@ -527,7 +580,7 @@ static void auto_on_release(int idx)
     peak = s_auto[idx].peak;
     tainted = s_auto[idx].tainted || s_chord;
     live = live_sens(idx);
-    would = auto_propose(idx, peak);
+    would = touch_auto_step_fired(live, peak);
     clean = !tainted && touch_auto_is_clean(hold, peak);
     graze = !tainted && touch_auto_is_graze(hold, peak, live);
     s_auto[idx].tracking = false;
@@ -539,57 +592,116 @@ static void auto_on_release(int idx)
              s_first_n[idx], SB_TOUCH_AUTO_FIRST_N, (int)s_first_done[idx],
              (int)tainted, (int)clean, (int)graze);
 
-    if (s_calibrating || s_learn_freeze || t < s_settle_until_ms) {
+    if (s_calibrating || s_learn_freeze) {
         return;
     }
-    if (tainted || peak > SB_TOUCH_AUTO_PEAK_WET) {
+    if (tainted || !(peak > SB_TOUCH_CAL_FAIL) || peak > SB_TOUCH_AUTO_PEAK_WET) {
         return;
     }
-    if (graze) {
-        s_graze_n[idx]++;
+    if (hold < SB_TOUCH_AUTO_GRAZE_HOLD_MS
+        || hold > SB_TOUCH_AUTO_CLEAN_HOLD_MAX_MS) {
         return;
     }
-    if (!clean) {
+    /* Chatter freeze already returned above. It stops learning; it does
+     * not firm the pad. Seed ignores boot settle; tune does not. */
+    auto_accept(idx, peak, t, 1);
+}
+
+static void auto_disarm_watch(void)
+{
+    int idx;
+
+    for (idx = 0; idx < 2; idx++) {
+        s_auto[idx].watch = false;
+        s_auto[idx].watch_taint = false;
+        s_auto[idx].watch_armed = false;
+        s_auto[idx].watch_peak = 0;
+    }
+}
+
+static void auto_finish_missed(int idx, int64_t t)
+{
+    auto_pad_t *p = &s_auto[idx];
+    int hold = (int)(t - p->watch_ms);
+    float peak = p->watch_peak;
+    bool taint = p->watch_taint;
+    bool other_down = idx == 0 ? s_dn_down : s_up_down;
+
+    p->watch = false;
+    p->watch_peak = 0;
+    p->watch_taint = false;
+    if (taint || other_down || s_chord || both_down()) {
         return;
     }
-    if (!s_first_done[idx]) {
-        if (s_first_n[idx] < SB_TOUCH_AUTO_FIRST_N) {
-            s_first_peaks[idx][s_first_n[idx]++] = peak;
+    if (hold < SB_TOUCH_AUTO_GRAZE_HOLD_MS
+        || hold > SB_TOUCH_AUTO_CLEAN_HOLD_MAX_MS) {
+        return;
+    }
+    if (!(peak > SB_TOUCH_CAL_FAIL) || peak > SB_TOUCH_AUTO_PEAK_WET) {
+        return;
+    }
+    if (s_calibrating) {
+        return;
+    }
+    /* Same pocket/chatter guard as a fired press. Crossing 20 events in
+     * 30 s stops learning. It does not firm the pad. */
+    auto_note_chatter(t);
+    if (s_learn_freeze) {
+        return;
+    }
+    auto_accept(idx, peak, t, 0);
+}
+
+static void auto_watch_pad(int idx, int64_t t)
+{
+    float rel = pad_rel_now(auto_ch(idx));
+    float other = pad_rel_now(auto_ch(idx ^ 1));
+    auto_pad_t *p = &s_auto[idx];
+
+    if (p->tracking) {
+        if (rel > p->peak) {
+            p->peak = rel;
         }
-        if (s_first_n[idx] >= SB_TOUCH_AUTO_FIRST_N) {
-            auto_commit_first(idx);
+        if (other >= SB_TOUCH_AUTO_DUAL_REL) {
+            p->tainted = true;
         }
+        p->watch = false;
+        p->watch_armed = false;
         return;
     }
-    s_leak_peaks[idx][s_leak_i[idx]] = peak;
-    s_leak_i[idx] = (s_leak_i[idx] + 1) % SB_TOUCH_AUTO_LEAK_N;
-    if (s_leak_n[idx] < SB_TOUCH_AUTO_LEAK_N) {
-        s_leak_n[idx]++;
+    if (rel <= SB_TOUCH_CAL_FAIL) {
+        if (p->watch) {
+            auto_finish_missed(idx, t);
+        }
+        p->watch_armed = true;
+        return;
     }
-    auto_consider_leak(idx, t);
+    if (!p->watch_armed) {
+        return;
+    }
+    if (!p->watch) {
+        p->watch = true;
+        p->watch_taint = false;
+        p->watch_ms = t;
+        p->watch_peak = rel;
+    } else if (rel > p->watch_peak) {
+        p->watch_peak = rel;
+    }
+    if (other >= SB_TOUCH_AUTO_DUAL_REL) {
+        p->watch_taint = true;
+    }
 }
 
 static void auto_sample(void)
 {
+    int64_t t = now_ms();
     int idx;
+
     for (idx = 0; idx < 2; idx++) {
-        if (!s_auto[idx].tracking) {
-            continue;
-        }
-        float rel = pad_rel_now(auto_ch(idx));
-        if (rel > s_auto[idx].peak) {
-            s_auto[idx].peak = rel;
-        }
+        auto_watch_pad(idx, t);
     }
     if (s_auto[0].tracking && s_auto[1].tracking) {
         s_auto[0].tainted = true;
-        s_auto[1].tainted = true;
-        return;
-    }
-    if (s_auto[0].tracking && pad_rel_now(auto_ch(1)) >= SB_TOUCH_AUTO_DUAL_REL) {
-        s_auto[0].tainted = true;
-    }
-    if (s_auto[1].tracking && pad_rel_now(auto_ch(0)) >= SB_TOUCH_AUTO_DUAL_REL) {
         s_auto[1].tainted = true;
     }
 }

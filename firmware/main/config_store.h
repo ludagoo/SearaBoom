@@ -43,6 +43,13 @@ bool config_store_load_touch_sens(float *up, float *dn, uint8_t *rev);
 bool config_store_load_touch_auto_first(uint8_t *mask);
 esp_err_t config_store_save_touch_sens(float up, float dn);
 esp_err_t config_store_save_touch_sens_auto(float up, float dn, uint8_t first_mask);
+/* Running-image id (ELF SHA-256). False if this image has not been stored. */
+bool config_store_load_touch_image(uint8_t *id, int len);
+esp_err_t config_store_save_touch_image(const uint8_t *id, int len);
+/* Per-pad seed samples for the stored image. n_* is 0..3. */
+bool config_store_load_touch_seed(float *up, int *n_up, float *dn, int *n_dn);
+esp_err_t config_store_save_touch_seed(const float *up, int n_up,
+                                      const float *dn, int n_dn);
 bool config_store_load_factory_touch_sens(float *up, float *dn);
 esp_err_t config_store_ensure_factory_touch_snapshot(float up, float dn);
 /* Restore factory snapshot as live rev 3, or clear live so boot uses SB_TOUCH_SENS. */

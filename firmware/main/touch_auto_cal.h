@@ -13,7 +13,7 @@
 
 /* Field auto-cal from real presses (rev 4). Factory `touch cal` stays rev 3.
  * Higher channel_sens = firmer. Boot live at SB_TOUCH_SENS 0.25. Auto
- * floor 0.15 / ceil 0.50 (clamp unchanged) so boxes can settle on different
+ * floor 0.08 / ceil 0.50 (clamp unchanged) so boxes can settle on different
  * numbers without using 0.13 as the start. */
 
 #define SB_TOUCH_AUTO_FIRST_N 7
@@ -31,12 +31,22 @@
 #define SB_TOUCH_AUTO_FACTORY_REFINE 0.20f
 #define SB_TOUCH_AUTO_FRAC 0.85f
 #define SB_TOUCH_AUTO_BIAS 0.02f
-#define SB_TOUCH_AUTO_FLOOR 0.15f
+#define SB_TOUCH_AUTO_FLOOR 0.08f
 #define SB_TOUCH_AUTO_CEIL 0.50f
 #define SB_TOUCH_AUTO_IDF_DIV 0.8f
 #define SB_TOUCH_AUTO_GRAZE_OVER 1.3f
 #define SB_TOUCH_AUTO_CHATTER_N 20
 #define SB_TOUCH_AUTO_CHATTER_MS 30000
+/* Missed bumps and fired presses that were too light step down by at most this. */
+#define SB_TOUCH_AUTO_STEP_MAX 0.05f
+/* Fired presses firm more slowly than they soften. */
+#define SB_TOUCH_AUTO_STEP_UP 0.03f
+/* Do not firm unless the target is at least this far above live. */
+#define SB_TOUCH_AUTO_FIRM_GAP 0.02f
+/* First presses on a new image set the start; then the slow tune. */
+#define SB_TOUCH_AUTO_SEED_N 3
+/* ELF SHA-256 from esp_app_desc. Same image keeps the tune; a new binary reseeds. */
+#define SB_TOUCH_AUTO_IMAGE_LEN 16
 
 static inline float touch_auto_clamp_hard(float sens)
 {
@@ -49,7 +59,7 @@ static inline float touch_auto_clamp_hard(float sens)
     return sens;
 }
 
-/* Auto persist never goes below 0.15 / above 0.50. */
+/* Auto persist never goes below 0.08 / above 0.50. */
 static inline float touch_auto_clamp_auto(float sens)
 {
     if (sens < SB_TOUCH_AUTO_FLOOR) {
@@ -67,8 +77,8 @@ static inline float touch_auto_from_peak(float peak)
     return touch_auto_clamp_auto(peak * SB_TOUCH_AUTO_FRAC + SB_TOUCH_AUTO_BIAS);
 }
 
-/* ±20% of factory, then auto floor/ceil. A low factory snapshot (0.10)
- * must not pull persist to 0.12. */
+/* ±20% of factory, then auto floor/ceil. A factory window under 0.08
+ * is raised to the floor. */
 static inline float touch_auto_refine_factory(float factory, float proposed)
 {
     float lo = factory * (1.0f - SB_TOUCH_AUTO_FACTORY_REFINE);
@@ -85,6 +95,149 @@ static inline float touch_auto_refine_factory(float factory, float proposed)
 static inline float touch_auto_idf_trip(float channel_sens)
 {
     return channel_sens * SB_TOUCH_AUTO_IDF_DIV;
+}
+
+/* Trip sits a little under the peak: trip = peak * 0.85, so
+ * sens = clamp(peak * 0.85 / 0.8, floor, ceil). Factory ±20% is not applied. */
+static inline float touch_auto_target(float peak)
+{
+    return touch_auto_clamp_auto(peak * SB_TOUCH_AUTO_FRAC / SB_TOUCH_AUTO_IDF_DIV);
+}
+
+/* 1 if the stored image id is the running binary. Reset reason and the
+ * version string are not inputs. */
+static inline int touch_auto_same_image(const uint8_t *stored, int stored_len,
+                                        const uint8_t *running, int running_len)
+{
+    int i;
+
+    if (!stored || !running || stored_len != running_len || stored_len <= 0) {
+        return 0;
+    }
+    for (i = 0; i < stored_len; i++) {
+        if (stored[i] != running[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Seed when this image has not been seeded yet. have_stored_image is false
+ * when the NVS key is absent — every current field box on the first boot
+ * after OTA of this binary. A later boot of the same image does not seed
+ * again. Version string and USB reset reason are not inputs. */
+static inline int touch_auto_needs_seed(int have_stored_image, int ids_match)
+{
+    if (!have_stored_image) {
+        return 1;
+    }
+    return !ids_match;
+}
+
+/* Starting sens from the first 1–3 targets on a pad. Not a 0.03/0.05 step.
+ * One sample is that target. Two samples average. Three samples take the middle. */
+static inline float touch_auto_seed_sens(const float *targets, int n)
+{
+    float a[SB_TOUCH_AUTO_SEED_N];
+    int i;
+    int j;
+
+    if (!targets || n <= 0) {
+        return SB_TOUCH_AUTO_FLOOR;
+    }
+    if (n > SB_TOUCH_AUTO_SEED_N) {
+        n = SB_TOUCH_AUTO_SEED_N;
+    }
+    for (i = 0; i < n; i++) {
+        a[i] = targets[i];
+    }
+    for (i = 1; i < n; i++) {
+        float x = a[i];
+        j = i;
+        while (j > 0 && a[j - 1] > x) {
+            a[j] = a[j - 1];
+            j--;
+        }
+        a[j] = x;
+    }
+    if (n == 1) {
+        return touch_auto_clamp_auto(a[0]);
+    }
+    if ((n & 1) == 0) {
+        return touch_auto_clamp_auto((a[n / 2 - 1] + a[n / 2]) * 0.5f);
+    }
+    return touch_auto_clamp_auto(a[n / 2]);
+}
+
+/* Button never fired. Step down toward the target, at most 0.05.
+ * A miss never firms the pad. Peak above 0.60 is ignored. */
+static inline float touch_auto_step_missed(float live, float peak)
+{
+    float target;
+    float next;
+
+    if (!(peak > SB_TOUCH_CAL_FAIL) || peak > SB_TOUCH_AUTO_PEAK_WET) {
+        return live;
+    }
+    target = touch_auto_target(peak);
+    if (!(target < live)) {
+        return live;
+    }
+    next = live - SB_TOUCH_AUTO_STEP_MAX;
+    if (next < target) {
+        next = target;
+    }
+    if (next < SB_TOUCH_AUTO_FLOOR) {
+        next = SB_TOUCH_AUTO_FLOOR;
+    }
+    if (!(next < live)) {
+        return live;
+    }
+    return next;
+}
+
+/* Button fired. Step toward the target. Up at most 0.03, and only when
+ * the target is at least 0.02 above live. Down at most 0.05. Wet peaks
+ * (above 0.60) do not move. Factory ±20% is not applied. */
+static inline float touch_auto_step_fired(float live, float peak)
+{
+    float target;
+    float next;
+
+    if (!(peak > SB_TOUCH_CAL_FAIL) || peak > SB_TOUCH_AUTO_PEAK_WET) {
+        return live;
+    }
+    target = touch_auto_target(peak);
+    if (target > live) {
+        if (target < live + SB_TOUCH_AUTO_FIRM_GAP) {
+            return live;
+        }
+        next = live + SB_TOUCH_AUTO_STEP_UP;
+        if (next > target) {
+            next = target;
+        }
+        if (next > SB_TOUCH_AUTO_CEIL) {
+            next = SB_TOUCH_AUTO_CEIL;
+        }
+        if (!(next > live)) {
+            return live;
+        }
+        return next;
+    }
+    if (target < live) {
+        next = live - SB_TOUCH_AUTO_STEP_MAX;
+        if (next < target) {
+            next = target;
+        }
+        if (next < SB_TOUCH_AUTO_FLOOR) {
+            next = SB_TOUCH_AUTO_FLOOR;
+        }
+        if (!(next < live)) {
+            return live;
+        }
+        return next;
+    }
+    return live;
 }
 
 static inline int touch_auto_is_graze(int hold_ms, float peak, float live_sens)
