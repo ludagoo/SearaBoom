@@ -278,12 +278,11 @@ def _fn_until(rp: str, start_token: str, end_token: str) -> str:
 
 
 def test_prebuf_release_binds_radio_under_clip() -> None:
-    """QA Zero 6f8d6c9: pcmrb drained after resume but tap peak stayed 1.
+    """QA Zero 605bc23: slot0pcm=1, mix restart, pcmrb full, tap peak=1.
 
-    Pausing upmix aborted decoder rbs and the mixer ate leftover near-silence.
-    Slot 0 stays on the mute rb during fill so AAC/upmix keep a PCM cushion.
-    mix_restart() mute→radio while mix is stopped (QA 2f8bae9: live rebind
-    does not drain).
+    Clips are audible through SWITCH_ON. Station BYPASS left those samples
+    at tap peak=1. Radio-only uses SWITCH_ON plus a mute clip slot.
+    Stall decpeak= is the upmix (rm2s) block peak, before downmix.
     """
     rp = (ROOT / "firmware/main/radio_player.c").read_text()
     sc = (ROOT / "firmware/main/serial_cmd.c").read_text()
@@ -316,6 +315,7 @@ def test_prebuf_release_binds_radio_under_clip() -> None:
     rst = _fn_until(rp, "static void mix_restart(void)\n{",
                     "static void mix_restart_if_needed(void)")
     assert rst.index("mix_route_clip_and_radio()") < rst.index("audio_pipeline_run")
+    assert rst.index("source_info_init") < rst.index("audio_pipeline_run")
     assert "mix_mute_slot(SB_SLOT_RADIO)" not in rst
 
     gl = _fn_until(rp, "esp_err_t radio_player_go_live(void)",
@@ -344,6 +344,9 @@ def test_prebuf_release_binds_radio_under_clip() -> None:
     assert "slot0_radio" not in route
     assert "s_radio_pcm && !s_prefetching" not in route
     assert "!s_prebuffering" in route
+    radio_only = route.split("mix_mute_slot(SB_SLOT_CLIP)")[1]
+    assert "SB_MIX_RADIO_TIMEOUT" in radio_only
+    assert "ESP_DOWNMIX_WORK_MODE_SWITCH_ON" in radio_only
     idle = _fn_until(rp, "static void mix_set_idle_mode(void)",
                      "static void mix_route_clip_and_radio(void)\n{")
     assert "ESP_DOWNMIX_WORK_MODE_SWITCH_OFF" in idle
@@ -397,6 +400,8 @@ def test_prebuf_release_binds_radio_under_clip() -> None:
                      "void radio_player_log_health(const char *why)")
     assert "pcmrb=%d/%d" in snap
     assert "peak=%d" in snap
+    assert "decpeak=%d" in snap
+    assert "pcm_upmix_radio_peak()" in snap
     assert "s_pcm_peak_now" in snap
     assert "PCM_UPMIX_OUT_RB_SIZE" in snap
     assert "slot0pcm=%d" in snap
@@ -405,6 +410,9 @@ def test_prebuf_release_binds_radio_under_clip() -> None:
 
     assert "#define PCM_UPMIX_OUT_RB_SIZE (16 * 1024)" in uh
     assert "PCM_UPMIX_OUT_RB_SIZE" in uc
+    assert "pcm_upmix_radio_peak" in uh
+    assert 'strcmp(tag, "rm2s")' in uc
+    assert "decoded peak=" in uc
     assert "radio_player_pcm_tap_peak()" in sc
     assert "peak=%d" in sc[sc.index('if (strcasecmp(line, "http")'):]
 

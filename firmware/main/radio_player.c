@@ -921,6 +921,23 @@ static void mix_restart(void)
     /* Bind while stopped. Live downmix_set_input_rb(slot 0) does not
      * start draining s_radio_pcm (QA 2f8bae9: pcmrb stuck at cap). */
     mix_route_clip_and_radio();
+    /* Fresh esp_downmix_open uses this source_info. Radio-only SWITCH_ON
+     * keeps slot 0 at 0 dB so BYPASS cannot zero the station (QA 605bc23). */
+    {
+        bool duck = s_clip_active && s_running && s_radio_pcm && s_got_music_info
+            && !s_hold_radio && !s_prebuffering;
+        esp_downmix_input_info_t src[2] = {
+            {.samplerate = SB_MIX_SR, .channel = 2, .bits_num = 16,
+             .gain = {SB_MIX_RADIO_GAIN_DB,
+                      duck ? SB_MIX_RADIO_DUCK_DB : SB_MIX_RADIO_GAIN_DB},
+             .transit_time = SB_MIX_TRANSIT_MS},
+            {.samplerate = SB_MIX_SR, .channel = 2, .bits_num = 16,
+             .gain = {SB_MIX_CLIP_MUTE_DB,
+                      duck ? SB_MIX_CLIP_GAIN_DB : SB_MIX_CLIP_MUTE_DB},
+             .transit_time = SB_MIX_TRANSIT_MS},
+        };
+        source_info_init(s_downmix, src);
+    }
     if (audio_pipeline_run(s_mix_pipe) != ESP_OK) {
         ESP_LOGE(TAG, "mix restart run failed");
         return;
@@ -1298,10 +1315,17 @@ static void mix_route_clip_and_radio(void)
     }
     mix_mute_slot(SB_SLOT_CLIP);
     if (radio) {
+        /* Clips are audible through SWITCH_ON. QA 605bc23: slot 0 bound,
+         * pcmrb full, tap peak=1 — esp_downmix BYPASS emitted near-silence
+         * from those samples. Keep the station on SWITCH_ON with a mute
+         * clip slot (0 dB / 0 dB after mix restart source_info). */
+        s_mix_clip_mode = true;
+        s_mix_off_until_ms = 0;
         mix_use_rb(SB_SLOT_RADIO, s_radio_pcm, SB_MIX_RADIO_TIMEOUT);
-    } else {
-        mix_mute_slot(SB_SLOT_RADIO);
+        downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_SWITCH_ON);
+        return;
     }
+    mix_mute_slot(SB_SLOT_RADIO);
     mix_set_idle_mode();
 }
 
@@ -1604,10 +1628,11 @@ static void stream_snap(const char *why)
     int need = radio_buf_play_need((int)s_wifi_weak_latched);
     /* W so log_shipper flushes. One line: rb vs PCM vs tap energy vs Wi-Fi. */
     ESP_LOGW(TAG,
-             "stall %s rb=%d/%d need=%d pcmrb=%d/%d peak=%d music=%d hold=%d prebuf=%d weak=%d "
+             "stall %s rb=%d/%d need=%d pcmrb=%d/%d peak=%d decpeak=%d music=%d hold=%d prebuf=%d weak=%d "
              "hold_ms=%d recon=%d rssi=%d assoc=%d pcm_idle=%d http_el=%d aac_el=%d "
              "tls=%d clip=%d run=%d slot0pcm=%d",
              why ? why : "-", filled, SB_HTTP_RB_SIZE, need, pcm, pcm_cap, peak,
+             pcm_upmix_radio_peak(),
              (int)s_got_music_info, (int)s_hold_radio, (int)s_prebuffering,
              (int)s_wifi_weak_latched,
              hold_ms, s_hold_reconnects, assoc ? ap.rssi : 0, (int)assoc, pcm_idle,
