@@ -1257,13 +1257,20 @@ static esp_err_t ensure_radio(const char *url, int volume, bool hold)
         s_prefetching = true;
         s_running = false;
         ESP_LOGI(TAG, "radio prefetch (mixer not reading yet)");
-    } else {
-        radio_mark_started();
-        /* Saved knob before the mixer reads radio — no 0 dB / leftover burst. */
-        amp_apply_saved(" (stream)");
-        ESP_LOGI(TAG, "radio live (audible after HTTP rb>=%d)", SB_HTTP_START_BYTES);
+        mix_route_clip_and_radio();
+        return ESP_OK;
     }
-    mix_route_clip_and_radio();
+    /* teardown left slot 0 on the mute rb with mix still RUNNING. Live
+     * downmix_set_input_rb mute→radio does not drain (QA 2f8bae9). Bind
+     * s_radio_pcm while mix is stopped, same as go_live. */
+    mix_restart();
+    radio_mark_started();
+    /* Saved knob before the mixer reads radio — no 0 dB / leftover burst. */
+    amp_apply_saved(" (stream)");
+    ESP_LOGI(TAG, "radio live (audible after HTTP rb>=%d)", SB_HTTP_START_BYTES);
+    if (!radio_prebuffer_release_if_ready()) {
+        mix_route_clip_and_radio();
+    }
     return ESP_OK;
 }
 
@@ -1476,6 +1483,10 @@ static void radio_soft_restart(const char *reason)
     stream_snap(reason);
     ESP_LOGW(TAG, "%s — soft restart in %d ms (strike %d)", reason, s_restart_backoff_ms,
              s_stall_strikes + 1);
+    /* Pause flag survives pipeline stop/run; upmix comes back RUNNING.
+     * Resume first so stop is not PAUSED→busy-spin, then clear after run
+     * so prebuffer_begin actually pauses. */
+    radio_pcm_resume();
     audio_pipeline_stop(s_radio_pipe);
     audio_pipeline_wait_for_stop(s_radio_pipe);
     vTaskDelay(pdMS_TO_TICKS(s_restart_backoff_ms));
@@ -1489,6 +1500,7 @@ static void radio_soft_restart(const char *reason)
         audio_element_set_music_info(s_radio_m2s, SB_MIX_SR, 0, 16);
     }
     audio_pipeline_run(s_radio_pipe);
+    s_radio_pcm_paused = false;
     int64_t now = esp_timer_get_time() / 1000;
     s_last_pcm_ms = now;
     s_stall_grace_until_ms = now + SB_STREAM_STALL_GRACE_MS;

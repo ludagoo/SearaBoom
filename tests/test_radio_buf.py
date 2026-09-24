@@ -321,6 +321,15 @@ def test_prebuf_release_binds_radio_under_clip() -> None:
                    "esp_err_t radio_player_start(const char *url, int volume)")
     assert gl.index("s_prefetching = false") < gl.index("mix_restart()")
 
+    ens = _fn_until(rp, "static esp_err_t ensure_radio(const char *url, int volume, bool hold)",
+                    "static void mix_set_idle_mode(void)")
+    after_pcm = ens.split("s_radio_pcm = audio_element_get_input_ringbuf(s_radio_raw)", 1)[1]
+    # Prefetch keeps slot 0 mute. Non-prefetch / hard restart: stopped bind.
+    assert "s_prefetching = true" in after_pcm
+    assert "mix_restart()" in after_pcm
+    assert after_pcm.index("if (hold)") < after_pcm.index("mix_restart()")
+    assert after_pcm.index("mix_restart()") < after_pcm.index("radio_mark_started()")
+
     assert "mix_tune_static_s16le" in rp
     assert "s_tune_static = true" in rp
 
@@ -366,6 +375,15 @@ def test_prebuf_release_binds_radio_under_clip() -> None:
                      "static void radio_hard_restart(const char *reason)")
     assert "mix_route_clip_and_radio()" in soft
     assert "mix_restart()" not in soft
+    assert "radio_pcm_resume()" in soft
+    assert soft.index("radio_pcm_resume()") < soft.index("audio_pipeline_stop")
+    assert "s_radio_pcm_paused = false" in soft
+    assert soft.index("audio_pipeline_run(s_radio_pipe)") < soft.index(
+        "s_radio_pcm_paused = false"
+    )
+    assert soft.index("s_radio_pcm_paused = false") < soft.index(
+        'radio_prebuffer_begin("soft-restart")'
+    )
 
     hold = _fn_until(rp, "void radio_player_hold_stream(bool on)",
                      "bool radio_player_wifi_weak_holding(void)")
