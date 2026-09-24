@@ -315,8 +315,18 @@ def test_prebuf_release_binds_radio_under_clip() -> None:
     rst = _fn_until(rp, "static void mix_restart(void)\n{",
                     "static void mix_restart_if_needed(void)")
     assert rst.index("mix_route_clip_and_radio()") < rst.index("audio_pipeline_run")
-    assert rst.index("source_info_init") < rst.index("audio_pipeline_run")
+    assert rst.index("mix_apply_gains(") < rst.index("audio_pipeline_run")
     assert "mix_mute_slot(SB_SLOT_RADIO)" not in rst
+    assert "duck ? SB_MIX_CLIP_GAIN_DB : SB_MIX_CLIP_MUTE_DB" not in rp
+
+    gains = _fn_until(rp, "static void mix_apply_gains(bool duck)",
+                      "static void mix_restart(void)\n{")
+    assert "SB_MIX_CLIP_GAIN_DB" in gains
+    assert "downmix_set_gain_info" in gains
+    assert "source_info_init" in gains
+    assert "{SB_MIX_CLIP_MUTE_DB, SB_MIX_CLIP_GAIN_DB}" in gains
+    assert "SB_MIX_CLIP_MUTE_DB, SB_MIX_CLIP_MUTE_DB" not in gains
+    assert "duck ? SB_MIX_RADIO_DUCK_DB : SB_MIX_RADIO_GAIN_DB" in gains
 
     gl = _fn_until(rp, "esp_err_t radio_player_go_live(void)",
                    "esp_err_t radio_player_start(const char *url, int volume)")
@@ -341,12 +351,16 @@ def test_prebuf_release_binds_radio_under_clip() -> None:
     both = route.split("if (clip && radio)")[1].split("if (clip)")[0]
     assert "SB_MIX_MUTE_TIMEOUT" in both
     assert "SB_MIX_RADIO_TIMEOUT" not in both
+    assert "mix_apply_gains(true)" in both
     assert "slot0_radio" not in route
     assert "s_radio_pcm && !s_prefetching" not in route
     assert "!s_prebuffering" in route
     radio_only = route.split("mix_mute_slot(SB_SLOT_CLIP)")[1]
     assert "SB_MIX_RADIO_TIMEOUT" in radio_only
     assert "ESP_DOWNMIX_WORK_MODE_SWITCH_ON" in radio_only
+    assert "mix_apply_gains(false)" in radio_only
+    clip_only = route.split("if (clip)")[1].split("mix_mute_slot(SB_SLOT_CLIP)")[0]
+    assert "mix_apply_gains(false)" in clip_only
     idle = _fn_until(rp, "static void mix_set_idle_mode(void)",
                      "static void mix_route_clip_and_radio(void)\n{")
     assert "ESP_DOWNMIX_WORK_MODE_SWITCH_OFF" in idle

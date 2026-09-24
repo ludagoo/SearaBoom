@@ -186,6 +186,8 @@ static volatile bool s_amp_gated;
 static volatile bool s_tune_static;
 static bool s_mix_clip_mode;
 static int64_t s_mix_off_until_ms;
+/* -1 unknown; 0 radio 0 dB; 1 radio ducked. Clip target is always 0 dB. */
+static int s_mix_gain_duck = -1;
 static uint32_t s_static_rng = 0xA5110E11u;
 static int32_t s_static_lp;
 static uint32_t s_static_ph;
@@ -905,6 +907,39 @@ static void mix_rewind(void)
     audio_pipeline_change_state(s_mix_pipe, AEL_STATE_INIT);
 }
 
+static void mix_apply_gains(bool duck)
+{
+    if (!s_downmix) {
+        return;
+    }
+    /* Clip target stays 0 dB on every route. Radio-only mix_restart used
+     * to freeze clip gain[1] at −60 and leave SWITCH_ON clips inaudible;
+     * a ducked session used to leave radio at −18 after the clip ended. */
+    float radio_g[2] = {
+        SB_MIX_RADIO_GAIN_DB,
+        duck ? SB_MIX_RADIO_DUCK_DB : SB_MIX_RADIO_GAIN_DB,
+    };
+    float clip_g[2] = {SB_MIX_CLIP_MUTE_DB, SB_MIX_CLIP_GAIN_DB};
+    audio_element_state_t st = audio_element_get_state(s_downmix);
+    bool running = (st == AEL_STATE_RUNNING);
+    if (running && s_mix_gain_duck == (int)duck) {
+        return;
+    }
+    if (running) {
+        downmix_set_gain_info(s_downmix, radio_g, SB_SLOT_RADIO);
+        downmix_set_gain_info(s_downmix, clip_g, SB_SLOT_CLIP);
+    } else {
+        esp_downmix_input_info_t src[2] = {
+            {.samplerate = SB_MIX_SR, .channel = 2, .bits_num = 16,
+             .gain = {radio_g[0], radio_g[1]}, .transit_time = SB_MIX_TRANSIT_MS},
+            {.samplerate = SB_MIX_SR, .channel = 2, .bits_num = 16,
+             .gain = {clip_g[0], clip_g[1]}, .transit_time = SB_MIX_TRANSIT_MS},
+        };
+        source_info_init(s_downmix, src);
+    }
+    s_mix_gain_duck = (int)duck;
+}
+
 static void mix_restart(void)
 {
     if (!s_mix_pipe || !s_downmix) {
@@ -921,23 +956,8 @@ static void mix_restart(void)
     /* Bind while stopped. Live downmix_set_input_rb(slot 0) does not
      * start draining s_radio_pcm (QA 2f8bae9: pcmrb stuck at cap). */
     mix_route_clip_and_radio();
-    /* Fresh esp_downmix_open uses this source_info. Radio-only SWITCH_ON
-     * keeps slot 0 at 0 dB so BYPASS cannot zero the station (QA 605bc23). */
-    {
-        bool duck = s_clip_active && s_running && s_radio_pcm && s_got_music_info
-            && !s_hold_radio && !s_prebuffering;
-        esp_downmix_input_info_t src[2] = {
-            {.samplerate = SB_MIX_SR, .channel = 2, .bits_num = 16,
-             .gain = {SB_MIX_RADIO_GAIN_DB,
-                      duck ? SB_MIX_RADIO_DUCK_DB : SB_MIX_RADIO_GAIN_DB},
-             .transit_time = SB_MIX_TRANSIT_MS},
-            {.samplerate = SB_MIX_SR, .channel = 2, .bits_num = 16,
-             .gain = {SB_MIX_CLIP_MUTE_DB,
-                      duck ? SB_MIX_CLIP_GAIN_DB : SB_MIX_CLIP_MUTE_DB},
-             .transit_time = SB_MIX_TRANSIT_MS},
-        };
-        source_info_init(s_downmix, src);
-    }
+    mix_apply_gains(s_clip_active && s_running && s_radio_pcm && s_got_music_info
+                    && !s_hold_radio && !s_prebuffering);
     if (audio_pipeline_run(s_mix_pipe) != ESP_OK) {
         ESP_LOGE(TAG, "mix restart run failed");
         return;
@@ -1086,6 +1106,7 @@ static void teardown_mix(void)
     }
     s_have_out = false;
     s_clip_active = false;
+    s_mix_gain_duck = -1;
 }
 
 static esp_err_t ensure_mix(int volume)
@@ -1300,6 +1321,7 @@ static void mix_route_clip_and_radio(void)
         mix_use_rb(SB_SLOT_RADIO, s_radio_pcm, SB_MIX_MUTE_TIMEOUT);
         mix_use_rb(SB_SLOT_CLIP, s_clip_pcm, SB_MIX_CLIP_TIMEOUT);
         downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_SWITCH_ON);
+        mix_apply_gains(true);
         return;
     }
     if (clip) {
@@ -1311,6 +1333,7 @@ static void mix_route_clip_and_radio(void)
         mix_mute_slot(SB_SLOT_RADIO);
         mix_use_rb(SB_SLOT_CLIP, s_clip_pcm, SB_MIX_CLIP_TIMEOUT);
         downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_SWITCH_ON);
+        mix_apply_gains(false);
         return;
     }
     mix_mute_slot(SB_SLOT_CLIP);
@@ -1318,14 +1341,16 @@ static void mix_route_clip_and_radio(void)
         /* Clips are audible through SWITCH_ON. QA 605bc23: slot 0 bound,
          * pcmrb full, tap peak=1 — esp_downmix BYPASS emitted near-silence
          * from those samples. Keep the station on SWITCH_ON with a mute
-         * clip slot (0 dB / 0 dB after mix restart source_info). */
+         * clip slot. Gains: radio 0 dB, clip target 0 dB. */
         s_mix_clip_mode = true;
         s_mix_off_until_ms = 0;
         mix_use_rb(SB_SLOT_RADIO, s_radio_pcm, SB_MIX_RADIO_TIMEOUT);
         downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_SWITCH_ON);
+        mix_apply_gains(false);
         return;
     }
     mix_mute_slot(SB_SLOT_RADIO);
+    mix_apply_gains(false);
     mix_set_idle_mode();
 }
 
