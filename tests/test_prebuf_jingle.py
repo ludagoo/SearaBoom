@@ -53,7 +53,7 @@ def test_analog_static_until_audible() -> None:
         "static bool radio_prebuffer_release_if_ready"
     )]
     assert "s_tune_static = true" in begin
-    assert "radio_pcm_pause()" in begin
+    assert "radio_pcm_pause()" not in begin
     assert "mix_restart()" not in begin
     note = RP[RP.index("static void pcm_note_s16"):RP.index("void radio_player_pcm_arm")]
     assert "s_tune_static = false" in note
@@ -80,9 +80,9 @@ def test_release_ungates() -> None:
         "static void radio_mark_started"
     )]
     assert "amp_apply_saved" in release
-    assert "mix_route_clip_and_radio()" in release
-    assert "radio_pcm_resume()" in release
-    assert "mix_restart()" not in release
+    assert "mix_restart()" in release
+    assert "radio_pcm_resume()" not in release
+    assert "radio_pcm_pause()" not in release
 
 
 def main() -> int:
