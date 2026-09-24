@@ -45,10 +45,9 @@ static bool s_healthy_marked;
 static volatile int s_pad_taps;
 static unsigned s_flag_seq;
 
-/* Fill: sintonizando once, then a looping multi-note activity jingle. */
-#define SB_PREBUF_FILL_PAUSE_MS 400
+/* Fill: one sintonizando, then analog between-stations static (tap
+ * overlay) until the station is audible. Not the musical fill jingle. */
 static bool s_fill_tune_done;
-static int64_t s_fill_gap_until_ms;
 
 static sb_clip_id_t fill_tune_clip(void)
 {
@@ -66,7 +65,6 @@ static bool clip_is_fill_pattern(sb_clip_id_t id)
 static void fill_pattern_reset(void)
 {
     s_fill_tune_done = false;
-    s_fill_gap_until_ms = 0;
 }
 
 static void volume_cb(int delta, void *ctx)
@@ -116,7 +114,6 @@ static void handle_pad_gesture(int taps)
         }
         clip_player_play_wait(tune, 15000);
         s_fill_tune_done = true;
-        s_fill_gap_until_ms = 0;
         if (radio_player_go_live() != ESP_OK) {
             ESP_LOGE(TAG, "Station switch go_live failed");
         }
@@ -538,7 +535,6 @@ static void boot_start_radio(bool play_updated)
     } else {
         clip_player_play_wait(tune, 15000);
         s_fill_tune_done = true;
-        s_fill_gap_until_ms = 0;
     }
     if (radio_player_go_live() != ESP_OK) {
         ESP_LOGE(TAG, "Radio go_live failed");
@@ -657,9 +653,8 @@ void app_main(void)
             bool spoken = (playing == SB_CLIP_OTA_DONE
                            || playing == SB_CLIP_NET_SLOW
                            || playing == SB_CLIP_WIFI_WEAK);
-            /* Prompts may interrupt the fill pattern. Do not stack it on
-             * ota_done / net_slow / wifi_weak. Sintonizando plays once per
-             * fill, then the activity jingle loops — not an alternate. */
+            /* Prompts may interrupt sintonizando. Analog static is mixed
+             * on the tap in radio_player, not a looping prebuf clip. */
             if (!clip_player_is_active() || fill) {
                 if (radio_player_wifi_weak_should_speak()) {
                     /* Speak first so the warning is not lost in a mute gap, then
@@ -676,23 +671,11 @@ void app_main(void)
                     clip_player_loop(SB_CLIP_NET_SLOW);
                 } else if (!spoken
                            && radio_player_is_prebuffering()
-                           && !radio_player_wifi_weak_holding()) {
-                    if (clip_player_is_active()) {
-                        s_fill_gap_until_ms = 0;
-                    } else if (!s_fill_tune_done) {
-                        s_fill_tune_done = true;
-                        s_fill_gap_until_ms = 0;
-                        clip_player_play(fill_tune_clip(), false);
-                    } else {
-                        int64_t now_ms = esp_timer_get_time() / 1000;
-                        if (s_fill_gap_until_ms == 0) {
-                            s_fill_gap_until_ms = now_ms + SB_PREBUF_FILL_PAUSE_MS;
-                        }
-                        if (now_ms >= s_fill_gap_until_ms) {
-                            s_fill_gap_until_ms = 0;
-                            clip_player_loop(SB_CLIP_PREBUF);
-                        }
-                    }
+                           && !radio_player_wifi_weak_holding()
+                           && !clip_player_is_active()
+                           && !s_fill_tune_done) {
+                    s_fill_tune_done = true;
+                    clip_player_play(fill_tune_clip(), false);
                 }
             }
             playing = clip_player_playing();
@@ -706,12 +689,8 @@ void app_main(void)
                          clip_player_name(playing));
                 clip_player_stop();
             }
-            if (!radio_player_is_prebuffering()
-                && (clip_is_fill_pattern(playing) || s_fill_gap_until_ms)) {
-                if (clip_is_fill_pattern(playing)) {
-                    clip_player_stop();
-                }
-                fill_pattern_reset();
+            if (!radio_player_is_prebuffering() && playing == SB_CLIP_PREBUF) {
+                clip_player_stop();
             }
         }
         int64_t now = esp_timer_get_time() / 1000;

@@ -302,6 +302,10 @@ def test_prebuf_release_binds_radio_under_clip() -> None:
     assert "if (!s_got_music_info || s_hold_radio)" in release
     assert "|| s_clip_active" not in release
     assert "mix_restart()" not in release
+    assert "amp_apply_saved" in release
+
+    assert "mix_tune_static_s16le" in rp
+    assert "s_tune_static = true" in rp
 
     route = _fn_until(rp, "static void mix_route_clip_and_radio(void)",
                       "esp_err_t radio_player_attach_clip_pcm")
@@ -321,7 +325,7 @@ def test_prebuf_release_binds_radio_under_clip() -> None:
     drop = loop.split('radio_prebuffer_begin("rb-drop")', 1)[1][:350]
     assert "mix_route_clip_and_radio()" in drop
     assert "mix_restart()" not in drop.split("s_rb_drop_band", 1)[0]
-    live = loop.split("Re-assert BYPASS radio while live", 1)[1][:500]
+    live = loop.split("Re-assert radio on slot 0 while live", 1)[1][:500]
     assert "mix_route_clip_and_radio()" in live
     assert "!s_clip_active" in live
     assert "mix_restart()" not in live
