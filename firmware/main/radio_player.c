@@ -133,6 +133,8 @@ _Static_assert(
 #define SB_MIX_RADIO_DUCK_DB (-18)
 #define SB_MIX_CLIP_MUTE_DB (-60)
 #define SB_MIX_CLIP_GAIN_DB 0
+/* source_info transit_time. Do not JUMP to BYPASS until this elapses. */
+#define SB_MIX_TRANSIT_MS 150
 
 #define SB_PROBE_WIN 512
 #define SB_PROBE_START_LO 5500
@@ -183,6 +185,7 @@ static volatile int64_t s_pcm_last_voice_us;
 static volatile bool s_amp_gated;
 static volatile bool s_tune_static;
 static bool s_mix_clip_mode;
+static int64_t s_mix_off_until_ms;
 static uint32_t s_static_rng = 0xA5110E11u;
 static int32_t s_static_lp;
 static uint32_t s_static_ph;
@@ -442,11 +445,11 @@ static void mix_beep_s16le(int16_t *samples, int frames, int channels)
     s_beep_pos = (pos >= len) ? -1 : pos;
 }
 
-/* Between-stations hiss + drifting whistle. Overlay is after pcm_note so
- * it does not count as station energy. Stop when the tap sees radio. */
-#define SB_STATIC_HISS 1800
-#define SB_STATIC_WHISTLE 1100
-#define SB_STATIC_POP 9000
+/* Between-stations hiss + a faint drifting whistle. Overlay is after
+ * pcm_note so it does not count as station energy. Stop when the tap
+ * sees radio. Hiss is the floor — no impulse pops. */
+#define SB_STATIC_HISS 8000
+#define SB_STATIC_WHISTLE 500
 #define SB_PH_PER_HZ 97391u
 
 static int16_t analog_tune_sample(void)
@@ -457,18 +460,15 @@ static int16_t analog_tune_sample(void)
     x ^= x << 5;
     s_static_rng = x;
     int n = (int)(int16_t)x;
-    s_static_lp += (n - s_static_lp) / 5;
-    int hiss = (s_static_lp * SB_STATIC_HISS) / 32768;
+    /* Pink-ish leaky integrator plus a little white: analog FM hiss. */
+    s_static_lp += (n - s_static_lp) / 6;
+    int hiss = (s_static_lp * 5 + n * 2) * (SB_STATIC_HISS / 7) / 32768;
     s_static_sweep++;
     uint32_t hz = 450u + ((s_static_sweep >> 9) & 0x3FFu);
     s_static_ph += hz * SB_PH_PER_HZ;
     int saw = (int)(int16_t)(s_static_ph >> 16);
     int whistle = (saw * SB_STATIC_WHISTLE) / 32768;
-    int pop = 0;
-    if ((x >> 24) < 4) {
-        pop = ((int)(x & 1) ? SB_STATIC_POP : -SB_STATIC_POP);
-    }
-    int v = hiss + whistle + pop;
+    int v = hiss + whistle;
     if (v > 32767) {
         v = 32767;
     } else if (v < -32768) {
@@ -917,6 +917,7 @@ static void mix_restart(void)
     mix_mute_slot(SB_SLOT_RADIO);
     mix_mute_slot(SB_SLOT_CLIP);
     s_mix_clip_mode = false;
+    s_mix_off_until_ms = 0;
     if (audio_pipeline_run(s_mix_pipe) != ESP_OK) {
         ESP_LOGE(TAG, "mix restart run failed");
         return;
@@ -1094,9 +1095,9 @@ static esp_err_t ensure_mix(int volume)
     s_downmix = downmix_init(&mix_cfg);
     esp_downmix_input_info_t src[2] = {
         {.samplerate = SB_MIX_SR, .channel = 2, .bits_num = 16,
-         .gain = {SB_MIX_RADIO_GAIN_DB, SB_MIX_RADIO_DUCK_DB}, .transit_time = 150},
+         .gain = {SB_MIX_RADIO_GAIN_DB, SB_MIX_RADIO_DUCK_DB}, .transit_time = SB_MIX_TRANSIT_MS},
         {.samplerate = SB_MIX_SR, .channel = 2, .bits_num = 16,
-         .gain = {SB_MIX_CLIP_MUTE_DB, SB_MIX_CLIP_GAIN_DB}, .transit_time = 150},
+         .gain = {SB_MIX_CLIP_MUTE_DB, SB_MIX_CLIP_GAIN_DB}, .transit_time = SB_MIX_TRANSIT_MS},
     };
     source_info_init(s_downmix, src);
     s_mute_radio = rb_create(256, 4);
@@ -1229,6 +1230,31 @@ static esp_err_t ensure_radio(const char *url, int volume, bool hold)
     return ESP_OK;
 }
 
+static void mix_set_idle_mode(void)
+{
+    if (!s_downmix) {
+        return;
+    }
+    /* Every SWITCH_ON exit goes SWITCH_OFF and waits transit_time.
+     * JUMP SWITCH_ON→BYPASS (including clip-only → mute rb) left the
+     * overnight tap at peak=1 while pcmrb still drained. mix_restart()
+     * is not this. */
+    if (s_mix_clip_mode) {
+        s_mix_clip_mode = false;
+        s_mix_off_until_ms = (esp_timer_get_time() / 1000) + SB_MIX_TRANSIT_MS;
+        downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_SWITCH_OFF);
+        return;
+    }
+    if (s_mix_off_until_ms) {
+        int64_t now = esp_timer_get_time() / 1000;
+        if (now < s_mix_off_until_ms) {
+            return;
+        }
+        s_mix_off_until_ms = 0;
+    }
+    downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_BYPASS);
+}
+
 static void mix_route_clip_and_radio(void)
 {
     if (!s_downmix) {
@@ -1243,6 +1269,7 @@ static void mix_route_clip_and_radio(void)
     bool clip = s_clip_active && s_clip_pcm;
     if (clip && radio) {
         s_mix_clip_mode = true;
+        s_mix_off_until_ms = 0;
         mix_use_rb(SB_SLOT_RADIO, s_radio_pcm, SB_MIX_MUTE_TIMEOUT);
         mix_use_rb(SB_SLOT_CLIP, s_clip_pcm, SB_MIX_CLIP_TIMEOUT);
         downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_SWITCH_ON);
@@ -1253,6 +1280,7 @@ static void mix_route_clip_and_radio(void)
          * finish mix+I2S, so clip-only always uses SWITCH_ON: mute slot 0
          * (timeout 1 → silence) plus clip on slot 1. */
         s_mix_clip_mode = true;
+        s_mix_off_until_ms = 0;
         mix_mute_slot(SB_SLOT_RADIO);
         mix_use_rb(SB_SLOT_CLIP, s_clip_pcm, SB_MIX_CLIP_TIMEOUT);
         downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_SWITCH_ON);
@@ -1261,19 +1289,10 @@ static void mix_route_clip_and_radio(void)
     mix_mute_slot(SB_SLOT_CLIP);
     if (radio) {
         mix_use_rb(SB_SLOT_RADIO, s_radio_pcm, SB_MIX_RADIO_TIMEOUT);
-        /* JUMP SWITCH_ON→BYPASS can cut the base stream (ADF #1010).
-         * SWITCH_OFF then falls into bypass. mix_restart() is not this. */
-        if (s_mix_clip_mode) {
-            s_mix_clip_mode = false;
-            downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_SWITCH_OFF);
-        } else {
-            downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_BYPASS);
-        }
     } else {
-        s_mix_clip_mode = false;
         mix_mute_slot(SB_SLOT_RADIO);
-        downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_BYPASS);
     }
+    mix_set_idle_mode();
 }
 
 esp_err_t radio_player_attach_clip_pcm(ringbuf_handle_t rb)
@@ -1859,10 +1878,9 @@ void radio_player_loop(void)
                 s_rb_drop_band = -1;
             }
         }
-        /* Re-assert radio on slot 0 while live and clip-off. Overnight:
-         * after every prebuffer ready, tap peak stayed 1 (playing=false)
-         * even when pcmrb drained off cap. mix_route is a pointer store,
-         * not mix_restart. Skip while a clip is up. */
+        /* Re-assert slot 0 while live and clip-off. mix_route rebinds the
+         * rb; mix_set_idle_mode will not JUMP to BYPASS until SWITCH_OFF
+         * transit_time has elapsed. Not a mix restart. */
         if (s_running && s_radio_pcm && s_got_music_info && !s_hold_radio
             && !s_prebuffering && !s_clip_active) {
             mix_route_clip_and_radio();

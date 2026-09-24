@@ -61,6 +61,16 @@ def test_analog_static_until_audible() -> None:
     assert "mix_tune_static_s16le" in tap
     assert tap.index("pcm_note_s16") < tap.index("mix_tune_static_s16le")
     assert "mix_restart()" not in begin
+    sample = RP[RP.index("static int16_t analog_tune_sample"):RP.index(
+        "static void mix_tune_static_s16le"
+    )]
+    assert "SB_STATIC_POP" not in RP
+    assert ">> 24" not in sample
+    assert "SB_STATIC_HISS" in sample
+    hiss = int(RP.split("#define SB_STATIC_HISS ")[1].split()[0])
+    whistle = int(RP.split("#define SB_STATIC_WHISTLE ")[1].split()[0])
+    assert hiss >= 4000, f"hiss {hiss} too quiet for analog static"
+    assert hiss > whistle * 4, f"hiss {hiss} should dominate whistle {whistle}"
 
 
 def test_release_ungates() -> None:

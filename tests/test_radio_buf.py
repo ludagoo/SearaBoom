@@ -307,11 +307,25 @@ def test_prebuf_release_binds_radio_under_clip() -> None:
     assert "mix_tune_static_s16le" in rp
     assert "s_tune_static = true" in rp
 
-    route = _fn_until(rp, "static void mix_route_clip_and_radio(void)",
+    route = _fn_until(rp, "static void mix_route_clip_and_radio(void)\n{",
                       "esp_err_t radio_player_attach_clip_pcm")
     both = route.split("if (clip && radio)")[1].split("if (clip)")[0]
     assert "SB_MIX_MUTE_TIMEOUT" in both
     assert "SB_MIX_RADIO_TIMEOUT" not in both
+    idle = _fn_until(rp, "static void mix_set_idle_mode(void)",
+                     "static void mix_route_clip_and_radio(void)\n{")
+    assert "ESP_DOWNMIX_WORK_MODE_SWITCH_OFF" in idle
+    assert "s_mix_clip_mode" in idle
+    assert "s_mix_off_until_ms" in idle
+    assert "SB_MIX_TRANSIT_MS" in idle
+    assert "now < s_mix_off_until_ms" in idle
+    # Clip-only → mute and radio-only share SWITCH_OFF-and-wait. Do not
+    # JUMP BYPASS on the mute rb or overwrite SWITCH_OFF on the 20 ms tick.
+    assert "ESP_DOWNMIX_WORK_MODE_BYPASS" not in route
+    assert "mix_set_idle_mode()" in route
+    assert route.strip().endswith("mix_set_idle_mode();\n}")
+    assert "#define SB_MIX_TRANSIT_MS 150" in rp
+    assert "SB_STATIC_POP" not in rp
 
     use_rb = _fn_until(rp, "static void mix_use_rb(int slot, ringbuf_handle_t rb, int timeout)",
                        "static void mix_mute_slot(int slot)")
@@ -325,7 +339,7 @@ def test_prebuf_release_binds_radio_under_clip() -> None:
     drop = loop.split('radio_prebuffer_begin("rb-drop")', 1)[1][:350]
     assert "mix_route_clip_and_radio()" in drop
     assert "mix_restart()" not in drop.split("s_rb_drop_band", 1)[0]
-    live = loop.split("Re-assert radio on slot 0 while live", 1)[1][:500]
+    live = loop.split("Re-assert slot 0 while live", 1)[1][:500]
     assert "mix_route_clip_and_radio()" in live
     assert "!s_clip_active" in live
     assert "mix_restart()" not in live
