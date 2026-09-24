@@ -280,14 +280,17 @@ static void auto_load_image_seed(void)
     const esp_app_desc_t *app = esp_app_get_description();
     int n_up = 0;
     int n_dn = 0;
+    bool have;
     bool same;
 
     memcpy(running, app->app_elf_sha256, SB_TOUCH_AUTO_IMAGE_LEN);
-    same = config_store_load_touch_image(stored, SB_TOUCH_AUTO_IMAGE_LEN)
-           && touch_auto_same_image(stored, SB_TOUCH_AUTO_IMAGE_LEN,
-                                    running, SB_TOUCH_AUTO_IMAGE_LEN);
-    if (!same) {
-        /* New binary. Do not look at the reset reason. */
+    /* Absent tsens_img (field OTA of this binary onto a box that has never
+     * stored an image id) takes the seed path. Not a version compare, and
+     * not the USB reset reason. */
+    have = config_store_load_touch_image(stored, SB_TOUCH_AUTO_IMAGE_LEN);
+    same = have && touch_auto_same_image(stored, SB_TOUCH_AUTO_IMAGE_LEN,
+                                         running, SB_TOUCH_AUTO_IMAGE_LEN);
+    if (touch_auto_needs_seed(have, same)) {
         s_seed_n[0] = s_seed_n[1] = 0;
         memset(s_seed_t, 0, sizeof(s_seed_t));
         (void)config_store_save_touch_image(running, SB_TOUCH_AUTO_IMAGE_LEN);

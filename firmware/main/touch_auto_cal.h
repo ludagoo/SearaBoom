@@ -104,8 +104,8 @@ static inline float touch_auto_target(float peak)
     return touch_auto_clamp_auto(peak * SB_TOUCH_AUTO_FRAC / SB_TOUCH_AUTO_IDF_DIV);
 }
 
-/* 1 if the stored image id is the running binary. A missing or different
- * id is a new image. Reset reason is not an input. */
+/* 1 if the stored image id is the running binary. Reset reason and the
+ * version string are not inputs. */
 static inline int touch_auto_same_image(const uint8_t *stored, int stored_len,
                                         const uint8_t *running, int running_len)
 {
@@ -120,6 +120,18 @@ static inline int touch_auto_same_image(const uint8_t *stored, int stored_len,
         }
     }
     return 1;
+}
+
+/* Seed when this image has not been seeded yet. have_stored_image is false
+ * when the NVS key is absent — every current field box on the first boot
+ * after OTA of this binary. A later boot of the same image does not seed
+ * again. Version string and USB reset reason are not inputs. */
+static inline int touch_auto_needs_seed(int have_stored_image, int ids_match)
+{
+    if (!have_stored_image) {
+        return 1;
+    }
+    return !ids_match;
 }
 
 /* Starting sens from the first 1–3 targets on a pad. Not a 0.03/0.05 step.

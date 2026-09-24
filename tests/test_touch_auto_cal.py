@@ -97,7 +97,13 @@ def test_step_settles_both_ways() -> None:
     assert '"fired-up"' in VB
     assert '"seed"' in VB
     assert "#define SB_TOUCH_AUTO_SEED_N 3" in H
+    assert "touch_auto_needs_seed(have, same)" in VB
+    img_load = ST.split("bool config_store_load_touch_image", 1)[1].split(
+        "esp_err_t config_store_save_touch_image", 1)[0]
+    assert "nvs_get_blob" in img_load
+    assert "return false" in img_load
     assert "touch_auto_same_image" in VB
+    assert "0.5.28" not in VB.split("auto_load_image_seed", 1)[1].split("volume_buttons_init", 1)[0]
     assert "tsens_img" in ST
     assert "esp_reset_reason" not in VB
     assert "s_seed_n[idx] < SB_TOUCH_AUTO_SEED_N" in VB
@@ -248,6 +254,19 @@ int main(void)
         }
         if (touch_auto_same_image(NULL, 16, b, 16)) {
             return fail("missing image");
+        }
+        /* Absent NVS key: field box that has never run this image. */
+        if (!touch_auto_needs_seed(0, 0)) {
+            return fail("absent key seeds");
+        }
+        if (!touch_auto_needs_seed(0, 1)) {
+            return fail("absent key seeds even if match is set");
+        }
+        if (touch_auto_needs_seed(1, 1)) {
+            return fail("same image must not reseed");
+        }
+        if (!touch_auto_needs_seed(1, 0)) {
+            return fail("different elf seeds");
         }
     }
     return 0;
