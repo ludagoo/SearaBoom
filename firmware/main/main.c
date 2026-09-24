@@ -45,8 +45,8 @@ static bool s_healthy_marked;
 static volatile int s_pad_taps;
 static unsigned s_flag_seq;
 
-/* Fill: one sintonizando, then analog between-stations static (tap
- * overlay) until the station is audible. Not the musical fill jingle. */
+/* Fill: one sintonizando, then analog tuner overlay (tap) until
+ * the station is audible. Not the musical fill jingle. */
 static bool s_fill_tune_done;
 
 static sb_clip_id_t fill_tune_clip(void)

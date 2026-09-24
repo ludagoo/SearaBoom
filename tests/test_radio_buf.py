@@ -343,6 +343,11 @@ def test_prebuf_release_binds_radio_under_clip() -> None:
     assert after_pcm.index("if (hold)") < after_pcm.index("mix_restart()")
     assert after_pcm.index("radio_mark_started()") < after_pcm.index("mix_restart()")
 
+    assert "s_aac = aac_decoder_init(&aac_cfg);" in ens
+    assert "plus_enable = true" in ens
+    assert "helix_lc" not in rp
+    assert not (ROOT / "firmware/components/helix_lc").exists()
+
     assert "mix_tune_static_s16le" in rp
     assert "s_tune_static = true" in rp
 

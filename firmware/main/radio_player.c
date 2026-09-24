@@ -448,12 +448,18 @@ static void mix_beep_s16le(int16_t *samples, int frames, int channels)
     s_beep_pos = (pos >= len) ? -1 : pos;
 }
 
-/* Between-stations hiss + a faint drifting whistle. Overlay is after
- * pcm_note so it does not count as station energy. Stop when the tap
- * sees radio. Hiss is the floor — no impulse pops. */
-#define SB_STATIC_HISS 8000
-#define SB_STATIC_WHISTLE 500
+/* Analog tuner being turned: the dial sweeps, stations whistle by,
+ * static between them. Overlay is after pcm_note so it does not count
+ * as station energy. Stop when the tap sees radio. */
+#define SB_STATIC_HISS 2800
+#define SB_STATIC_WHISTLE 9000
 #define SB_PH_PER_HZ 97391u
+#define SB_DIAL_PASS 0x1800
+
+static const uint16_t s_tune_stations[] = {
+    0x0B40, 0x2480, 0x3E00, 0x5100, 0x6C80, 0x8300, 0x9A40, 0xB280, 0xD100,
+    0xEA00,
+};
 
 static int16_t analog_tune_sample(void)
 {
@@ -463,14 +469,36 @@ static int16_t analog_tune_sample(void)
     x ^= x << 5;
     s_static_rng = x;
     int n = (int)(int16_t)x;
-    /* Pink-ish leaky integrator plus a little white: analog FM hiss. */
     s_static_lp += (n - s_static_lp) / 6;
-    int hiss = (s_static_lp * 5 + n * 2) * (SB_STATIC_HISS / 7) / 32768;
+
+    /* Full dial ~1.5 s at 44.1 kHz. */
     s_static_sweep++;
-    uint32_t hz = 450u + ((s_static_sweep >> 9) & 0x3FFu);
+    uint32_t dial = s_static_sweep & 0xFFFFu;
+    int min_d = 0x8000;
+    for (unsigned i = 0; i < sizeof(s_tune_stations) / sizeof(s_tune_stations[0]); i++) {
+        int d = (int)dial - (int)s_tune_stations[i];
+        if (d < 0) {
+            d = -d;
+        }
+        if (d > 0x8000) {
+            d = 0x10000 - d;
+        }
+        if (d < min_d) {
+            min_d = d;
+        }
+    }
+    int prox = 0;
+    if (min_d < SB_DIAL_PASS) {
+        prox = ((SB_DIAL_PASS - min_d) * 32767) / SB_DIAL_PASS;
+    }
+
+    int hiss_g = SB_STATIC_HISS - (prox * (SB_STATIC_HISS / 2) / 32767);
+    int hiss = (s_static_lp * 5 + n * 2) * (hiss_g / 7) / 32768;
+    /* Heterodyne drops toward the station; loud only while passing. */
+    uint32_t hz = 90u + (uint32_t)min_d / 6u;
     s_static_ph += hz * SB_PH_PER_HZ;
     int saw = (int)(int16_t)(s_static_ph >> 16);
-    int whistle = (saw * SB_STATIC_WHISTLE) / 32768;
+    int whistle = (saw * ((SB_STATIC_WHISTLE * prox) / 32767)) / 32768;
     int v = hiss + whistle;
     if (v > 32767) {
         v = 32767;
@@ -802,7 +830,7 @@ static void radio_prebuffer_begin(const char *why)
     if (!from_soft) {
         stream_snap(why ? why : "prebuffer");
     }
-    /* Analog between-stations hiss until the tap sees radio energy.
+    /* Analog tuner overlay until the tap sees radio energy.
      * Slot 0 stays on the mute rb during fill so AAC/upmix keep a PCM
      * cushion. Do not pause upmix: pause/resume aborted the decoder
      * rbs and left tap peak=1 while pcmrb still drained (QA 6f8d6c9). */

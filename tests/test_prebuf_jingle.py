@@ -68,11 +68,14 @@ def test_analog_static_until_audible() -> None:
     )]
     assert "SB_STATIC_POP" not in RP
     assert ">> 24" not in sample
+    assert "s_tune_stations" in sample
+    assert "SB_DIAL_PASS" in sample
+    assert "prox" in sample
     assert "SB_STATIC_HISS" in sample
     hiss = int(RP.split("#define SB_STATIC_HISS ")[1].split()[0])
     whistle = int(RP.split("#define SB_STATIC_WHISTLE ")[1].split()[0])
-    assert hiss >= 4000, f"hiss {hiss} too quiet for analog static"
-    assert hiss > whistle * 4, f"hiss {hiss} should dominate whistle {whistle}"
+    assert whistle > hiss, f"stations should whistle by, not hiss-only ({hiss}/{whistle})"
+    assert hiss >= 1500, f"static between stations too quiet ({hiss})"
 
 
 def test_release_ungates() -> None:
