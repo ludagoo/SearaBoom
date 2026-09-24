@@ -30,8 +30,14 @@ def test_fill_policy_unchanged() -> None:
     assert "CONFIG_COMPILER_OPTIMIZATION_SIZE=y" in SDK
     assert "CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_DISABLE=y" in SDK
     assert "CONFIG_COMPILER_OPTIMIZATION_DEBUG=y" not in SDK
+    assert "CONFIG_LOG_MAXIMUM_LEVEL_INFO=y" in SDK
+    assert "CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y" not in SDK
+    assert "CONFIG_ESP_ERR_TO_NAME_LOOKUP=n" in SDK
+    assert "CONFIG_COMPILER_OPTIMIZATION_CHECKS_SILENT=y" in SDK
+    assert "CONFIG_LOG_COLORS=n" in SDK
     cmake = (ROOT / "firmware/CMakeLists.txt").read_text()
-    assert "CONFIG_COMPILER_OPTIMIZATION_DEBUG=y" in cmake
+    assert "CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y" in cmake
+    assert "CONFIG_LOG_MAXIMUM_LEVEL_INFO=y" in cmake
     assert "file(REMOVE" in cmake
 
 

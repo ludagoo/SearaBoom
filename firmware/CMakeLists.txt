@@ -1,13 +1,27 @@
 cmake_minimum_required(VERSION 3.16)
 
-# Leftover firmware/sdkconfig (gitignored) keeps Debug (-Og) across PRs
-# and ignores sdkconfig.defaults. Debug overflowed the 0x1C0000 OTA slot
-# after tune_fill.aac. Drop it so a normal idf.py build takes SIZE=y.
+# Leftover firmware/sdkconfig (gitignored) keeps old Kconfig values
+# across PRs and ignores sdkconfig.defaults. Drop it when size flags
+# do not match: Debug (-Og) overflowed 0x1C0000; 3484b00 -Os still
+# overflowed by 25648 B while MAXIMUM DEBUG strings were compiled in.
 set(_sb_sdkconfig "${CMAKE_CURRENT_LIST_DIR}/sdkconfig")
 if(EXISTS "${_sb_sdkconfig}")
-    file(STRINGS "${_sb_sdkconfig}" _sb_opt REGEX "^CONFIG_COMPILER_OPTIMIZATION_DEBUG=y")
-    if(_sb_opt)
-        message(STATUS "searaboom: dropping leftover Debug sdkconfig (use sdkconfig.defaults size-opt)")
+    file(READ "${_sb_sdkconfig}" _sb_sdk_txt)
+    set(_sb_stale FALSE)
+    if(_sb_sdk_txt MATCHES "CONFIG_COMPILER_OPTIMIZATION_DEBUG=y")
+        set(_sb_stale TRUE)
+    endif()
+    if(NOT _sb_sdk_txt MATCHES "CONFIG_COMPILER_OPTIMIZATION_SIZE=y")
+        set(_sb_stale TRUE)
+    endif()
+    if(_sb_sdk_txt MATCHES "CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y")
+        set(_sb_stale TRUE)
+    endif()
+    if(NOT _sb_sdk_txt MATCHES "CONFIG_LOG_MAXIMUM_LEVEL_INFO=y")
+        set(_sb_stale TRUE)
+    endif()
+    if(_sb_stale)
+        message(STATUS "searaboom: dropping leftover sdkconfig so sdkconfig.defaults size flags apply")
         file(REMOVE "${_sb_sdkconfig}")
         if(EXISTS "${_sb_sdkconfig}.old")
             file(REMOVE "${_sb_sdkconfig}.old")

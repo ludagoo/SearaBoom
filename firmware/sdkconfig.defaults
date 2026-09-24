@@ -81,17 +81,23 @@ CONFIG_SEARABOOM_OTA_URL="https://searaboom.goossen.dev"
 CONFIG_SEARABOOM_LOG_URL="https://searaboom.goossen.dev"
 CONFIG_SEARABOOM_FW_VERSION="0.5.28"
 
-# Default INFO; audio path stays INFO so USB-serial does not starve I2S.
+# Default INFO. Cap compiled logs at INFO too: MAXIMUM DEBUG still
+# embeds IDF/ADF ESP_LOGD strings. Size-opt of 3484b00 was 1860656 B
+# (25648 over the 0x1C0000 slot). This project's own code has no LOGD.
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
-CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
+CONFIG_LOG_MAXIMUM_LEVEL_INFO=y
+# CONFIG_LOG_MAXIMUM_LEVEL_DEBUG is not set
 
 # OTA app slot is 0x1C0000 (1.75 MB). tune_fill.aac is ~318 KB.
-# Debug (-Og) overflowed that slot by 152 KB. Size (-Os) with
-# assertions off is the Mini-proven fit (~1% free). Do not rely on a
-# gitignored local sdkconfig for this.
+# Debug (-Og) overflowed by 152 KB. -Os + assertions off still overflowed
+# by 25648 B (the earlier Mini “1% free” flash was not this tree).
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 # CONFIG_COMPILER_OPTIMIZATION_DEBUG is not set
 CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_DISABLE=y
+CONFIG_COMPILER_OPTIMIZATION_CHECKS_SILENT=y
+CONFIG_LOG_COLORS=n
+# Error-name table is extra flash; esp_err_to_name() still returns "ERROR".
+CONFIG_ESP_ERR_TO_NAME_LOOKUP=n
 
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
