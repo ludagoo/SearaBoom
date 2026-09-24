@@ -46,8 +46,11 @@ static volatile int s_pad_taps;
 static unsigned s_flag_seq;
 
 /* Fill: one sintonizando, then looping tuner recording until the
- * station is actually audible (rm2s peak after bind). Not the jingle. */
+ * station is actually audible (rm2s peak after bind). Not the jingle.
+ * s_fill_clip_done latches after that so a quiet station gap cannot
+ * restart the clip. Next prebuffer (stall/recover) clears the latch. */
 static bool s_fill_tune_done;
+static bool s_fill_clip_done;
 
 static sb_clip_id_t fill_tune_clip(void)
 {
@@ -65,6 +68,7 @@ static bool clip_is_fill_pattern(sb_clip_id_t id)
 static void fill_pattern_reset(void)
 {
     s_fill_tune_done = false;
+    s_fill_clip_done = false;
 }
 
 static void volume_cb(int delta, void *ctx)
@@ -653,6 +657,10 @@ void app_main(void)
             bool spoken = (playing == SB_CLIP_OTA_DONE
                            || playing == SB_CLIP_NET_SLOW
                            || playing == SB_CLIP_WIFI_WEAK);
+            /* Stall/recover re-arms fill. Quiet gaps after bind must not. */
+            if (radio_player_is_prebuffering()) {
+                s_fill_clip_done = false;
+            }
             /* Prompts may interrupt sintonizando or the looping fill clip. */
             if (!clip_player_is_active() || fill) {
                 if (radio_player_wifi_weak_should_speak()) {
@@ -678,6 +686,7 @@ void app_main(void)
                 } else if (!spoken
                            && !clip_player_is_active()
                            && s_fill_tune_done
+                           && !s_fill_clip_done
                            && !radio_player_wifi_weak_holding()
                            && !radio_player_station_audible()) {
                     clip_player_loop(SB_CLIP_TUNE_FILL);
@@ -694,9 +703,12 @@ void app_main(void)
                          clip_player_name(playing));
                 clip_player_stop();
             }
-            if (playing == SB_CLIP_TUNE_FILL && radio_player_station_audible()) {
-                ESP_LOGI(TAG, "tune fill off");
-                clip_player_stop();
+            if (radio_player_station_audible()) {
+                if (playing == SB_CLIP_TUNE_FILL) {
+                    ESP_LOGI(TAG, "tune fill off");
+                    clip_player_stop();
+                }
+                s_fill_clip_done = true;
             }
         }
         int64_t now = esp_timer_get_time() / 1000;

@@ -83,6 +83,26 @@ def test_tune_fill_until_audible() -> None:
     assert "SB_TUNE_FILL_PAUSE_MS 0" in CP
 
 
+def test_fill_clip_latches_off() -> None:
+    """After tune fill off, a quiet rm2s block must not restart the clip."""
+    assert "s_fill_clip_done" in MAIN
+    reset = MAIN[MAIN.index("static void fill_pattern_reset"):MAIN.index(
+        "static void volume_cb"
+    )]
+    assert "s_fill_tune_done = false" in reset
+    assert "s_fill_clip_done = false" in reset
+    loop = MAIN.split("clip_player_loop(SB_CLIP_TUNE_FILL)", 1)[0]
+    assert "!s_fill_clip_done" in loop[-400:]
+    off = MAIN[MAIN.index("tune fill off"):MAIN.index("tune fill off") + 220]
+    assert "s_fill_clip_done = true" in off
+    assert "s_fill_clip_done = true" in MAIN[MAIN.index("if (radio_player_station_audible())"):]
+    rearm = MAIN[MAIN.index("Stall/recover re-arms fill"):MAIN.index(
+        "Stall/recover re-arms fill"
+    ) + 280]
+    assert "radio_player_is_prebuffering()" in rearm
+    assert "s_fill_clip_done = false" in rearm
+
+
 def test_release_ungates() -> None:
     release = RP[RP.index("static bool radio_prebuffer_release_if_ready"):RP.index(
         "static void radio_mark_started"
@@ -98,6 +118,7 @@ def main() -> int:
     test_sintonizando_once()
     test_no_fill_jingle()
     test_tune_fill_until_audible()
+    test_fill_clip_latches_off()
     test_release_ungates()
     print("test_prebuf_jingle: ok")
     return 0
