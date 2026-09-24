@@ -13,7 +13,7 @@ MAIN = (ROOT / "firmware/main/main.c").read_text()
 
 
 def test_start_is_025_not_013() -> None:
-    assert (ROOT / "firmware/VERSION").read_text().strip() == "0.5.28"
+    assert (ROOT / "firmware/VERSION").read_text().strip() == "0.5.29"
     assert "#define SB_TOUCH_SENS 0.25f" in VB
     assert "#define SB_TOUCH_SENS 0.50f" not in VB
     assert "#define SB_TOUCH_SENS 0.13f" not in VB
