@@ -10,6 +10,38 @@
 static const char *TAG = "pcm_upmix";
 #define SB_OUT_SR 44100
 
+static volatile int s_radio_dec_peak;
+static bool s_radio_dec_logged;
+
+int pcm_upmix_radio_peak(void)
+{
+    return s_radio_dec_peak;
+}
+
+static void radio_note_decoded(audio_element_handle_t self, const int16_t *s, int bytes)
+{
+    const char *tag = audio_element_get_tag(self);
+    if (!tag || strcmp(tag, "rm2s") != 0 || bytes < 2) {
+        return;
+    }
+    int peak = 0;
+    int n = bytes / 2;
+    for (int i = 0; i < n; i++) {
+        int a = s[i];
+        if (a < 0) {
+            a = -a;
+        }
+        if (a > peak) {
+            peak = a;
+        }
+    }
+    s_radio_dec_peak = peak;
+    if (!s_radio_dec_logged && peak >= 400) {
+        s_radio_dec_logged = true;
+        ESP_LOGI(TAG, "decoded peak=%d", peak);
+    }
+}
+
 static esp_err_t upmix_open(audio_element_handle_t self)
 {
     audio_element_info_t info = {0};
@@ -41,6 +73,7 @@ static int upmix_process(audio_element_handle_t self, char *in_buffer, int in_le
     if (r <= 0) {
         return r;
     }
+    radio_note_decoded(self, (const int16_t *)in_buffer, r);
     int in_ch = info.channels >= 2 ? 2 : 1;
     int in_rate = info.sample_rates > 0 ? info.sample_rates : SB_OUT_SR;
     int in_frames = r / (2 * in_ch);
@@ -100,7 +133,7 @@ audio_element_handle_t pcm_upmix_init_core(const char *tag, int core)
     cfg.open = upmix_open;
     cfg.process = upmix_process;
     cfg.tag = tag ? tag : "m2s";
-    cfg.out_rb_size = 16 * 1024;
+    cfg.out_rb_size = PCM_UPMIX_OUT_RB_SIZE;
     cfg.task_stack = 3 * 1024;
     cfg.task_prio = 5;
     cfg.task_core = (core == 1) ? 1 : 0;

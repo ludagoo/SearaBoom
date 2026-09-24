@@ -101,9 +101,10 @@ _Static_assert(
     "extra ALC table must cover knobs 22..max");
 /* Downmix reads slots in series. A mute-slot wait of 20 ticks (20 ms at
  * 1 kHz) on an empty rb adds 20 ms to every 256-sample block (~6 ms) and
- * I2S underruns — choppy welcome. Unused slots must be timeout 0: ADF
- * treats TIMEOUT as silence and continues. Mix then blocks on I2S/clip. */
-/* 0 busy-spins mix (current + rb-swap races at 240 MHz). 1 tick yields. */
+ * I2S underruns — choppy welcome. Unused slots must not block: ADF treats
+ * TIMEOUT as silence and continues. Mix then blocks on I2S/clip.
+ * Timeout 0 on the BYPASS base slot cuts audio (ADF #1010/#1069). 1 tick
+ * yields without that. */
 #define SB_MIX_MUTE_TIMEOUT 1
 #define SB_MIX_CLIP_TIMEOUT 40
 /* Increased from 50 to 200 ticks to tolerate transient HTTP/network jitter.
@@ -132,6 +133,8 @@ _Static_assert(
 #define SB_MIX_RADIO_DUCK_DB (-18)
 #define SB_MIX_CLIP_MUTE_DB (-60)
 #define SB_MIX_CLIP_GAIN_DB 0
+/* source_info transit_time. Do not JUMP to BYPASS until this elapses. */
+#define SB_MIX_TRANSIT_MS 150
 
 #define SB_PROBE_WIN 512
 #define SB_PROBE_START_LO 5500
@@ -177,8 +180,13 @@ static bool s_clip_active;
 static volatile bool s_pcm_heard;
 static volatile bool s_pcm_flowing;
 static volatile int s_pcm_peak_max;
+static volatile int s_pcm_peak_now;
 static volatile int64_t s_pcm_last_voice_us;
 static volatile bool s_amp_gated;
+static bool s_mix_clip_mode;
+static int64_t s_mix_off_until_ms;
+/* -1 unknown; 0 radio 0 dB; 1 radio ducked. Clip target is always 0 dB. */
+static int s_mix_gain_duck = -1;
 static int64_t s_mix_hold_restart_until_ms;
 static volatile int64_t s_last_pcm_ms;
 static int64_t s_stall_grace_until_ms;
@@ -212,6 +220,7 @@ static void i2s_alc_gate(void);
 static void drain_mix_evt(void);
 static bool sta_associated(void);
 static void mix_route_clip_and_radio(void);
+static void mix_restart(void);
 
 static int16_t *s_beep_pcm;
 static int16_t *s_limit_pcm;
@@ -462,6 +471,7 @@ static void pcm_note_s16(const int16_t *s, int n, int channels)
             peak = a;
         }
     }
+    s_pcm_peak_now = peak;
     if (peak > s_pcm_peak_max) {
         s_pcm_peak_max = peak;
     }
@@ -508,6 +518,7 @@ void radio_player_pcm_arm(void)
     s_pcm_heard = false;
     s_pcm_last_voice_us = 0;
     s_pcm_peak_max = 0;
+    s_pcm_peak_now = 0;
 }
 
 bool radio_player_pcm_heard(void)
@@ -527,6 +538,21 @@ bool radio_player_pcm_flowing(void)
 int radio_player_pcm_peak(void)
 {
     return s_pcm_peak_max;
+}
+
+int radio_player_pcm_tap_peak(void)
+{
+    return s_pcm_peak_now;
+}
+
+bool radio_player_pcm_has_energy(void)
+{
+    int64_t last = s_pcm_last_voice_us;
+    if (last <= 0) {
+        return false;
+    }
+    /* Same 500 ms window as pcm_flowing, but mute-slot zeros do not count. */
+    return (esp_timer_get_time() - last) < 500000;
 }
 
 bool radio_player_pcm_finished(int silence_ms)
@@ -710,6 +736,9 @@ static void radio_prebuffer_begin(const char *why)
     if (!from_soft) {
         stream_snap(why ? why : "prebuffer");
     }
+    /* Slot 0 stays on the mute rb during fill so AAC/upmix keep a PCM
+     * cushion. Do not pause upmix: pause/resume aborted the decoder
+     * rbs and left tap peak=1 while pcmrb still drained (QA 6f8d6c9). */
 }
 
 static bool radio_prebuffer_release_if_ready(void)
@@ -717,7 +746,9 @@ static bool radio_prebuffer_release_if_ready(void)
     if (!s_prebuffering) {
         return false;
     }
-    if (!s_got_music_info || s_hold_radio || s_clip_active) {
+    /* Do not wait for a clip. HTTP-full binds radio even if sintonizando
+     * or the tuner fill clip is still up (clip&&radio). */
+    if (!s_got_music_info || s_hold_radio) {
         return false;
     }
     int filled = http_rb_filled();
@@ -729,8 +760,12 @@ static bool radio_prebuffer_release_if_ready(void)
     s_prebuffer_since_ms = 0;
     s_last_pcm_ms = esp_timer_get_time() / 1000;
     ESP_LOGI(TAG, "prebuffer ready rb=%d/%d", filled, SB_HTTP_RB_SIZE);
+    /* Mute→radio must bind while mix is stopped. Live set_input_rb does
+     * not drain (QA 2f8bae9). Pause/resume of upmix drained near-silence
+     * (QA 6f8d6c9 peak=1). mix_restart routes then runs. */
+    amp_apply_saved(" (prebuffer ready)");
+    mix_restart();
     stream_snap("prebuffer-ready");
-    mix_route_clip_and_radio();
     return true;
 }
 
@@ -758,7 +793,9 @@ static void mix_use_rb(int slot, ringbuf_handle_t rb, int timeout)
     if (!s_downmix || !rb) {
         return;
     }
-    downmix_set_input_rb_timeout(s_downmix, 0, slot);
+    /* Bind first, then timeout. A timeout-0 poke on the live base slot
+     * cuts BYPASS audio (ADF #1010/#1069) and does not abort an in-flight
+     * rb_read anyway. */
     downmix_set_input_rb(s_downmix, rb, slot);
     downmix_set_input_rb_timeout(s_downmix, timeout, slot);
 }
@@ -801,6 +838,39 @@ static void mix_rewind(void)
     audio_pipeline_change_state(s_mix_pipe, AEL_STATE_INIT);
 }
 
+static void mix_apply_gains(bool duck)
+{
+    if (!s_downmix) {
+        return;
+    }
+    /* Clip target stays 0 dB on every route. Radio-only mix_restart used
+     * to freeze clip gain[1] at −60 and leave SWITCH_ON clips inaudible;
+     * a ducked session used to leave radio at −18 after the clip ended. */
+    float radio_g[2] = {
+        SB_MIX_RADIO_GAIN_DB,
+        duck ? SB_MIX_RADIO_DUCK_DB : SB_MIX_RADIO_GAIN_DB,
+    };
+    float clip_g[2] = {SB_MIX_CLIP_MUTE_DB, SB_MIX_CLIP_GAIN_DB};
+    audio_element_state_t st = audio_element_get_state(s_downmix);
+    bool running = (st == AEL_STATE_RUNNING);
+    if (running && s_mix_gain_duck == (int)duck) {
+        return;
+    }
+    if (running) {
+        downmix_set_gain_info(s_downmix, radio_g, SB_SLOT_RADIO);
+        downmix_set_gain_info(s_downmix, clip_g, SB_SLOT_CLIP);
+    } else {
+        esp_downmix_input_info_t src[2] = {
+            {.samplerate = SB_MIX_SR, .channel = 2, .bits_num = 16,
+             .gain = {radio_g[0], radio_g[1]}, .transit_time = SB_MIX_TRANSIT_MS},
+            {.samplerate = SB_MIX_SR, .channel = 2, .bits_num = 16,
+             .gain = {clip_g[0], clip_g[1]}, .transit_time = SB_MIX_TRANSIT_MS},
+        };
+        source_info_init(s_downmix, src);
+    }
+    s_mix_gain_duck = (int)duck;
+}
+
 static void mix_restart(void)
 {
     if (!s_mix_pipe || !s_downmix) {
@@ -812,8 +882,13 @@ static void mix_restart(void)
     bool restore = s_i2s && !s_amp_gated;
     i2s_alc_gate();
     mix_rewind();
-    mix_mute_slot(SB_SLOT_RADIO);
-    mix_mute_slot(SB_SLOT_CLIP);
+    s_mix_clip_mode = false;
+    s_mix_off_until_ms = 0;
+    /* Bind while stopped. Live downmix_set_input_rb(slot 0) does not
+     * start draining s_radio_pcm (QA 2f8bae9: pcmrb stuck at cap). */
+    mix_route_clip_and_radio();
+    mix_apply_gains(s_clip_active && s_running && s_radio_pcm && s_got_music_info
+                    && !s_hold_radio && !s_prebuffering);
     if (audio_pipeline_run(s_mix_pipe) != ESP_OK) {
         ESP_LOGE(TAG, "mix restart run failed");
         return;
@@ -822,7 +897,6 @@ static void mix_restart(void)
     if (restore) {
         amp_apply_saved(" (mix restart)");
     }
-    mix_route_clip_and_radio();
 }
 
 static void mix_restart_if_needed(void)
@@ -962,6 +1036,7 @@ static void teardown_mix(void)
     }
     s_have_out = false;
     s_clip_active = false;
+    s_mix_gain_duck = -1;
 }
 
 static esp_err_t ensure_mix(int volume)
@@ -990,9 +1065,9 @@ static esp_err_t ensure_mix(int volume)
     s_downmix = downmix_init(&mix_cfg);
     esp_downmix_input_info_t src[2] = {
         {.samplerate = SB_MIX_SR, .channel = 2, .bits_num = 16,
-         .gain = {SB_MIX_RADIO_GAIN_DB, SB_MIX_RADIO_DUCK_DB}, .transit_time = 150},
+         .gain = {SB_MIX_RADIO_GAIN_DB, SB_MIX_RADIO_DUCK_DB}, .transit_time = SB_MIX_TRANSIT_MS},
         {.samplerate = SB_MIX_SR, .channel = 2, .bits_num = 16,
-         .gain = {SB_MIX_CLIP_MUTE_DB, SB_MIX_CLIP_GAIN_DB}, .transit_time = 150},
+         .gain = {SB_MIX_CLIP_MUTE_DB, SB_MIX_CLIP_GAIN_DB}, .transit_time = SB_MIX_TRANSIT_MS},
     };
     source_info_init(s_downmix, src);
     s_mute_radio = rb_create(256, 4);
@@ -1115,14 +1190,46 @@ static esp_err_t ensure_radio(const char *url, int volume, bool hold)
         s_prefetching = true;
         s_running = false;
         ESP_LOGI(TAG, "radio prefetch (mixer not reading yet)");
-    } else {
-        radio_mark_started();
-        /* Saved knob before the mixer reads radio — no 0 dB / leftover burst. */
-        amp_apply_saved(" (stream)");
-        ESP_LOGI(TAG, "radio live (audible after HTTP rb>=%d)", SB_HTTP_START_BYTES);
+        mix_route_clip_and_radio();
+        return ESP_OK;
     }
-    mix_route_clip_and_radio();
+    /* Fill with slot 0 on mute (stopped bind). Live mute→radio does not
+     * drain (QA 2f8bae9). Pause/resume of upmix left tap peak=1
+     * (QA 6f8d6c9). Release restarts mix onto s_radio_pcm. */
+    radio_mark_started();
+    mix_restart();
+    /* Saved knob before the mixer reads radio — no 0 dB / leftover burst. */
+    amp_apply_saved(" (stream)");
+    ESP_LOGI(TAG, "radio live (audible after HTTP rb>=%d)", SB_HTTP_START_BYTES);
+    if (!radio_prebuffer_release_if_ready()) {
+        mix_route_clip_and_radio();
+    }
     return ESP_OK;
+}
+
+static void mix_set_idle_mode(void)
+{
+    if (!s_downmix) {
+        return;
+    }
+    /* Every SWITCH_ON exit goes SWITCH_OFF and waits transit_time.
+     * JUMP SWITCH_ON→BYPASS (including clip-only → mute rb) left the
+     * overnight tap at peak=1 while pcmrb still drained. mix_restart()
+     * is not this. */
+    if (s_mix_clip_mode) {
+        s_mix_clip_mode = false;
+        s_mix_off_until_ms = (esp_timer_get_time() / 1000) + SB_MIX_TRANSIT_MS;
+        downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_SWITCH_OFF);
+        return;
+    }
+    if (s_mix_off_until_ms) {
+        int64_t now = esp_timer_get_time() / 1000;
+        if (now < s_mix_off_until_ms) {
+            return;
+        }
+        s_mix_off_until_ms = 0;
+    }
+    downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_BYPASS);
 }
 
 static void mix_route_clip_and_radio(void)
@@ -1131,35 +1238,50 @@ static void mix_route_clip_and_radio(void)
         return;
     }
     /* Prefetch fills the radio pipe but must not feed the mixer — otherwise
-     * go_live finds an empty PCM rb and the station underruns. */
-    /* Hold / prebuffer keep HTTP/AAC running but mix must not eat radio PCM,
-     * so the 256 KB HTTP rb can reach the start/recover high-water. */
+     * go_live finds an empty PCM rb and the station underruns. Slot 0 is
+     * radio PCM only while live. Fill/hold keep the mute rb so AAC/upmix
+     * can keep a cushion. Live mute→radio does not drain (QA 2f8bae9);
+     * that swap is mix_restart() with mix stopped. */
     bool radio = s_running && s_radio_pcm && s_got_music_info && !s_hold_radio
         && !s_prebuffering;
     bool clip = s_clip_active && s_clip_pcm;
     if (clip && radio) {
+        s_mix_clip_mode = true;
+        s_mix_off_until_ms = 0;
         mix_use_rb(SB_SLOT_RADIO, s_radio_pcm, SB_MIX_MUTE_TIMEOUT);
         mix_use_rb(SB_SLOT_CLIP, s_clip_pcm, SB_MIX_CLIP_TIMEOUT);
         downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_SWITCH_ON);
+        mix_apply_gains(true);
         return;
     }
     if (clip) {
         /* BYPASS dies on any non-TIMEOUT on slot 0. Clip EOS/ABORT would
-         * finish mix+I2S, so clip-only always uses SWITCH_ON: mute slot 0
-         * (timeout 0 → silence) plus clip on slot 1. */
+         * finish mix+I2S, so clip-only always uses SWITCH_ON: slot 0
+         * mute timeout 1 plus clip on slot 1. */
+        s_mix_clip_mode = true;
+        s_mix_off_until_ms = 0;
         mix_mute_slot(SB_SLOT_RADIO);
         mix_use_rb(SB_SLOT_CLIP, s_clip_pcm, SB_MIX_CLIP_TIMEOUT);
         downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_SWITCH_ON);
+        mix_apply_gains(false);
         return;
     }
     mix_mute_slot(SB_SLOT_CLIP);
     if (radio) {
+        /* Clips are audible through SWITCH_ON. QA 605bc23: slot 0 bound,
+         * pcmrb full, tap peak=1 — esp_downmix BYPASS emitted near-silence
+         * from those samples. Keep the station on SWITCH_ON with a mute
+         * clip slot. Gains: radio 0 dB, clip target 0 dB. */
+        s_mix_clip_mode = true;
+        s_mix_off_until_ms = 0;
         mix_use_rb(SB_SLOT_RADIO, s_radio_pcm, SB_MIX_RADIO_TIMEOUT);
-        downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_BYPASS);
-    } else {
-        mix_mute_slot(SB_SLOT_RADIO);
-        downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_BYPASS);
+        downmix_set_work_mode(s_downmix, ESP_DOWNMIX_WORK_MODE_SWITCH_ON);
+        mix_apply_gains(false);
+        return;
     }
+    mix_mute_slot(SB_SLOT_RADIO);
+    mix_apply_gains(false);
+    mix_set_idle_mode();
 }
 
 esp_err_t radio_player_attach_clip_pcm(ringbuf_handle_t rb)
@@ -1208,6 +1330,15 @@ bool radio_player_is_prebuffering(void)
     return s_prebuffering;
 }
 
+bool radio_player_station_audible(void)
+{
+    /* rm2s peak is radio-only. Tap peak includes the looping fill clip. */
+    if (s_prebuffering || s_hold_radio || s_prefetching || !s_got_music_info) {
+        return false;
+    }
+    return pcm_upmix_radio_peak() >= SB_PCM_HOLD_ABS;
+}
+
 esp_err_t radio_player_go_live(void)
 {
     if (!s_have_out) {
@@ -1223,10 +1354,11 @@ esp_err_t radio_player_go_live(void)
              SB_HTTP_START_BYTES);
     /* Always rewind mix here. After the ident clip the mixer may still
      * look RUNNING while wedged on an aborted clip rb; if-needed then
-     * leaves the station silent. Stream stays gated through set_clk
-     * until the saved knob is on I2S, then the mixer reads radio. */
+     * leaves the station silent. Mark fill first so the stopped bind is
+     * mute; release restarts mix onto s_radio_pcm. Stream stays gated
+     * through set_clk until the saved knob is on I2S. */
     amp_gate();
-    mix_restart();
+    s_prefetching = false;
     drain_mix_evt();
     if (!s_running) {
         radio_mark_started();
@@ -1234,7 +1366,7 @@ esp_err_t radio_player_go_live(void)
         /* Prefetch already marked running? Still wait for almost-full. */
         radio_prebuffer_begin("go-live");
     }
-    s_prefetching = false;
+    mix_restart();
     amp_apply_saved(" (stream)");
     if (!radio_prebuffer_release_if_ready()) {
         mix_route_clip_and_radio();
@@ -1450,24 +1582,29 @@ static void stream_snap(const char *why)
 {
     int filled = http_rb_filled();
     int pcm = s_radio_pcm ? (int)rb_bytes_filled(s_radio_pcm) : -1;
+    int pcm_cap = s_radio_pcm ? PCM_UPMIX_OUT_RB_SIZE : 0;
+    int peak = s_pcm_peak_now;
     wifi_ap_record_t ap = {0};
     bool assoc = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK);
     int64_t now = esp_timer_get_time() / 1000;
     int pcm_idle = s_last_pcm_ms ? (int)(now - s_last_pcm_ms) : -1;
     int hold_ms = s_hold_started_ms ? (int)(now - s_hold_started_ms) : 0;
     int need = radio_buf_play_need((int)s_wifi_weak_latched);
-    /* W so log_shipper flushes. One line: rb vs PCM vs Wi-Fi vs element. */
+    /* W so log_shipper flushes. One line: rb vs PCM vs tap energy vs Wi-Fi. */
     ESP_LOGW(TAG,
-             "stall %s rb=%d/%d need=%d pcmrb=%d music=%d hold=%d prebuf=%d weak=%d "
+             "stall %s rb=%d/%d need=%d pcmrb=%d/%d peak=%d decpeak=%d music=%d hold=%d prebuf=%d weak=%d "
              "hold_ms=%d recon=%d rssi=%d assoc=%d pcm_idle=%d http_el=%d aac_el=%d "
-             "tls=%d clip=%d run=%d",
-             why ? why : "-", filled, SB_HTTP_RB_SIZE, need, pcm,
+             "tls=%d clip=%d run=%d slot0pcm=%d",
+             why ? why : "-", filled, SB_HTTP_RB_SIZE, need, pcm, pcm_cap, peak,
+             pcm_upmix_radio_peak(),
              (int)s_got_music_info, (int)s_hold_radio, (int)s_prebuffering,
              (int)s_wifi_weak_latched,
              hold_ms, s_hold_reconnects, assoc ? ap.rssi : 0, (int)assoc, pcm_idle,
              s_http ? (int)audio_element_get_state(s_http) : -1,
              s_aac ? (int)audio_element_get_state(s_aac) : -1,
-             s_using_http ? 0 : 1, (int)s_clip_active, (int)s_running);
+             s_using_http ? 0 : 1, (int)s_clip_active, (int)s_running,
+             (int)(s_running && s_radio_pcm && s_got_music_info && !s_hold_radio
+                   && !s_prebuffering));
 }
 
 void radio_player_log_health(const char *why)
@@ -1555,15 +1692,15 @@ void radio_player_hold_stream(bool on)
         s_hold_reconnects = 0;
         s_hold_snap_ms = 0;
         stream_snap("hold");
+        mix_route_clip_and_radio();
     } else {
         stream_snap("resume");
-        radio_flush_pcm();
         s_last_pcm_ms = esp_timer_get_time() / 1000;
         s_hold_started_ms = 0;
         s_wifi_weak_latched = false;
         radio_player_arm_rssi_threshold();
+        mix_restart();
     }
-    mix_route_clip_and_radio();
 }
 
 bool radio_player_wifi_weak_holding(void)
@@ -1742,6 +1879,12 @@ void radio_player_loop(void)
             } else {
                 s_rb_drop_band = -1;
             }
+        }
+        /* Re-assert timeouts while live and clip-off. Slot 0 stays on
+         * s_radio_pcm; this is not a mute↔radio swap and not mix_restart. */
+        if (s_running && s_radio_pcm && s_got_music_info && !s_hold_radio
+            && !s_prebuffering && !s_clip_active) {
+            mix_route_clip_and_radio();
         }
     }
     if (s_prebuffering && !s_hold_radio && s_running && s_http

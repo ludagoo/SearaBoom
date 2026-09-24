@@ -21,7 +21,7 @@ typedef enum {
     SB_CLIP_OTA_AVAILABLE,
     SB_CLIP_OTA_REBOOTING,
     SB_CLIP_OTA_DONE,
-    SB_CLIP_PREBUF,
+    SB_CLIP_TUNE_FILL,
     SB_CLIP_COUNT
 } sb_clip_id_t;
 

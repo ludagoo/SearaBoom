@@ -29,8 +29,8 @@ static const char *TAG = "clip_player";
 #define SB_NET_SLOW_WINDOW_MS 25000
 #define SB_NET_SLOW_PLAYS 3
 #define SB_WIFI_WEAK_PLAYS 4
-/* Fill jingle: repeat the multi-note phrase with a short breath. */
-#define SB_PREBUF_JINGLE_PAUSE_MS 400
+/* Tuner fill recording: restart immediately if HTTP fill outlasts the clip. */
+#define SB_TUNE_FILL_PAUSE_MS 0
 
 #define SB_PROBE_SR 44100
 #define SB_PROBE_MS 1000
@@ -71,8 +71,8 @@ extern const uint8_t ota_rebooting_aac_start[] asm("_binary_ota_rebooting_aac_st
 extern const uint8_t ota_rebooting_aac_end[] asm("_binary_ota_rebooting_aac_end");
 extern const uint8_t ota_done_aac_start[] asm("_binary_ota_done_aac_start");
 extern const uint8_t ota_done_aac_end[] asm("_binary_ota_done_aac_end");
-extern const uint8_t prebuf_aac_start[] asm("_binary_prebuf_aac_start");
-extern const uint8_t prebuf_aac_end[] asm("_binary_prebuf_aac_end");
+extern const uint8_t tune_fill_aac_start[] asm("_binary_tune_fill_aac_start");
+extern const uint8_t tune_fill_aac_end[] asm("_binary_tune_fill_aac_end");
 
 static const char *clip_name[SB_CLIP_COUNT] = {
     [SB_CLIP_AP_WELCOME] = "ap_welcome",
@@ -90,7 +90,7 @@ static const char *clip_name[SB_CLIP_COUNT] = {
     [SB_CLIP_OTA_AVAILABLE] = "ota_available",
     [SB_CLIP_OTA_REBOOTING] = "ota_rebooting",
     [SB_CLIP_OTA_DONE] = "ota_done",
-    [SB_CLIP_PREBUF] = "prebuf",
+    [SB_CLIP_TUNE_FILL] = "tune_fill",
 };
 
 static const uint8_t *clip_start[SB_CLIP_COUNT] = {
@@ -109,7 +109,7 @@ static const uint8_t *clip_start[SB_CLIP_COUNT] = {
     [SB_CLIP_OTA_AVAILABLE] = ota_available_aac_start,
     [SB_CLIP_OTA_REBOOTING] = ota_rebooting_aac_start,
     [SB_CLIP_OTA_DONE] = ota_done_aac_start,
-    [SB_CLIP_PREBUF] = prebuf_aac_start,
+    [SB_CLIP_TUNE_FILL] = tune_fill_aac_start,
 };
 static const uint8_t *clip_end[SB_CLIP_COUNT] = {
     [SB_CLIP_AP_WELCOME] = ap_welcome_aac_end,
@@ -127,7 +127,7 @@ static const uint8_t *clip_end[SB_CLIP_COUNT] = {
     [SB_CLIP_OTA_AVAILABLE] = ota_available_aac_end,
     [SB_CLIP_OTA_REBOOTING] = ota_rebooting_aac_end,
     [SB_CLIP_OTA_DONE] = ota_done_aac_end,
-    [SB_CLIP_PREBUF] = prebuf_aac_end,
+    [SB_CLIP_TUNE_FILL] = tune_fill_aac_end,
 };
 
 static int s_volume = SB_DEFAULT_VOLUME;
@@ -224,8 +224,8 @@ int clip_player_duration_ms(sb_clip_id_t id)
 
 static int clip_loop_pause_ms(sb_clip_id_t id)
 {
-    if (id == SB_CLIP_PREBUF) {
-        return SB_PREBUF_JINGLE_PAUSE_MS;
+    if (id == SB_CLIP_TUNE_FILL) {
+        return SB_TUNE_FILL_PAUSE_MS;
     }
     if (id != SB_CLIP_NET_SLOW) {
         return SB_CLIP_LOOP_PAUSE_MS;

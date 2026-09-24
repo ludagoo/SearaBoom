@@ -11,6 +11,8 @@ esp_err_t radio_player_prefetch(const char *url, int volume);
 bool radio_player_is_prefetching(void);
 /* Mixer is muted until HTTP rb reaches start/recover (224 KB). */
 bool radio_player_is_prebuffering(void);
+/* Bound radio (not clip) is on the mixer and rm2s last-block peak is energy. */
+bool radio_player_station_audible(void);
 esp_err_t radio_player_go_live(void);
 esp_err_t radio_player_start(const char *url, int volume);
 void radio_player_stop(void);
@@ -33,6 +35,10 @@ void radio_player_pcm_arm(void);
 bool radio_player_pcm_heard(void);
 bool radio_player_pcm_flowing(void);
 int radio_player_pcm_peak(void);
+/* Last mixer-tap block peak (before beep overlay). Mute-slot zeros stay 0. */
+int radio_player_pcm_tap_peak(void);
+/* True when the tap recently saw radio/clip energy, not mute-slot silence. */
+bool radio_player_pcm_has_energy(void);
 bool radio_player_pcm_finished(int silence_ms);
 
 /* Clip pipeline attaches its PCM ringbuf as mixer slot 1. */

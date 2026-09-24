@@ -271,11 +271,184 @@ def test_prebuf_speak_is_growth_based() -> int:
     return speak_ms
 
 
+def _fn_until(rp: str, start_token: str, end_token: str) -> str:
+    start = rp.index(start_token)
+    end = rp.index(end_token, start + 10)
+    return rp[start:end]
+
+
+def test_prebuf_release_binds_radio_under_clip() -> None:
+    """QA Zero 605bc23: slot0pcm=1, mix restart, pcmrb full, tap peak=1.
+
+    Clips are audible through SWITCH_ON. Station BYPASS left those samples
+    at tap peak=1. Radio-only uses SWITCH_ON plus a mute clip slot.
+    Stall decpeak= is the upmix (rm2s) block peak, before downmix.
+    """
+    rp = (ROOT / "firmware/main/radio_player.c").read_text()
+    sc = (ROOT / "firmware/main/serial_cmd.c").read_text()
+    ls = (ROOT / "firmware/main/listen_stats.c").read_text()
+    uh = (ROOT / "firmware/main/pcm_upmix.h").read_text()
+    uc = (ROOT / "firmware/main/pcm_upmix.c").read_text()
+
+    release = _fn_until(
+        rp,
+        "static bool radio_prebuffer_release_if_ready(void)",
+        "static void radio_mark_started(void)",
+    )
+    assert "s_prebuffering = false" in release
+    assert "mix_restart()" in release
+    assert "radio_pcm_resume()" not in release
+    assert "if (!s_got_music_info || s_hold_radio)" in release
+    assert "|| s_clip_active" not in release
+    assert "amp_apply_saved" in release
+    assert release.index("s_prebuffering = false") < release.index("mix_restart()")
+
+    begin = _fn_until(
+        rp,
+        "static void radio_prebuffer_begin(const char *why)",
+        "static bool radio_prebuffer_release_if_ready(void)",
+    )
+    assert "radio_pcm_pause()" not in begin
+    assert "mix_restart()" not in begin
+    assert "analog_tune_sample" not in begin
+
+    rst = _fn_until(rp, "static void mix_restart(void)\n{",
+                    "static void mix_restart_if_needed(void)")
+    assert rst.index("mix_route_clip_and_radio()") < rst.index("audio_pipeline_run")
+    assert rst.index("mix_apply_gains(") < rst.index("audio_pipeline_run")
+    assert "mix_mute_slot(SB_SLOT_RADIO)" not in rst
+    assert "duck ? SB_MIX_CLIP_GAIN_DB : SB_MIX_CLIP_MUTE_DB" not in rp
+
+    gains = _fn_until(rp, "static void mix_apply_gains(bool duck)",
+                      "static void mix_restart(void)\n{")
+    assert "SB_MIX_CLIP_GAIN_DB" in gains
+    assert "downmix_set_gain_info" in gains
+    assert "source_info_init" in gains
+    assert "{SB_MIX_CLIP_MUTE_DB, SB_MIX_CLIP_GAIN_DB}" in gains
+    assert "SB_MIX_CLIP_MUTE_DB, SB_MIX_CLIP_MUTE_DB" not in gains
+    assert "duck ? SB_MIX_RADIO_DUCK_DB : SB_MIX_RADIO_GAIN_DB" in gains
+
+    gl = _fn_until(rp, "esp_err_t radio_player_go_live(void)",
+                   "esp_err_t radio_player_start(const char *url, int volume)")
+    assert gl.index("s_prefetching = false") < gl.index("mix_restart()")
+    assert gl.index("radio_mark_started()") < gl.index("mix_restart()")
+
+    ens = _fn_until(rp, "static esp_err_t ensure_radio(const char *url, int volume, bool hold)",
+                    "static void mix_set_idle_mode(void)")
+    after_pcm = ens.split("s_radio_pcm = audio_element_get_input_ringbuf(s_radio_raw)", 1)[1]
+    # Prefetch keeps slot 0 mute. Non-prefetch / hard restart: fill first
+    # so the stopped bind is mute, not radio.
+    assert "s_prefetching = true" in after_pcm
+    assert "mix_restart()" in after_pcm
+    assert after_pcm.index("if (hold)") < after_pcm.index("mix_restart()")
+    assert after_pcm.index("radio_mark_started()") < after_pcm.index("mix_restart()")
+
+    assert "s_aac = aac_decoder_init(&aac_cfg);" in ens
+    assert "plus_enable = true" in ens
+    assert "helix_lc" not in rp
+    assert not (ROOT / "firmware/components/helix_lc").exists()
+
+    assert "analog_tune_sample" not in rp
+    assert "mix_tune_static_s16le" not in rp
+    assert "s_tune_static" not in rp
+
+    route = _fn_until(rp, "static void mix_route_clip_and_radio(void)\n{",
+                      "esp_err_t radio_player_attach_clip_pcm")
+    both = route.split("if (clip && radio)")[1].split("if (clip)")[0]
+    assert "SB_MIX_MUTE_TIMEOUT" in both
+    assert "SB_MIX_RADIO_TIMEOUT" not in both
+    assert "mix_apply_gains(true)" in both
+    assert "slot0_radio" not in route
+    assert "s_radio_pcm && !s_prefetching" not in route
+    assert "!s_prebuffering" in route
+    radio_only = route.split("mix_mute_slot(SB_SLOT_CLIP)")[1]
+    assert "SB_MIX_RADIO_TIMEOUT" in radio_only
+    assert "ESP_DOWNMIX_WORK_MODE_SWITCH_ON" in radio_only
+    assert "mix_apply_gains(false)" in radio_only
+    clip_only = route.split("if (clip)")[1].split("mix_mute_slot(SB_SLOT_CLIP)")[0]
+    assert "mix_apply_gains(false)" in clip_only
+    idle = _fn_until(rp, "static void mix_set_idle_mode(void)",
+                     "static void mix_route_clip_and_radio(void)\n{")
+    assert "ESP_DOWNMIX_WORK_MODE_SWITCH_OFF" in idle
+    assert "s_mix_clip_mode" in idle
+    assert "s_mix_off_until_ms" in idle
+    assert "SB_MIX_TRANSIT_MS" in idle
+    assert "ESP_DOWNMIX_WORK_MODE_BYPASS" not in route
+    assert "mix_set_idle_mode()" in route
+    assert route.strip().endswith("mix_set_idle_mode();\n}")
+    assert "#define SB_MIX_TRANSIT_MS 150" in rp
+    assert "SB_STATIC_POP" not in rp
+    assert "audio_element_pause" not in rp
+    assert "audio_element_resume" not in rp
+    assert "s_radio_pcm_paused" not in rp
+
+    use_rb = _fn_until(rp, "static void mix_use_rb(int slot, ringbuf_handle_t rb, int timeout)",
+                       "static void mix_mute_slot(int slot)")
+    assert "downmix_set_input_rb(s_downmix, rb, slot)" in use_rb
+    assert use_rb.index("downmix_set_input_rb(s_downmix, rb, slot)") < use_rb.index(
+        "downmix_set_input_rb_timeout"
+    )
+    assert "downmix_set_input_rb_timeout(s_downmix, 0, slot)" not in use_rb
+
+    loop = rp.split("void radio_player_loop(void)", 1)[1]
+    drop = loop.split('radio_prebuffer_begin("rb-drop")', 1)[1][:350]
+    assert "mix_route_clip_and_radio()" in drop
+    assert "mix_restart()" not in drop.split("s_rb_drop_band", 1)[0]
+    live = loop.split("Re-assert timeouts while live", 1)[1][:500]
+    assert "mix_route_clip_and_radio()" in live
+    assert "!s_clip_active" in live
+    assert "mix_restart()" not in live
+
+    soft = _fn_until(rp, "static void radio_soft_restart(const char *reason)\n{",
+                     "static void radio_hard_restart(const char *reason)")
+    assert "mix_route_clip_and_radio()" in soft
+    assert "mix_restart()" not in soft
+    assert "radio_pcm_resume()" not in soft
+    assert "s_radio_pcm_paused" not in soft
+    assert 'radio_prebuffer_begin("soft-restart")' in soft
+
+    hold = _fn_until(rp, "void radio_player_hold_stream(bool on)",
+                     "bool radio_player_wifi_weak_holding(void)")
+    assert "mix_route_clip_and_radio()" in hold
+    assert "mix_restart()" in hold
+    assert hold.index("mix_route_clip_and_radio()") < hold.index("mix_restart()")
+    assert "radio_pcm_pause()" not in hold
+    assert "radio_pcm_resume()" not in hold
+    assert "radio_flush_pcm()" not in hold
+
+    snap = _fn_until(rp, "static void stream_snap(const char *why)",
+                     "void radio_player_log_health(const char *why)")
+    assert "pcmrb=%d/%d" in snap
+    assert "peak=%d" in snap
+    assert "decpeak=%d" in snap
+    assert "pcm_upmix_radio_peak()" in snap
+    assert "s_pcm_peak_now" in snap
+    assert "PCM_UPMIX_OUT_RB_SIZE" in snap
+    assert "slot0pcm=%d" in snap
+    assert "paused=%d" not in snap
+    assert "!s_prebuffering" in snap
+
+    assert "#define PCM_UPMIX_OUT_RB_SIZE (16 * 1024)" in uh
+    assert "PCM_UPMIX_OUT_RB_SIZE" in uc
+    assert "pcm_upmix_radio_peak" in uh
+    assert 'strcmp(tag, "rm2s")' in uc
+    assert "decoded peak=" in uc
+    assert "radio_player_pcm_tap_peak()" in sc
+    assert "peak=%d" in sc[sc.index('if (strcasecmp(line, "http")'):]
+
+    station = _fn_until(ls, "static bool station_pcm_now(void)", "void listen_stats_poll(void)")
+    assert "radio_player_pcm_flowing()" in station
+    assert "radio_player_pcm_has_energy()" in station
+    assert "s_pcm_last_voice_us" in rp[rp.index("bool radio_player_pcm_has_energy(void)"):
+                                      rp.index("bool radio_player_pcm_finished")]
+
+
 def main() -> int:
     d = test_header_numbers()
     test_python_hysteresis(d)
     test_c_gate_matches(d)
     speak_ms = test_prebuf_speak_is_growth_based()
+    test_prebuf_release_binds_radio_under_clip()
     print("test_radio_buf: ok")
     print(
         f"  start={d['SB_HTTP_START_BYTES']} recover={d['SB_HTTP_RECOVER_BYTES']} "

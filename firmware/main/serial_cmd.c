@@ -222,11 +222,12 @@ static void handle_line(char *line)
         return;
     }
     if (strcasecmp(line, "http") == 0) {
-        log_shipper_printf("http rb=%d hold=%d music=%d prebuf=%d\n",
+        log_shipper_printf("http rb=%d hold=%d music=%d prebuf=%d peak=%d\n",
                radio_player_http_buffered(),
                radio_player_wifi_weak_holding() ? 1 : 0,
                radio_player_has_music_info() ? 1 : 0,
-               radio_player_is_prebuffering() ? 1 : 0);
+               radio_player_is_prebuffering() ? 1 : 0,
+               radio_player_pcm_tap_peak());
         radio_player_log_health("serial");
         return;
     }
