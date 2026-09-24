@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host spec: sintonizando once, then analog tuning static until audible."""
+"""Host spec: sintonizando once, then looping tuner clip until audible."""
 from __future__ import annotations
 
 import sys
@@ -8,6 +8,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = (ROOT / "firmware/main/main.c").read_text()
 RP = (ROOT / "firmware/main/radio_player.c").read_text()
+RH = (ROOT / "firmware/main/radio_player.h").read_text()
+CP = (ROOT / "firmware/main/clip_player.c").read_text()
+CH = (ROOT / "firmware/main/clip_player.h").read_text()
+CMAKE = (ROOT / "firmware/main/CMakeLists.txt").read_text()
 BUF = (ROOT / "firmware/main/radio_buf.h").read_text()
 VER = (ROOT / "firmware/VERSION").read_text().strip()
 SDK = (ROOT / "firmware/sdkconfig.defaults").read_text()
@@ -41,41 +45,42 @@ def test_sintonizando_once() -> None:
 
 def test_no_fill_jingle() -> None:
     assert "clip_player_loop(SB_CLIP_PREBUF)" not in MAIN
+    assert "SB_CLIP_PREBUF" not in MAIN
+    assert "SB_CLIP_PREBUF" not in CH
     assert "SB_PREBUF_FILL_PAUSE_MS" not in MAIN
     assert "s_fill_gap_until_ms" not in MAIN
+    assert "prebuf.aac" not in CMAKE
+    assert "prebuf.aac" not in TTS
+    assert not (ROOT / "firmware/clips/prebuf.aac").exists()
 
 
-def test_analog_static_until_audible() -> None:
-    assert "mix_tune_static_s16le" in RP
-    assert "analog_tune_sample" in RP
-    assert "s_tune_static = true" in RP
+def test_tune_fill_until_audible() -> None:
+    assert "clip_player_loop(SB_CLIP_TUNE_FILL)" in MAIN
+    assert "radio_player_station_audible" in MAIN
+    assert "tune fill off" in MAIN
+    assert "SB_CLIP_TUNE_FILL" in CH
+    assert "tune_fill" in CP
+    assert "tune_fill.aac" in CMAKE
+    assert "tune_fill.aac" in TTS
+    assert (ROOT / "firmware/clips/tune_fill.aac").is_file()
+    assert "analog_tune_sample" not in RP
+    assert "mix_tune_static_s16le" not in RP
+    assert "s_tune_stations" not in RP
+    assert "s_tune_static" not in RP
+    assert "radio_player_station_audible" in RH
+    assert "pcm_upmix_radio_peak" in RP[RP.index("bool radio_player_station_audible"):RP.index(
+        "bool radio_player_station_audible"
+    ) + 400]
     begin = RP[RP.index("static void radio_prebuffer_begin"):RP.index(
         "static bool radio_prebuffer_release_if_ready"
     )]
-    assert "s_tune_static = true" in begin
     assert "radio_pcm_pause()" not in begin
     assert "mix_restart()" not in begin
-    note = RP[RP.index("static void pcm_note_s16"):RP.index("void radio_player_pcm_arm")]
-    assert "s_tune_static = false" in note
-    assert "SB_PCM_HOLD_ABS" in note
     tap = RP[RP.index("static int tap_process"):RP.index("static audio_element_handle_t tap_init")]
     assert "pcm_note_s16" in tap
-    assert "mix_tune_static_s16le" in tap
-    assert tap.index("pcm_note_s16") < tap.index("mix_tune_static_s16le")
-    assert "mix_restart()" not in begin
-    sample = RP[RP.index("static int16_t analog_tune_sample"):RP.index(
-        "static void mix_tune_static_s16le"
-    )]
-    assert "SB_STATIC_POP" not in RP
-    assert ">> 24" not in sample
-    assert "s_tune_stations" in sample
-    assert "SB_DIAL_PASS" in sample
-    assert "prox" in sample
-    assert "SB_STATIC_HISS" in sample
-    hiss = int(RP.split("#define SB_STATIC_HISS ")[1].split()[0])
-    whistle = int(RP.split("#define SB_STATIC_WHISTLE ")[1].split()[0])
-    assert whistle > hiss, f"stations should whistle by, not hiss-only ({hiss}/{whistle})"
-    assert hiss >= 1500, f"static between stations too quiet ({hiss})"
+    assert "mix_tune_static" not in tap
+    assert "analog_tune" not in tap
+    assert "SB_TUNE_FILL_PAUSE_MS 0" in CP
 
 
 def test_release_ungates() -> None:
@@ -92,7 +97,7 @@ def main() -> int:
     test_fill_policy_unchanged()
     test_sintonizando_once()
     test_no_fill_jingle()
-    test_analog_static_until_audible()
+    test_tune_fill_until_audible()
     test_release_ungates()
     print("test_prebuf_jingle: ok")
     return 0

@@ -45,8 +45,8 @@ static bool s_healthy_marked;
 static volatile int s_pad_taps;
 static unsigned s_flag_seq;
 
-/* Fill: one sintonizando, then analog tuner overlay (tap) until
- * the station is audible. Not the musical fill jingle. */
+/* Fill: one sintonizando, then looping tuner recording until the
+ * station is actually audible (rm2s peak after bind). Not the jingle. */
 static bool s_fill_tune_done;
 
 static sb_clip_id_t fill_tune_clip(void)
@@ -57,7 +57,7 @@ static sb_clip_id_t fill_tune_clip(void)
 
 static bool clip_is_fill_pattern(sb_clip_id_t id)
 {
-    return id == SB_CLIP_PREBUF
+    return id == SB_CLIP_TUNE_FILL
         || id == SB_CLIP_TUNE_102
         || id == SB_CLIP_TUNE_104;
 }
@@ -653,8 +653,7 @@ void app_main(void)
             bool spoken = (playing == SB_CLIP_OTA_DONE
                            || playing == SB_CLIP_NET_SLOW
                            || playing == SB_CLIP_WIFI_WEAK);
-            /* Prompts may interrupt sintonizando. Analog static is mixed
-             * on the tap in radio_player, not a looping prebuf clip. */
+            /* Prompts may interrupt sintonizando or the looping fill clip. */
             if (!clip_player_is_active() || fill) {
                 if (radio_player_wifi_weak_should_speak()) {
                     /* Speak first so the warning is not lost in a mute gap, then
@@ -676,6 +675,12 @@ void app_main(void)
                            && !s_fill_tune_done) {
                     s_fill_tune_done = true;
                     clip_player_play(fill_tune_clip(), false);
+                } else if (!spoken
+                           && !clip_player_is_active()
+                           && s_fill_tune_done
+                           && !radio_player_wifi_weak_holding()
+                           && !radio_player_station_audible()) {
+                    clip_player_loop(SB_CLIP_TUNE_FILL);
                 }
             }
             playing = clip_player_playing();
@@ -689,7 +694,8 @@ void app_main(void)
                          clip_player_name(playing));
                 clip_player_stop();
             }
-            if (!radio_player_is_prebuffering() && playing == SB_CLIP_PREBUF) {
+            if (playing == SB_CLIP_TUNE_FILL && radio_player_station_audible()) {
+                ESP_LOGI(TAG, "tune fill off");
                 clip_player_stop();
             }
         }

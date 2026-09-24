@@ -11,6 +11,8 @@ esp_err_t radio_player_prefetch(const char *url, int volume);
 bool radio_player_is_prefetching(void);
 /* Mixer is muted until HTTP rb reaches start/recover (224 KB). */
 bool radio_player_is_prebuffering(void);
+/* Bound radio (not clip) is on the mixer and rm2s last-block peak is energy. */
+bool radio_player_station_audible(void);
 esp_err_t radio_player_go_live(void);
 esp_err_t radio_player_start(const char *url, int volume);
 void radio_player_stop(void);

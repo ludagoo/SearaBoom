@@ -310,7 +310,7 @@ def test_prebuf_release_binds_radio_under_clip() -> None:
     )
     assert "radio_pcm_pause()" not in begin
     assert "mix_restart()" not in begin
-    assert "s_tune_static = true" in begin
+    assert "analog_tune_sample" not in begin
 
     rst = _fn_until(rp, "static void mix_restart(void)\n{",
                     "static void mix_restart_if_needed(void)")
@@ -348,8 +348,9 @@ def test_prebuf_release_binds_radio_under_clip() -> None:
     assert "helix_lc" not in rp
     assert not (ROOT / "firmware/components/helix_lc").exists()
 
-    assert "mix_tune_static_s16le" in rp
-    assert "s_tune_static = true" in rp
+    assert "analog_tune_sample" not in rp
+    assert "mix_tune_static_s16le" not in rp
+    assert "s_tune_static" not in rp
 
     route = _fn_until(rp, "static void mix_route_clip_and_radio(void)\n{",
                       "esp_err_t radio_player_attach_clip_pcm")

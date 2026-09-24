@@ -17,8 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT_DIR = ROOT / "firmware" / "clips"
 AUTH = Path.home() / ".grok" / "auth.json"
 
-# Synthesized fill chime (not TTS). Keep it when pruning stale AAC.
-KEEP_EXTRA = {"prebuf.aac"}
+# Tuner fill recording (not TTS). Keep it when pruning stale AAC.
+KEEP_EXTRA = {"tune_fill.aac"}
 
 # Spoken as a person from Ceará: warm, direct, not a caricature.
 # One idea per clip. Welcome does not mention the portal or the IP.

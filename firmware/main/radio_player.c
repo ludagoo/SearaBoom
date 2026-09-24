@@ -183,15 +183,10 @@ static volatile int s_pcm_peak_max;
 static volatile int s_pcm_peak_now;
 static volatile int64_t s_pcm_last_voice_us;
 static volatile bool s_amp_gated;
-static volatile bool s_tune_static;
 static bool s_mix_clip_mode;
 static int64_t s_mix_off_until_ms;
 /* -1 unknown; 0 radio 0 dB; 1 radio ducked. Clip target is always 0 dB. */
 static int s_mix_gain_duck = -1;
-static uint32_t s_static_rng = 0xA5110E11u;
-static int32_t s_static_lp;
-static uint32_t s_static_ph;
-static uint32_t s_static_sweep;
 static int64_t s_mix_hold_restart_until_ms;
 static volatile int64_t s_last_pcm_ms;
 static int64_t s_stall_grace_until_ms;
@@ -448,86 +443,6 @@ static void mix_beep_s16le(int16_t *samples, int frames, int channels)
     s_beep_pos = (pos >= len) ? -1 : pos;
 }
 
-/* Analog tuner being turned: the dial sweeps, stations whistle by,
- * static between them. Overlay is after pcm_note so it does not count
- * as station energy. Stop when the tap sees radio. */
-#define SB_STATIC_HISS 2800
-#define SB_STATIC_WHISTLE 9000
-#define SB_PH_PER_HZ 97391u
-#define SB_DIAL_PASS 0x1800
-
-static const uint16_t s_tune_stations[] = {
-    0x0B40, 0x2480, 0x3E00, 0x5100, 0x6C80, 0x8300, 0x9A40, 0xB280, 0xD100,
-    0xEA00,
-};
-
-static int16_t analog_tune_sample(void)
-{
-    uint32_t x = s_static_rng;
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    s_static_rng = x;
-    int n = (int)(int16_t)x;
-    s_static_lp += (n - s_static_lp) / 6;
-
-    /* Full dial ~1.5 s at 44.1 kHz. */
-    s_static_sweep++;
-    uint32_t dial = s_static_sweep & 0xFFFFu;
-    int min_d = 0x8000;
-    for (unsigned i = 0; i < sizeof(s_tune_stations) / sizeof(s_tune_stations[0]); i++) {
-        int d = (int)dial - (int)s_tune_stations[i];
-        if (d < 0) {
-            d = -d;
-        }
-        if (d > 0x8000) {
-            d = 0x10000 - d;
-        }
-        if (d < min_d) {
-            min_d = d;
-        }
-    }
-    int prox = 0;
-    if (min_d < SB_DIAL_PASS) {
-        prox = ((SB_DIAL_PASS - min_d) * 32767) / SB_DIAL_PASS;
-    }
-
-    int hiss_g = SB_STATIC_HISS - (prox * (SB_STATIC_HISS / 2) / 32767);
-    int hiss = (s_static_lp * 5 + n * 2) * (hiss_g / 7) / 32768;
-    /* Heterodyne drops toward the station; loud only while passing. */
-    uint32_t hz = 90u + (uint32_t)min_d / 6u;
-    s_static_ph += hz * SB_PH_PER_HZ;
-    int saw = (int)(int16_t)(s_static_ph >> 16);
-    int whistle = (saw * ((SB_STATIC_WHISTLE * prox) / 32767)) / 32768;
-    int v = hiss + whistle;
-    if (v > 32767) {
-        v = 32767;
-    } else if (v < -32768) {
-        v = -32768;
-    }
-    return (int16_t)v;
-}
-
-static void mix_tune_static_s16le(int16_t *samples, int frames, int channels)
-{
-    if (!samples || frames <= 0 || channels < 1) {
-        return;
-    }
-    for (int i = 0; i < frames; i++) {
-        int16_t n = analog_tune_sample();
-        for (int ch = 0; ch < channels; ch++) {
-            int idx = i * channels + ch;
-            int32_t mixed = (int32_t)samples[idx] + n;
-            if (mixed > 32767) {
-                mixed = 32767;
-            } else if (mixed < -32768) {
-                mixed = -32768;
-            }
-            samples[idx] = (int16_t)mixed;
-        }
-    }
-}
-
 static void probe_window_done(int zc, int n, int peak, int64_t now)
 {
     if (n < 8 || peak < SB_PCM_VOICE_ABS) {
@@ -563,12 +478,6 @@ static void pcm_note_s16(const int16_t *s, int n, int channels)
     int64_t now = esp_timer_get_time();
     if (peak >= SB_PCM_HOLD_ABS) {
         s_pcm_last_voice_us = now;
-        /* Station energy, not clip/static. Fill static stops here so a
-         * later prebuffer does not keep hissing over the stream. */
-        if (s_tune_static && !s_clip_active && !s_prebuffering) {
-            s_tune_static = false;
-            ESP_LOGI(TAG, "tune static off peak=%d", peak);
-        }
     }
     if (s_probe_on) {
         for (int i = 0; i < n; i += step) {
@@ -712,9 +621,6 @@ static int tap_process(audio_element_handle_t self, char *in_buffer, int in_len)
         if (s_beep_pos >= 0) {
             mix_beep_s16le((int16_t *)in_buffer, r / 4, 2);
         }
-        if (s_tune_static && !s_clip_active && !s_hold_radio) {
-            mix_tune_static_s16le((int16_t *)in_buffer, r / 4, 2);
-        }
     }
     return audio_element_output(self, in_buffer, r);
 }
@@ -830,11 +736,9 @@ static void radio_prebuffer_begin(const char *why)
     if (!from_soft) {
         stream_snap(why ? why : "prebuffer");
     }
-    /* Analog tuner overlay until the tap sees radio energy.
-     * Slot 0 stays on the mute rb during fill so AAC/upmix keep a PCM
+    /* Slot 0 stays on the mute rb during fill so AAC/upmix keep a PCM
      * cushion. Do not pause upmix: pause/resume aborted the decoder
      * rbs and left tap peak=1 while pcmrb still drained (QA 6f8d6c9). */
-    s_tune_static = true;
 }
 
 static bool radio_prebuffer_release_if_ready(void)
@@ -843,8 +747,7 @@ static bool radio_prebuffer_release_if_ready(void)
         return false;
     }
     /* Do not wait for a clip. HTTP-full binds radio even if sintonizando
-     * is still up (clip&&radio). Analog fill static is a tap overlay, not
-     * a clip. */
+     * or the tuner fill clip is still up (clip&&radio). */
     if (!s_got_music_info || s_hold_radio) {
         return false;
     }
@@ -1030,7 +933,6 @@ static void teardown_radio(void)
     s_need_hard_on_wifi = false;
     s_wifi_rejoin = false;
     s_sta_lost_pending = false;
-    s_tune_static = false;
     mix_route_clip_and_radio();
     vTaskDelay(pdMS_TO_TICKS(30));
     if (s_radio_raw) {
@@ -1426,6 +1328,15 @@ bool radio_player_is_prefetching(void)
 bool radio_player_is_prebuffering(void)
 {
     return s_prebuffering;
+}
+
+bool radio_player_station_audible(void)
+{
+    /* rm2s peak is radio-only. Tap peak includes the looping fill clip. */
+    if (s_prebuffering || s_hold_radio || s_prefetching || !s_got_music_info) {
+        return false;
+    }
+    return pcm_upmix_radio_peak() >= SB_PCM_HOLD_ABS;
 }
 
 esp_err_t radio_player_go_live(void)
