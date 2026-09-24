@@ -37,11 +37,12 @@
 #define SB_TOUCH_AUTO_GRAZE_OVER 1.3f
 #define SB_TOUCH_AUTO_CHATTER_N 20
 #define SB_TOUCH_AUTO_CHATTER_MS 30000
-/* One softer step, absolute. Two weak bumps: 0.250 → 0.200 → 0.150.
- * Floor is 0.08, so the trip there is 0.064 and later bumps can continue. */
+/* Missed bumps and fired presses that were too light step down by at most this. */
 #define SB_TOUCH_AUTO_STEP_MAX 0.05f
-/* Desired IDF trip sits this far under the measured peak. */
-#define SB_TOUCH_AUTO_TRIP_UNDER 0.02f
+/* Fired presses firm more slowly than they soften. */
+#define SB_TOUCH_AUTO_STEP_UP 0.03f
+/* Do not firm unless the target is at least this far above live. */
+#define SB_TOUCH_AUTO_FIRM_GAP 0.02f
 
 static inline float touch_auto_clamp_hard(float sens)
 {
@@ -92,28 +93,24 @@ static inline float touch_auto_idf_trip(float channel_sens)
     return channel_sens * SB_TOUCH_AUTO_IDF_DIV;
 }
 
-/* Next channel_sens, down only, toward a trip just under `peak`.
- * One call moves at most SB_TOUCH_AUTO_STEP_MAX. Never raises.
- * Floor 0.08 / ceil 0.50. Factory ±20% is not applied, so that window
- * cannot block a downward step and a low factory snapshot cannot pull
- * below the floor. */
-static inline float touch_auto_step_softer(float live, float peak)
+/* Trip sits a little under the peak: trip = peak * 0.85, so
+ * sens = clamp(peak * 0.85 / 0.8, floor, ceil). Factory ±20% is not applied. */
+static inline float touch_auto_target(float peak)
 {
-    float trip;
+    return touch_auto_clamp_auto(peak * SB_TOUCH_AUTO_FRAC / SB_TOUCH_AUTO_IDF_DIV);
+}
+
+/* Button never fired. Step down toward the target, at most 0.05.
+ * A miss never firms the pad. Peak above 0.60 is ignored. */
+static inline float touch_auto_step_missed(float live, float peak)
+{
     float target;
     float next;
 
-    trip = peak - SB_TOUCH_AUTO_TRIP_UNDER;
-    if (trip < 0.0f) {
-        trip = 0.0f;
+    if (!(peak > SB_TOUCH_CAL_FAIL) || peak > SB_TOUCH_AUTO_PEAK_WET) {
+        return live;
     }
-    target = trip / SB_TOUCH_AUTO_IDF_DIV;
-    if (target < SB_TOUCH_AUTO_FLOOR) {
-        target = SB_TOUCH_AUTO_FLOOR;
-    }
-    if (target > SB_TOUCH_AUTO_CEIL) {
-        target = SB_TOUCH_AUTO_CEIL;
-    }
+    target = touch_auto_target(peak);
     if (!(target < live)) {
         return live;
     }
@@ -128,6 +125,50 @@ static inline float touch_auto_step_softer(float live, float peak)
         return live;
     }
     return next;
+}
+
+/* Button fired. Step toward the target. Up at most 0.03, and only when
+ * the target is at least 0.02 above live. Down at most 0.05. Wet peaks
+ * (above 0.60) do not move. Factory ±20% is not applied. */
+static inline float touch_auto_step_fired(float live, float peak)
+{
+    float target;
+    float next;
+
+    if (!(peak > SB_TOUCH_CAL_FAIL) || peak > SB_TOUCH_AUTO_PEAK_WET) {
+        return live;
+    }
+    target = touch_auto_target(peak);
+    if (target > live) {
+        if (target < live + SB_TOUCH_AUTO_FIRM_GAP) {
+            return live;
+        }
+        next = live + SB_TOUCH_AUTO_STEP_UP;
+        if (next > target) {
+            next = target;
+        }
+        if (next > SB_TOUCH_AUTO_CEIL) {
+            next = SB_TOUCH_AUTO_CEIL;
+        }
+        if (!(next > live)) {
+            return live;
+        }
+        return next;
+    }
+    if (target < live) {
+        next = live - SB_TOUCH_AUTO_STEP_MAX;
+        if (next < target) {
+            next = target;
+        }
+        if (next < SB_TOUCH_AUTO_FLOOR) {
+            next = SB_TOUCH_AUTO_FLOOR;
+        }
+        if (!(next < live)) {
+            return live;
+        }
+        return next;
+    }
+    return live;
 }
 
 static inline int touch_auto_is_graze(int hold_ms, float peak, float live_sens)

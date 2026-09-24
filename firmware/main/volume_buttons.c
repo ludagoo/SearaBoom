@@ -416,8 +416,11 @@ static void auto_queue(int idx, float next, const char *why)
     float live = live_sens(idx);
 
     next = touch_auto_clamp_auto(next);
-    /* Presses only soften. A firmer proposal is not a teacher. */
-    if (!(next < live) || (live - next) < 0.001f) {
+    if (next > live) {
+        if (next - live < 0.001f) {
+            return;
+        }
+    } else if (live - next < 0.001f) {
         return;
     }
     if (!s_pending_apply) {
@@ -434,9 +437,23 @@ static void auto_queue(int idx, float next, const char *why)
              idx == 0 ? '+' : '-', live, next, why);
 }
 
-static void auto_step_queue(int idx, float peak, const char *why)
+static void auto_learn_peak(int idx, float peak, int fired)
 {
-    float next = touch_auto_step_softer(live_sens(idx), peak);
+    float live = live_sens(idx);
+    float next = fired ? touch_auto_step_fired(live, peak)
+                       : touch_auto_step_missed(live, peak);
+    const char *why;
+
+    if (next > live) {
+        if (!fired) {
+            return;
+        }
+        why = "fired-up";
+    } else if (next < live) {
+        why = fired ? "fired-down" : "missed-down";
+    } else {
+        return;
+    }
     auto_queue(idx, next, why);
 }
 
@@ -487,7 +504,7 @@ static void auto_on_release(int idx)
     peak = s_auto[idx].peak;
     tainted = s_auto[idx].tainted || s_chord;
     live = live_sens(idx);
-    would = touch_auto_step_softer(live, peak);
+    would = touch_auto_step_fired(live, peak);
     clean = !tainted && touch_auto_is_clean(hold, peak);
     graze = !tainted && touch_auto_is_graze(hold, peak, live);
     s_auto[idx].tracking = false;
@@ -502,12 +519,16 @@ static void auto_on_release(int idx)
     if (s_calibrating || s_learn_freeze || t < s_settle_until_ms) {
         return;
     }
-    if (tainted || !(peak > SB_TOUCH_CAL_FAIL)) {
+    if (tainted || !(peak > SB_TOUCH_CAL_FAIL) || peak > SB_TOUCH_AUTO_PEAK_WET) {
         return;
     }
-    /* Graze, not-clean, and wet peaks still soften when this press was
-     * lighter than the live trip. They never firm the pad. */
-    auto_step_queue(idx, peak, "fired");
+    if (hold < SB_TOUCH_AUTO_GRAZE_HOLD_MS
+        || hold > SB_TOUCH_AUTO_CLEAN_HOLD_MAX_MS) {
+        return;
+    }
+    /* Chatter freeze already returned above. It stops learning; it does
+     * not firm the pad. */
+    auto_learn_peak(idx, peak, 1);
 }
 
 static void auto_disarm_watch(void)
@@ -540,19 +561,19 @@ static void auto_finish_missed(int idx, int64_t t)
         || hold > SB_TOUCH_AUTO_CLEAN_HOLD_MAX_MS) {
         return;
     }
-    if (!(peak > SB_TOUCH_CAL_FAIL)) {
+    if (!(peak > SB_TOUCH_CAL_FAIL) || peak > SB_TOUCH_AUTO_PEAK_WET) {
         return;
     }
     if (s_calibrating || t < s_settle_until_ms) {
         return;
     }
-    /* Same pocket/chatter guard as a fired press. The trip that crosses
-     * 20 events in 30 s does not learn. */
+    /* Same pocket/chatter guard as a fired press. Crossing 20 events in
+     * 30 s stops learning. It does not firm the pad. */
     auto_note_chatter(t);
     if (s_learn_freeze) {
         return;
     }
-    auto_step_queue(idx, peak, "missed");
+    auto_learn_peak(idx, peak, 0);
 }
 
 static void auto_watch_pad(int idx, int64_t t)
