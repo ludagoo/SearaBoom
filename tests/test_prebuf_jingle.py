@@ -27,6 +27,12 @@ def test_fill_policy_unchanged() -> None:
     assert "#define SB_HTTP_SLOW_PREBUF_SPEAK_MS 12000" in RP
     assert "s_prebuffer_last_filled" in RP
     assert "SB_HTTP_SLOW_GROW_BYTES" in RP
+    assert "CONFIG_COMPILER_OPTIMIZATION_SIZE=y" in SDK
+    assert "CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_DISABLE=y" in SDK
+    assert "CONFIG_COMPILER_OPTIMIZATION_DEBUG=y" not in SDK
+    cmake = (ROOT / "firmware/CMakeLists.txt").read_text()
+    assert "CONFIG_COMPILER_OPTIMIZATION_DEBUG=y" in cmake
+    assert "file(REMOVE" in cmake
 
 
 def test_sintonizando_once() -> None:
@@ -63,6 +69,7 @@ def test_tune_fill_until_audible() -> None:
     assert "tune_fill.aac" in CMAKE
     assert "tune_fill.aac" in TTS
     assert (ROOT / "firmware/clips/tune_fill.aac").is_file()
+    assert (ROOT / "firmware/clips/tune_fill.aac").stat().st_size > 300 * 1024
     assert "analog_tune_sample" not in RP
     assert "mix_tune_static_s16le" not in RP
     assert "s_tune_stations" not in RP
