@@ -81,11 +81,13 @@ CONFIG_SEARABOOM_OTA_URL="https://searaboom.goossen.dev"
 CONFIG_SEARABOOM_LOG_URL="https://searaboom.goossen.dev"
 CONFIG_SEARABOOM_FW_VERSION="0.5.28"
 
-# Default INFO. Cap compiled logs at INFO too: MAXIMUM DEBUG still
-# embeds IDF/ADF ESP_LOGD strings. Size-opt of 3484b00 was 1860656 B
-# (25648 over the 0x1C0000 slot). This project's own code has no LOGD.
+# Default INFO. Same-as-default is the only selectable maximum while
+# default is INFO (IDF 5.3: LOG_MAXIMUM_LEVEL_INFO depends on
+# LOG_DEFAULT_LEVEL < 3). That still compiles out ESP_LOGD/V. Size-opt
+# of 3484b00 was 1860656 B (25648 over 0x1C0000); 3513e75 clean build
+# was 1772976 B (62032 free). This project's own code has no LOGD.
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
-CONFIG_LOG_MAXIMUM_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_EQUALS_DEFAULT=y
 # CONFIG_LOG_MAXIMUM_LEVEL_DEBUG is not set
 
 # OTA app slot is 0x1C0000 (1.75 MB). tune_fill.aac is ~318 KB.
@@ -96,7 +98,7 @@ CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_DISABLE=y
 CONFIG_COMPILER_OPTIMIZATION_CHECKS_SILENT=y
 CONFIG_LOG_COLORS=n
-# Error-name table is extra flash; esp_err_to_name() still returns "ERROR".
+# Error-name table is extra flash; esp_err_to_name() returns "UNKNOWN ERROR".
 CONFIG_ESP_ERR_TO_NAME_LOOKUP=n
 
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
