@@ -278,13 +278,12 @@ def _fn_until(rp: str, start_token: str, end_token: str) -> str:
 
 
 def test_prebuf_release_binds_radio_under_clip() -> None:
-    """QA Zero: PLAY + beeps + silent radio after 224 KB. Mixer not eating PCM.
+    """QA Zero 2f8bae9: hiss after ready, pcmrb stuck 16384/16384, peak=1.
 
-    Cause: release waited for !s_clip_active. Fill-jingle clip-off then
-    mix_routed while still prebuffering and muted slot 0. clip&&radio used
-    mute timeout so pcmrb filled. Timeout-0 on BYPASS base cuts audio
-    (ADF #1010). mix_restart() is not the fix (rebinds the same way and
-    cuts clips).
+    Slot 0 stayed on the mute rb because live downmix_set_input_rb does
+    not start draining a running BYPASS mixer. mix_restart() mute-then-run
+    then route is the same bind-after-start. Bind s_radio_pcm while the
+    mix pipe is stopped; pause upmix during fill instead of muting slot 0.
     """
     rp = (ROOT / "firmware/main/radio_player.c").read_text()
     sc = (ROOT / "firmware/main/serial_cmd.c").read_text()
@@ -299,10 +298,28 @@ def test_prebuf_release_binds_radio_under_clip() -> None:
     )
     assert "s_prebuffering = false" in release
     assert "mix_route_clip_and_radio()" in release
+    assert "radio_pcm_resume()" in release
     assert "if (!s_got_music_info || s_hold_radio)" in release
     assert "|| s_clip_active" not in release
     assert "mix_restart()" not in release
     assert "amp_apply_saved" in release
+
+    begin = _fn_until(
+        rp,
+        "static void radio_prebuffer_begin(const char *why)",
+        "static bool radio_prebuffer_release_if_ready(void)",
+    )
+    assert "radio_pcm_pause()" in begin
+    assert "mix_restart()" not in begin
+
+    rst = _fn_until(rp, "static void mix_restart(void)\n{",
+                    "static void mix_restart_if_needed(void)")
+    assert rst.index("mix_route_clip_and_radio()") < rst.index("audio_pipeline_run")
+    assert "mix_mute_slot(SB_SLOT_RADIO)" not in rst
+
+    gl = _fn_until(rp, "esp_err_t radio_player_go_live(void)",
+                   "esp_err_t radio_player_start(const char *url, int volume)")
+    assert gl.index("s_prefetching = false") < gl.index("mix_restart()")
 
     assert "mix_tune_static_s16le" in rp
     assert "s_tune_static = true" in rp
@@ -312,20 +329,21 @@ def test_prebuf_release_binds_radio_under_clip() -> None:
     both = route.split("if (clip && radio)")[1].split("if (clip)")[0]
     assert "SB_MIX_MUTE_TIMEOUT" in both
     assert "SB_MIX_RADIO_TIMEOUT" not in both
+    assert "slot0_radio" in route
+    assert "s_radio_pcm && !s_prefetching" in route
     idle = _fn_until(rp, "static void mix_set_idle_mode(void)",
                      "static void mix_route_clip_and_radio(void)\n{")
     assert "ESP_DOWNMIX_WORK_MODE_SWITCH_OFF" in idle
     assert "s_mix_clip_mode" in idle
     assert "s_mix_off_until_ms" in idle
     assert "SB_MIX_TRANSIT_MS" in idle
-    assert "now < s_mix_off_until_ms" in idle
-    # Clip-only → mute and radio-only share SWITCH_OFF-and-wait. Do not
-    # JUMP BYPASS on the mute rb or overwrite SWITCH_OFF on the 20 ms tick.
     assert "ESP_DOWNMIX_WORK_MODE_BYPASS" not in route
     assert "mix_set_idle_mode()" in route
     assert route.strip().endswith("mix_set_idle_mode();\n}")
     assert "#define SB_MIX_TRANSIT_MS 150" in rp
     assert "SB_STATIC_POP" not in rp
+    assert "audio_element_pause(s_radio_m2s)" in rp
+    assert "audio_element_resume(s_radio_m2s" in rp
 
     use_rb = _fn_until(rp, "static void mix_use_rb(int slot, ringbuf_handle_t rb, int timeout)",
                        "static void mix_mute_slot(int slot)")
@@ -339,7 +357,7 @@ def test_prebuf_release_binds_radio_under_clip() -> None:
     drop = loop.split('radio_prebuffer_begin("rb-drop")', 1)[1][:350]
     assert "mix_route_clip_and_radio()" in drop
     assert "mix_restart()" not in drop.split("s_rb_drop_band", 1)[0]
-    live = loop.split("Re-assert slot 0 while live", 1)[1][:500]
+    live = loop.split("Re-assert timeouts while live", 1)[1][:500]
     assert "mix_route_clip_and_radio()" in live
     assert "!s_clip_active" in live
     assert "mix_restart()" not in live
@@ -353,6 +371,8 @@ def test_prebuf_release_binds_radio_under_clip() -> None:
                      "bool radio_player_wifi_weak_holding(void)")
     assert "mix_route_clip_and_radio()" in hold
     assert "mix_restart()" not in hold
+    assert "radio_pcm_pause()" in hold
+    assert "radio_pcm_resume()" in hold
 
     snap = _fn_until(rp, "static void stream_snap(const char *why)",
                      "void radio_player_log_health(const char *why)")
@@ -360,6 +380,8 @@ def test_prebuf_release_binds_radio_under_clip() -> None:
     assert "peak=%d" in snap
     assert "s_pcm_peak_now" in snap
     assert "PCM_UPMIX_OUT_RB_SIZE" in snap
+    assert "slot0pcm=%d" in snap
+    assert "paused=%d" in snap
 
     assert "#define PCM_UPMIX_OUT_RB_SIZE (16 * 1024)" in uh
     assert "PCM_UPMIX_OUT_RB_SIZE" in uc
