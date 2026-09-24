@@ -95,6 +95,12 @@ def test_step_settles_both_ways() -> None:
     assert '"missed-down"' in VB
     assert '"fired-down"' in VB
     assert '"fired-up"' in VB
+    assert '"seed"' in VB
+    assert "#define SB_TOUCH_AUTO_SEED_N 3" in H
+    assert "touch_auto_same_image" in VB
+    assert "tsens_img" in ST
+    assert "esp_reset_reason" not in VB
+    assert "s_seed_n[idx] < SB_TOUCH_AUTO_SEED_N" in VB
     assert "now_ms() + 5000" not in VB
     assert "now_ms() + SB_TOUCH_AUTO_SETTLE_MS" in VB
     harness = r"""
@@ -205,6 +211,44 @@ int main(void)
     }
     if (touch_auto_step_fired(0.50f, 0.55f) > 0.50f + 0.0001f) {
         return fail("fired above ceil");
+    }
+    {
+        float one[1] = {0.42f};
+        float two[2] = {0.20f, 0.40f};
+        float three[3] = {0.20f, 0.40f, 0.30f};
+        float mid[3] = {0.50f, 0.10f, 0.12f};
+        uint8_t a[16];
+        uint8_t b[16];
+        int i;
+        if (!near(touch_auto_seed_sens(one, 1), 0.42f)) {
+            return fail("seed first");
+        }
+        if (!near(touch_auto_seed_sens(two, 2), 0.30f)) {
+            return fail("seed median 2");
+        }
+        if (!near(touch_auto_seed_sens(three, 3), 0.30f)) {
+            return fail("seed median 3");
+        }
+        if (!near(touch_auto_seed_sens(mid, 3), 0.12f)) {
+            return fail("seed middle");
+        }
+        if (touch_auto_seed_sens(one, 1) > 0.42f + 0.03f) {
+            return fail("seed is not a firm step");
+        }
+        for (i = 0; i < 16; i++) {
+            a[i] = (uint8_t)(i + 1);
+            b[i] = (uint8_t)(i + 1);
+        }
+        if (!touch_auto_same_image(a, 16, b, 16)) {
+            return fail("same image");
+        }
+        b[4] = 0;
+        if (touch_auto_same_image(a, 16, b, 16)) {
+            return fail("different image");
+        }
+        if (touch_auto_same_image(NULL, 16, b, 16)) {
+            return fail("missing image");
+        }
     }
     return 0;
 }

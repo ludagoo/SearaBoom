@@ -43,6 +43,10 @@
 #define SB_TOUCH_AUTO_STEP_UP 0.03f
 /* Do not firm unless the target is at least this far above live. */
 #define SB_TOUCH_AUTO_FIRM_GAP 0.02f
+/* First presses on a new image set the start; then the slow tune. */
+#define SB_TOUCH_AUTO_SEED_N 3
+/* ELF SHA-256 from esp_app_desc. Same image keeps the tune; a new binary reseeds. */
+#define SB_TOUCH_AUTO_IMAGE_LEN 16
 
 static inline float touch_auto_clamp_hard(float sens)
 {
@@ -98,6 +102,59 @@ static inline float touch_auto_idf_trip(float channel_sens)
 static inline float touch_auto_target(float peak)
 {
     return touch_auto_clamp_auto(peak * SB_TOUCH_AUTO_FRAC / SB_TOUCH_AUTO_IDF_DIV);
+}
+
+/* 1 if the stored image id is the running binary. A missing or different
+ * id is a new image. Reset reason is not an input. */
+static inline int touch_auto_same_image(const uint8_t *stored, int stored_len,
+                                        const uint8_t *running, int running_len)
+{
+    int i;
+
+    if (!stored || !running || stored_len != running_len || stored_len <= 0) {
+        return 0;
+    }
+    for (i = 0; i < stored_len; i++) {
+        if (stored[i] != running[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Starting sens from the first 1–3 targets on a pad. Not a 0.03/0.05 step.
+ * One sample is that target. Two samples average. Three samples take the middle. */
+static inline float touch_auto_seed_sens(const float *targets, int n)
+{
+    float a[SB_TOUCH_AUTO_SEED_N];
+    int i;
+    int j;
+
+    if (!targets || n <= 0) {
+        return SB_TOUCH_AUTO_FLOOR;
+    }
+    if (n > SB_TOUCH_AUTO_SEED_N) {
+        n = SB_TOUCH_AUTO_SEED_N;
+    }
+    for (i = 0; i < n; i++) {
+        a[i] = targets[i];
+    }
+    for (i = 1; i < n; i++) {
+        float x = a[i];
+        j = i;
+        while (j > 0 && a[j - 1] > x) {
+            a[j] = a[j - 1];
+            j--;
+        }
+        a[j] = x;
+    }
+    if (n == 1) {
+        return touch_auto_clamp_auto(a[0]);
+    }
+    if ((n & 1) == 0) {
+        return touch_auto_clamp_auto((a[n / 2 - 1] + a[n / 2]) * 0.5f);
+    }
+    return touch_auto_clamp_auto(a[n / 2]);
 }
 
 /* Button never fired. Step down toward the target, at most 0.05.

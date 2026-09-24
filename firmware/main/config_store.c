@@ -562,6 +562,151 @@ esp_err_t config_store_save_touch_sens_auto(float up, float dn, uint8_t first_ma
     return err;
 }
 
+bool config_store_load_touch_image(uint8_t *id, int len)
+{
+    nvs_handle_t h;
+    size_t got;
+
+    if (!id || len != SB_TOUCH_AUTO_IMAGE_LEN) {
+        return false;
+    }
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+        return false;
+    }
+    got = (size_t)len;
+    if (nvs_get_blob(h, "tsens_img", id, &got) != ESP_OK || got != (size_t)len) {
+        nvs_close(h);
+        return false;
+    }
+    nvs_close(h);
+    return true;
+}
+
+esp_err_t config_store_save_touch_image(const uint8_t *id, int len)
+{
+    nvs_handle_t h;
+    esp_err_t err;
+
+    if (!id || len != SB_TOUCH_AUTO_IMAGE_LEN) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_blob(h, "tsens_img", id, (size_t)len);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    return err;
+}
+
+bool config_store_load_touch_seed(float *up, int *n_up, float *dn, int *n_dn)
+{
+    nvs_handle_t h;
+    int16_t raw[2 + (SB_TOUCH_AUTO_SEED_N * 2)];
+    size_t got = sizeof(raw);
+    int i;
+    int nu;
+    int nd;
+
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+        return false;
+    }
+    if (nvs_get_blob(h, "tsens_seed", raw, &got) != ESP_OK || got != sizeof(raw)) {
+        nvs_close(h);
+        return false;
+    }
+    nvs_close(h);
+    nu = raw[0];
+    nd = raw[1];
+    if (nu < 0) {
+        nu = 0;
+    }
+    if (nd < 0) {
+        nd = 0;
+    }
+    if (nu > SB_TOUCH_AUTO_SEED_N) {
+        nu = SB_TOUCH_AUTO_SEED_N;
+    }
+    if (nd > SB_TOUCH_AUTO_SEED_N) {
+        nd = SB_TOUCH_AUTO_SEED_N;
+    }
+    if (n_up) {
+        *n_up = nu;
+    }
+    if (n_dn) {
+        *n_dn = nd;
+    }
+    for (i = 0; i < SB_TOUCH_AUTO_SEED_N; i++) {
+        if (up) {
+            up[i] = (float)raw[2 + i] / 1000.0f;
+        }
+        if (dn) {
+            dn[i] = (float)raw[2 + SB_TOUCH_AUTO_SEED_N + i] / 1000.0f;
+        }
+    }
+    return true;
+}
+
+esp_err_t config_store_save_touch_seed(const float *up, int n_up,
+                                      const float *dn, int n_dn)
+{
+    nvs_handle_t h;
+    int16_t raw[2 + (SB_TOUCH_AUTO_SEED_N * 2)];
+    esp_err_t err;
+    int i;
+
+    if (n_up < 0) {
+        n_up = 0;
+    }
+    if (n_dn < 0) {
+        n_dn = 0;
+    }
+    if (n_up > SB_TOUCH_AUTO_SEED_N) {
+        n_up = SB_TOUCH_AUTO_SEED_N;
+    }
+    if (n_dn > SB_TOUCH_AUTO_SEED_N) {
+        n_dn = SB_TOUCH_AUTO_SEED_N;
+    }
+    memset(raw, 0, sizeof(raw));
+    raw[0] = (int16_t)n_up;
+    raw[1] = (int16_t)n_dn;
+    for (i = 0; i < n_up; i++) {
+        float v = up ? up[i] : 0;
+        int milli = (int)(v * 1000.0f + 0.5f);
+        if (milli < 0) {
+            milli = 0;
+        }
+        if (milli > 500) {
+            milli = 500;
+        }
+        raw[2 + i] = (int16_t)milli;
+    }
+    for (i = 0; i < n_dn; i++) {
+        float v = dn ? dn[i] : 0;
+        int milli = (int)(v * 1000.0f + 0.5f);
+        if (milli < 0) {
+            milli = 0;
+        }
+        if (milli > 500) {
+            milli = 500;
+        }
+        raw[2 + SB_TOUCH_AUTO_SEED_N + i] = (int16_t)milli;
+    }
+    err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_blob(h, "tsens_seed", raw, sizeof(raw));
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    return err;
+}
+
 bool config_store_load_factory_touch_sens(float *up, float *dn)
 {
     nvs_handle_t h;
@@ -658,6 +803,8 @@ esp_err_t config_store_wipe_touch_if_usb_factory(void)
     (void)nvs_erase_key(h, "tsens_f_ok");
     (void)nvs_erase_key(h, "tsens_f_up");
     (void)nvs_erase_key(h, "tsens_f_dn");
+    (void)nvs_erase_key(h, "tsens_img");
+    (void)nvs_erase_key(h, "tsens_seed");
     err = nvs_commit(h);
     nvs_close(h);
     if (err != ESP_OK) {

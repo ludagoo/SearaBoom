@@ -7,6 +7,7 @@
 #include "led_status.h"
 #include "log_shipper.h"
 #include "sdkconfig.h"
+#include "esp_app_desc.h"
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "driver/touch_pad.h"
@@ -64,6 +65,8 @@ static int64_t s_settle_until_ms;
 static int64_t s_chatter_t0_ms;
 static int s_chatter_n;
 static bool s_learn_freeze;
+static int s_seed_n[2];
+static float s_seed_t[2][SB_TOUCH_AUTO_SEED_N];
 
 typedef struct {
     bool tracking;
@@ -270,6 +273,48 @@ static esp_err_t apply_sens(void)
     return err;
 }
 
+static void auto_load_image_seed(void)
+{
+    uint8_t running[SB_TOUCH_AUTO_IMAGE_LEN];
+    uint8_t stored[SB_TOUCH_AUTO_IMAGE_LEN];
+    const esp_app_desc_t *app = esp_app_get_description();
+    int n_up = 0;
+    int n_dn = 0;
+    bool same;
+
+    memcpy(running, app->app_elf_sha256, SB_TOUCH_AUTO_IMAGE_LEN);
+    same = config_store_load_touch_image(stored, SB_TOUCH_AUTO_IMAGE_LEN)
+           && touch_auto_same_image(stored, SB_TOUCH_AUTO_IMAGE_LEN,
+                                    running, SB_TOUCH_AUTO_IMAGE_LEN);
+    if (!same) {
+        /* New binary. Do not look at the reset reason. */
+        s_seed_n[0] = s_seed_n[1] = 0;
+        memset(s_seed_t, 0, sizeof(s_seed_t));
+        (void)config_store_save_touch_image(running, SB_TOUCH_AUTO_IMAGE_LEN);
+        (void)config_store_save_touch_seed(s_seed_t[0], 0, s_seed_t[1], 0);
+        ESP_LOGI(TAG, "touch auto new image, seed each pad");
+        return;
+    }
+    if (!config_store_load_touch_seed(s_seed_t[0], &n_up, s_seed_t[1], &n_dn)) {
+        n_up = n_dn = 0;
+    }
+    if (n_up < 0) {
+        n_up = 0;
+    }
+    if (n_dn < 0) {
+        n_dn = 0;
+    }
+    if (n_up > SB_TOUCH_AUTO_SEED_N) {
+        n_up = SB_TOUCH_AUTO_SEED_N;
+    }
+    if (n_dn > SB_TOUCH_AUTO_SEED_N) {
+        n_dn = SB_TOUCH_AUTO_SEED_N;
+    }
+    s_seed_n[0] = n_up;
+    s_seed_n[1] = n_dn;
+    ESP_LOGI(TAG, "touch auto same image seed=%d/%d", n_up, n_dn);
+}
+
 esp_err_t volume_buttons_init(volume_btn_cb_t cb, volume_gesture_cb_t gesture, void *ctx)
 {
     touch_elem_global_config_t global = TOUCH_ELEM_GLOBAL_DEFAULT_CONFIG();
@@ -322,6 +367,7 @@ esp_err_t volume_buttons_init(volume_btn_cb_t cb, volume_gesture_cb_t gesture, v
         s_rev = 0;
     }
     s_need_cal = false;
+    auto_load_image_seed();
     s_settle_until_ms = now_ms() + SB_TOUCH_AUTO_SETTLE_MS;
 
     err = make_button(board_hw_vol_up_gpio(), +1, s_sens_up, &s_btn[0]);
@@ -457,6 +503,33 @@ static void auto_learn_peak(int idx, float peak, int fired)
     auto_queue(idx, next, why);
 }
 
+static void auto_seed_one(int idx, float peak)
+{
+    float next;
+
+    if (s_seed_n[idx] >= SB_TOUCH_AUTO_SEED_N) {
+        return;
+    }
+    s_seed_t[idx][s_seed_n[idx]++] = touch_auto_target(peak);
+    next = touch_auto_seed_sens(s_seed_t[idx], s_seed_n[idx]);
+    (void)config_store_save_touch_seed(s_seed_t[0], s_seed_n[0],
+                                      s_seed_t[1], s_seed_n[1]);
+    auto_queue(idx, next, "seed");
+}
+
+/* Seed presses ignore the 30 s settle. Slow tune still waits. */
+static void auto_accept(int idx, float peak, int64_t t, int fired)
+{
+    if (s_seed_n[idx] < SB_TOUCH_AUTO_SEED_N) {
+        auto_seed_one(idx, peak);
+        return;
+    }
+    if (t < s_settle_until_ms) {
+        return;
+    }
+    auto_learn_peak(idx, peak, fired);
+}
+
 static void auto_on_press(int idx)
 {
     int64_t t = now_ms();
@@ -516,7 +589,7 @@ static void auto_on_release(int idx)
              s_first_n[idx], SB_TOUCH_AUTO_FIRST_N, (int)s_first_done[idx],
              (int)tainted, (int)clean, (int)graze);
 
-    if (s_calibrating || s_learn_freeze || t < s_settle_until_ms) {
+    if (s_calibrating || s_learn_freeze) {
         return;
     }
     if (tainted || !(peak > SB_TOUCH_CAL_FAIL) || peak > SB_TOUCH_AUTO_PEAK_WET) {
@@ -527,8 +600,8 @@ static void auto_on_release(int idx)
         return;
     }
     /* Chatter freeze already returned above. It stops learning; it does
-     * not firm the pad. */
-    auto_learn_peak(idx, peak, 1);
+     * not firm the pad. Seed ignores boot settle; tune does not. */
+    auto_accept(idx, peak, t, 1);
 }
 
 static void auto_disarm_watch(void)
@@ -564,7 +637,7 @@ static void auto_finish_missed(int idx, int64_t t)
     if (!(peak > SB_TOUCH_CAL_FAIL) || peak > SB_TOUCH_AUTO_PEAK_WET) {
         return;
     }
-    if (s_calibrating || t < s_settle_until_ms) {
+    if (s_calibrating) {
         return;
     }
     /* Same pocket/chatter guard as a fired press. Crossing 20 events in
@@ -573,7 +646,7 @@ static void auto_finish_missed(int idx, int64_t t)
     if (s_learn_freeze) {
         return;
     }
-    auto_learn_peak(idx, peak, 0);
+    auto_accept(idx, peak, t, 0);
 }
 
 static void auto_watch_pad(int idx, int64_t t)
