@@ -37,6 +37,10 @@
 #define SB_TOUCH_AUTO_GRAZE_OVER 1.3f
 #define SB_TOUCH_AUTO_CHATTER_N 20
 #define SB_TOUCH_AUTO_CHATTER_MS 30000
+/* One softer step, absolute. Two weak bumps: 0.250 → 0.200 → 0.150. */
+#define SB_TOUCH_AUTO_STEP_MAX 0.05f
+/* Desired IDF trip sits this far under the measured peak. */
+#define SB_TOUCH_AUTO_TRIP_UNDER 0.02f
 
 static inline float touch_auto_clamp_hard(float sens)
 {
@@ -85,6 +89,44 @@ static inline float touch_auto_refine_factory(float factory, float proposed)
 static inline float touch_auto_idf_trip(float channel_sens)
 {
     return channel_sens * SB_TOUCH_AUTO_IDF_DIV;
+}
+
+/* Next channel_sens, down only, toward a trip just under `peak`.
+ * One call moves at most SB_TOUCH_AUTO_STEP_MAX. Never raises.
+ * Floor 0.15 / ceil 0.50. Factory ±20% is not applied, so that window
+ * cannot block a downward step and a low factory snapshot cannot pull
+ * below the floor. */
+static inline float touch_auto_step_softer(float live, float peak)
+{
+    float trip;
+    float target;
+    float next;
+
+    trip = peak - SB_TOUCH_AUTO_TRIP_UNDER;
+    if (trip < 0.0f) {
+        trip = 0.0f;
+    }
+    target = trip / SB_TOUCH_AUTO_IDF_DIV;
+    if (target < SB_TOUCH_AUTO_FLOOR) {
+        target = SB_TOUCH_AUTO_FLOOR;
+    }
+    if (target > SB_TOUCH_AUTO_CEIL) {
+        target = SB_TOUCH_AUTO_CEIL;
+    }
+    if (!(target < live)) {
+        return live;
+    }
+    next = live - SB_TOUCH_AUTO_STEP_MAX;
+    if (next < target) {
+        next = target;
+    }
+    if (next < SB_TOUCH_AUTO_FLOOR) {
+        next = SB_TOUCH_AUTO_FLOOR;
+    }
+    if (!(next < live)) {
+        return live;
+    }
+    return next;
 }
 
 static inline int touch_auto_is_graze(int hold_ms, float peak, float live_sens)
