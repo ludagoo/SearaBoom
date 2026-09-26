@@ -18,11 +18,15 @@
 #include "esp_heap_caps.h"
 #include "esp_attr.h"
 #include "log_shipper.h"
+#include "log_panic.h"
 #include "config_store.h"
 #include "listen_stats.h"
 #include "ota_update.h"
 #include "searaboom.h"
 #include "sdkconfig.h"
+#include "esp_memory_utils.h"
+#include "esp_private/panic_internal.h"
+#include "esp_private/system_internal.h"
 
 static const char *TAG = "log_shipper";
 
@@ -78,6 +82,10 @@ RTC_NOINIT_ATTR static uint32_t s_crash_magic;
 RTC_NOINIT_ATTR static uint32_t s_crash_count;
 RTC_NOINIT_ATTR static uint32_t s_seq_magic;
 RTC_NOINIT_ATTR static uint32_t s_seq_rtc;
+RTC_NOINIT_ATTR static log_panic_dump_t s_panic_dump;
+static bool s_panic_hold;
+static bool s_pending_panic;
+static int64_t s_boot_ms;
 
 static const char *reset_token(void)
 {
@@ -135,13 +143,149 @@ static void crash_boot(void)
         s_seq_magic = LOG_CRASH_MAGIC;
         s_seq_rtc = 0;
     }
-    if (reset_is_crash(r)) {
-        s_crash_count++;
-    } else if (r == ESP_RST_POWERON || r == ESP_RST_EXT) {
+    if (r == ESP_RST_POWERON || r == ESP_RST_EXT) {
         s_crash_count = 0;
         s_seq_rtc = 0;
+        s_panic_dump.magic = 0;
+    } else if (reset_is_crash(r)) {
+        s_crash_count++;
     }
     s_seq = s_seq_rtc;
+    s_panic_hold = reset_is_crash(r) || log_panic_valid(&s_panic_dump);
+}
+
+static void IRAM_ATTR panic_copy_str(char *dst, size_t cap, const char *src)
+{
+    size_t i = 0;
+    if (!dst || cap == 0) {
+        return;
+    }
+    if (src) {
+        while (i + 1 < cap) {
+            char c = src[i];
+            if (c == 0 || c == '\n' || c == '\r') {
+                break;
+            }
+            dst[i] = c;
+            i++;
+        }
+    }
+    dst[i] = 0;
+}
+
+static uint32_t IRAM_ATTR panic_code_pc(uint32_t pc)
+{
+#if CONFIG_IDF_TARGET_ARCH_XTENSA
+    if (pc & 0x80000000u) {
+        pc = (pc & 0x3fffffffu) | 0x40000000u;
+    }
+    /* Same as IDF Backtrace: window fixup and -3 to the call site. */
+    if (pc >= 3) {
+        pc -= 3;
+    }
+#endif
+    return pc;
+}
+
+static void IRAM_ATTR panic_store_frame(uint32_t pc, uint32_t sp)
+{
+    uint8_t n = s_panic_dump.nframes;
+    if (n >= LOG_PANIC_FRAMES) {
+        return;
+    }
+    s_panic_dump.frames[n] = pc;
+    s_panic_dump.sps[n] = sp;
+    s_panic_dump.nframes = (uint8_t)(n + 1);
+}
+
+static void IRAM_ATTR panic_walk(const void *frame)
+{
+#if CONFIG_IDF_TARGET_ARCH_XTENSA
+    if (!frame) {
+        return;
+    }
+    const struct {
+        long exit;
+        long pc;
+        long ps;
+        long a0;
+        long a1;
+    } *f = frame;
+    uint32_t pc = (uint32_t)f->pc;
+    uint32_t sp = (uint32_t)f->a1;
+    uint32_t next_pc = (uint32_t)f->a0;
+    while (s_panic_dump.nframes < LOG_PANIC_FRAMES) {
+        uint32_t npc = panic_code_pc(pc);
+        if (!esp_ptr_executable((const void *)npc)) {
+            break;
+        }
+        panic_store_frame(npc, sp);
+        if (s_panic_dump.nframes > 1) {
+            uint8_t i = s_panic_dump.nframes - 1;
+            if (s_panic_dump.frames[i] == s_panic_dump.frames[i - 1]
+                && s_panic_dump.sps[i] == s_panic_dump.sps[i - 1]) {
+                s_panic_dump.nframes = i;
+                break;
+            }
+        }
+        if (!esp_stack_ptr_is_sane(sp)) {
+            break;
+        }
+        const uint32_t *p = (const uint32_t *)sp;
+        pc = next_pc;
+        next_pc = p[-4];
+        sp = p[-3];
+    }
+#else
+    (void)frame;
+#endif
+}
+
+void __real_esp_panic_handler(panic_info_t *info);
+
+void IRAM_ATTR __wrap_esp_panic_handler(panic_info_t *info)
+{
+    static bool s_saving;
+    if (s_saving) {
+        __real_esp_panic_handler(info);
+        return;
+    }
+    s_saving = true;
+
+    s_panic_dump.pc = info ? (uint32_t)info->addr : 0;
+    s_panic_dump.core = info ? (uint8_t)info->core : 0;
+    s_panic_dump.nframes = 0;
+    if (g_panic_abort && g_panic_abort_details && g_panic_abort_details[0]) {
+        panic_copy_str(s_panic_dump.reason, sizeof(s_panic_dump.reason),
+                       g_panic_abort_details);
+    } else if (g_panic_abort) {
+        if (esp_reset_reason_get_hint() == ESP_RST_TASK_WDT) {
+            panic_copy_str(s_panic_dump.reason, sizeof(s_panic_dump.reason),
+                           "task_wdt");
+        } else {
+            panic_copy_str(s_panic_dump.reason, sizeof(s_panic_dump.reason),
+                           "abort");
+        }
+    } else if (info && info->reason) {
+        panic_copy_str(s_panic_dump.reason, sizeof(s_panic_dump.reason),
+                       info->reason);
+    } else {
+        panic_copy_str(s_panic_dump.reason, sizeof(s_panic_dump.reason), "panic");
+    }
+    s_panic_dump.reason[LOG_PANIC_REASON - 1] = 0;
+    s_panic_dump.magic = LOG_PANIC_MAGIC;
+
+    if (info && info->frame) {
+        panic_walk(info->frame);
+    }
+    if (s_panic_dump.nframes == 0 && s_panic_dump.pc) {
+        uint32_t pc = panic_code_pc(s_panic_dump.pc);
+        if (esp_ptr_executable((const void *)pc)) {
+            panic_store_frame(pc, 0);
+        }
+    }
+
+    __real_esp_panic_handler(info);
 }
 
 uint32_t log_shipper_crash_count(void)
@@ -642,11 +786,36 @@ static void put_back_ring_chunk(void)
     xSemaphoreGive(s_mu);
 }
 
+static bool take_panic_chunk(void)
+{
+    if (!s_panic_hold) {
+        return false;
+    }
+    size_t n = log_panic_format(s_chunk, sizeof(s_chunk) - 1,
+                                s_boot_ms,
+                                s_fw, s_reset,
+                                (unsigned)s_crash_count, (unsigned)s_seq,
+                                &s_panic_dump);
+    if (n == 0) {
+        return false;
+    }
+    s_chunk[n] = 0;
+    s_pending_len = n;
+    s_pending_flash = false;
+    s_pending_spill = false;
+    s_pending_panic = true;
+    return true;
+}
+
 static bool prepare_chunk(void)
 {
     s_pending_len = 0;
     s_pending_flash = false;
     s_pending_spill = false;
+    s_pending_panic = false;
+    if (take_panic_chunk()) {
+        return true;
+    }
     if (take_spill_chunk()) {
         return true;
     }
@@ -661,7 +830,11 @@ static void consume_chunk(void)
     if (s_pending_len == 0) {
         return;
     }
-    if (s_pending_flash) {
+    if (s_pending_panic) {
+        s_panic_dump.magic = 0;
+        s_panic_hold = false;
+        s_pending_panic = false;
+    } else if (s_pending_flash) {
         s_flash_rd += s_pending_len;
         if (s_flash_rd >= s_flash_size) {
             unlink(LOGQ_PATH);
@@ -677,6 +850,11 @@ static void consume_chunk(void)
 static void revert_chunk(void)
 {
     if (s_pending_len == 0) {
+        return;
+    }
+    if (s_pending_panic) {
+        s_pending_panic = false;
+        s_pending_len = 0;
         return;
     }
     if (s_pending_spill) {
@@ -893,6 +1071,7 @@ static void shipper_task(void *arg)
             s_pending_len = 0;
             s_pending_flash = false;
             s_pending_spill = false;
+            s_pending_panic = false;
             if (ship_chunk()) {
                 sent = 1;
             } else {
@@ -955,9 +1134,21 @@ esp_err_t log_shipper_init(void)
     s_prev_vprintf = esp_log_set_vprintf(shipper_vprintf);
     s_paused = false;
     s_inited = true;
+    s_boot_ms = esp_timer_get_time() / 1000;
 
-    ESP_LOGI(TAG, "boot fw=%s reset=%s crashes=%u seq=%u", s_fw, s_reset,
-             (unsigned)s_crash_count, (unsigned)s_seq);
+    if (s_panic_hold) {
+        s_flush_req = true;
+        size_t n = log_panic_format(s_chunk, sizeof(s_chunk) - 1, s_boot_ms, s_fw, s_reset,
+                                    (unsigned)s_crash_count, (unsigned)s_seq,
+                                    log_panic_valid(&s_panic_dump) ? &s_panic_dump : NULL);
+        if (n > 0) {
+            s_chunk[n] = 0;
+            log_shipper_printf("%s", s_chunk);
+        }
+    } else {
+        ESP_LOGI(TAG, "boot fw=%s reset=%s crashes=%u seq=%u", s_fw, s_reset,
+                 (unsigned)s_crash_count, (unsigned)s_seq);
+    }
     ESP_LOGI(TAG, "PSRAM log buf ring=%u chunk=%u payload=%u spill=%u",
              (unsigned)sizeof(s_ring), (unsigned)sizeof(s_chunk),
              (unsigned)sizeof(s_payload), (unsigned)sizeof(s_spill));
