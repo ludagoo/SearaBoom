@@ -40,12 +40,9 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 # http/aac/clip tasks fail to start and the box is silent.
 file(READ "$ENV{IDF_PATH}/components/freertos/esp_additions/include/freertos/idf_additions.h" _idf_additions)
 if(NOT _idf_additions MATCHES "xTaskCreateRestrictedPinnedToCore")
-        message(FATAL_ERROR
+    message(FATAL_ERROR
         "IDF is missing xTaskCreateRestrictedPinnedToCore. From IDF_PATH run:\n"
         "  git apply $ENV{ADF_PATH}/idf_patches/idf_v5.3_freertos.patch")
 endif()
-
-# Capture Guru/backtrace in RTC before the stock handler reboots.
-idf_build_set_property(LINK_OPTIONS "-Wl,--wrap=esp_panic_handler" APPEND)
 
 project(searaboom)

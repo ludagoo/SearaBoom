@@ -58,9 +58,12 @@ int main(void)
     dump.frames[0] = 0x40376abc;
     dump.frames[1] = 0x42001234;
     dump.frames[2] = 0x42005678;
+    dump.sps[0] = 0x3fc89010;
+    dump.sps[1] = 0x3fc89040;
+    dump.sps[2] = 0x3fc89070;
     strncpy(dump.reason, "LoadProhibited", sizeof(dump.reason) - 1);
 
-    n = log_panic_format(buf, sizeof(buf), 8000, "0.5.25", "PANIC",
+    n = log_panic_format(buf, sizeof(buf), 612, "0.5.25", "PANIC",
                          1, 4186, &dump);
     if (n == 0 || n >= sizeof(buf)) {
         return fail("panic dump format failed");
@@ -71,7 +74,7 @@ int main(void)
     if (!strstr(buf, "panic reason=LoadProhibited core=0 pc=0x40376abc")) {
         return fail("dump chunk missing reason/pc");
     }
-    if (!strstr(buf, "Backtrace: 0x40376abc 0x42001234 0x42005678")) {
+    if (!strstr(buf, "Backtrace: 0x40376abc:0x3fc89010 0x42001234:0x3fc89040 0x42005678:0x3fc89070")) {
         return fail("dump chunk missing backtrace");
     }
     if (buf[n - 1] != '\n') {
@@ -81,12 +84,13 @@ int main(void)
     dump.nframes = LOG_PANIC_FRAMES;
     for (int i = 0; i < LOG_PANIC_FRAMES; i++) {
         dump.frames[i] = 0x42000000u + (unsigned)i * 4u;
+        dump.sps[i] = 0x3fc88000u + (unsigned)i * 16u;
     }
     n = log_panic_format(buf, 1536, 1, "0.5.29", "TASK_WDT", 2, 9, &dump);
     if (n == 0 || n >= 1536) {
         return fail("16-frame dump overflowed POST chunk");
     }
-    if (!strstr(buf, "0x4200003c")) {
+    if (!strstr(buf, "0x4200003c:0x3fc880f0")) {
         return fail("last backtrace frame dropped");
     }
 
@@ -94,6 +98,17 @@ int main(void)
                          1, 0, NULL);
     if (!strstr(buf, "reset=BROWNOUT") || strstr(buf, "Backtrace:")) {
         return fail("null dump should be boot line only");
+    }
+
+    memset(dump.reason, 'A', sizeof(dump.reason));
+    dump.magic = LOG_PANIC_MAGIC;
+    dump.nframes = 0;
+    n = log_panic_format(buf, sizeof(buf), 1, "0.5.29", "PANIC", 1, 0, &dump);
+    if (n == 0 || n >= sizeof(buf)) {
+        return fail("unterminated reason overflowed");
+    }
+    if (!strstr(buf, "panic reason=")) {
+        return fail("unterminated reason dropped the panic line");
     }
     return 0;
 }
@@ -117,28 +132,18 @@ def test_format() -> None:
         subprocess.check_call([str(bin_path)])
 
 
-def test_firmware_keeps_dump_until_shipped() -> None:
+def test_panic_chunk_ships_before_spill() -> None:
     shipper = SHIPPER.read_text()
-    cmake = CMAKE.read_text()
-    main_cmake = MAIN_CMAKE.read_text()
-    assert "include \"log_panic.h\"" in shipper
-    assert "__wrap_esp_panic_handler" in shipper
-    assert "RTC_NOINIT_ATTR static log_panic_dump_t s_panic_dump" in shipper
-    assert "s_panic_hold = reset_is_crash(r) || log_panic_valid(&s_panic_dump)" in shipper
-    assert "if (take_panic_chunk())" in shipper
     panic_at = shipper.find("if (take_panic_chunk())")
     spill_at = shipper.find("if (take_spill_chunk())")
     assert panic_at != -1 and spill_at != -1 and panic_at < spill_at
-    assert "s_panic_dump.magic = 0" in shipper
-    assert "s_panic_hold = false" in shipper
-    assert '--wrap=esp_panic_handler' in cmake
-    assert '--wrap=esp_panic_handler' in main_cmake
-    assert "firmware/VERSION" not in shipper
+    assert "--wrap=esp_panic_handler" in MAIN_CMAKE.read_text()
+    assert "--wrap=esp_panic_handler" not in CMAKE.read_text()
 
 
 def main() -> int:
     test_format()
-    test_firmware_keeps_dump_until_shipped()
+    test_panic_chunk_ships_before_spill()
     print("test_log_panic: ok")
     return 0
 

@@ -12,6 +12,8 @@
  * in PSRAM, so it dies on reboot and the post-crash boot line can wrap
  * before the first successful POST. Keep reason + backtrace in RTC
  * (survives PANIC/WDT, not power-on) and ship it first on the next boot.
+ *
+ * A crash-loop overwrites the snapshot; only the last panic is kept.
  */
 
 #define LOG_PANIC_MAGIC 0xA5B00C02u
@@ -22,6 +24,7 @@ typedef struct {
     uint32_t magic;
     uint32_t pc;
     uint32_t frames[LOG_PANIC_FRAMES];
+    uint32_t sps[LOG_PANIC_FRAMES];
     uint8_t nframes;
     uint8_t core;
     char reason[LOG_PANIC_REASON];
@@ -63,11 +66,14 @@ static inline size_t log_panic_format(char *out, size_t cap,
         return used;
     }
 
-    const char *reason = dump->reason[0] ? dump->reason : "panic";
+    char reason[LOG_PANIC_REASON];
+    memcpy(reason, dump->reason, LOG_PANIC_REASON);
+    reason[LOG_PANIC_REASON - 1] = 0;
+    const char *r = reason[0] ? reason : "panic";
     n = snprintf(out + used, cap - used,
                  "W (%lld) log_shipper: panic reason=%s core=%u pc=0x%08x\n"
                  "W (%lld) log_shipper: Backtrace:",
-                 ms, reason, (unsigned)dump->core, (unsigned)dump->pc, ms);
+                 ms, r, (unsigned)dump->core, (unsigned)dump->pc, ms);
     if (n < 0) {
         out[used] = 0;
         return used;
@@ -83,8 +89,8 @@ static inline size_t log_panic_format(char *out, size_t cap,
         nf = LOG_PANIC_FRAMES;
     }
     for (uint8_t i = 0; i < nf; i++) {
-        n = snprintf(out + used, cap - used, " 0x%08x",
-                     (unsigned)dump->frames[i]);
+        n = snprintf(out + used, cap - used, " 0x%08x:0x%08x",
+                     (unsigned)dump->frames[i], (unsigned)dump->sps[i]);
         if (n < 0 || (size_t)n >= cap - used) {
             out[cap - 1] = 0;
             return cap - 1;

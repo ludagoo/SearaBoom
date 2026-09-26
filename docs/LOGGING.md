@@ -209,6 +209,7 @@ Each POST still opens HTTPS (no keepalive required). Same URL `CONFIG_SEARABOOM_
 - `rssi`: `esp_wifi_sta_get_ap_info` if STA up, else omit/0.
 - `station`: from config_store if cheap; otherwise omit rather than coupling tightly. A weak read of current url_key is fine (include config_store.h).
 - First boot line after hook: `log_shipper boot fw=... reset=...`.
+- Crash reset: that boot line plus `panic reason=` / `Backtrace:` is a sticky first POST from RTC (console-only at init, not also in the RAM ring). Hold until 2xx. Power-on boots still go through the ring as before.
 
 ### API additions (`log_shipper.h`)
 
