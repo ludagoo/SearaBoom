@@ -18,11 +18,13 @@
 #include "esp_heap_caps.h"
 #include "esp_attr.h"
 #include "log_shipper.h"
+#include "log_panic.h"
 #include "config_store.h"
 #include "listen_stats.h"
 #include "ota_update.h"
 #include "searaboom.h"
 #include "sdkconfig.h"
+#include "esp_private/panic_internal.h"
 
 static const char *TAG = "log_shipper";
 
@@ -78,6 +80,9 @@ RTC_NOINIT_ATTR static uint32_t s_crash_magic;
 RTC_NOINIT_ATTR static uint32_t s_crash_count;
 RTC_NOINIT_ATTR static uint32_t s_seq_magic;
 RTC_NOINIT_ATTR static uint32_t s_seq_rtc;
+RTC_NOINIT_ATTR static log_panic_dump_t s_panic_dump;
+static bool s_panic_hold;
+static bool s_pending_panic;
 
 static const char *reset_token(void)
 {
@@ -135,13 +140,160 @@ static void crash_boot(void)
         s_seq_magic = LOG_CRASH_MAGIC;
         s_seq_rtc = 0;
     }
-    if (reset_is_crash(r)) {
-        s_crash_count++;
-    } else if (r == ESP_RST_POWERON || r == ESP_RST_EXT) {
+    if (r == ESP_RST_POWERON || r == ESP_RST_EXT) {
         s_crash_count = 0;
         s_seq_rtc = 0;
+        s_panic_dump.magic = 0;
+    } else if (reset_is_crash(r)) {
+        s_crash_count++;
     }
     s_seq = s_seq_rtc;
+    s_panic_hold = reset_is_crash(r) || log_panic_valid(&s_panic_dump);
+}
+
+static void IRAM_ATTR panic_copy_str(char *dst, size_t cap, const char *src)
+{
+    size_t i = 0;
+    if (!dst || cap == 0) {
+        return;
+    }
+    if (src) {
+        while (i + 1 < cap) {
+            char c = src[i];
+            if (c == 0 || c == '\n' || c == '\r') {
+                break;
+            }
+            dst[i] = c;
+            i++;
+        }
+    }
+    dst[i] = 0;
+}
+
+static uint32_t IRAM_ATTR panic_code_pc(uint32_t pc)
+{
+#if CONFIG_IDF_TARGET_ARCH_XTENSA
+    if (pc & 0x80000000u) {
+        pc = (pc & 0x3fffffffu) | 0x40000000u;
+    }
+#endif
+    if (pc < 0x40000000u || pc > 0x50000000u) {
+        return 0;
+    }
+    return pc;
+}
+
+static bool IRAM_ATTR panic_sp_ok(uint32_t sp)
+{
+    if ((sp & 0xfu) != 0 || sp < 16) {
+        return false;
+    }
+    /* S3 DRAM. Stacks may also sit in PSRAM. */
+    if (sp >= 0x3FC80000u && sp <= 0x3FD00000u) {
+        return true;
+    }
+    if (sp >= 0x3C000000u && sp <= 0x3E000000u) {
+        return true;
+    }
+    return false;
+}
+
+static uint8_t IRAM_ATTR panic_walk(const void *frame, uint32_t *out, uint8_t max)
+{
+#if CONFIG_IDF_TARGET_ARCH_XTENSA
+    if (!frame || !out || max == 0) {
+        return 0;
+    }
+    const struct {
+        long exit;
+        long pc;
+        long ps;
+        long a0;
+        long a1;
+    } *f = frame;
+    uint32_t pc = panic_code_pc((uint32_t)f->pc);
+    uint32_t sp = (uint32_t)f->a1;
+    uint32_t next_pc = (uint32_t)f->a0;
+    uint8_t n = 0;
+    if (pc) {
+        out[n++] = pc;
+    }
+    while (n < max) {
+        uint32_t npc = panic_code_pc(next_pc);
+        if (!npc) {
+            break;
+        }
+        if (n > 0 && npc == out[n - 1]) {
+            break;
+        }
+        out[n++] = npc;
+        if (!panic_sp_ok(sp)) {
+            break;
+        }
+        const uint32_t *p = (const uint32_t *)sp;
+        next_pc = p[-4];
+        sp = p[-3];
+    }
+    return n;
+#else
+    (void)frame;
+    (void)out;
+    (void)max;
+    return 0;
+#endif
+}
+
+void __real_esp_panic_handler(panic_info_t *info);
+
+void IRAM_ATTR __wrap_esp_panic_handler(panic_info_t *info)
+{
+    static bool s_saving;
+    static log_panic_dump_t s_scratch;
+    if (s_saving) {
+        __real_esp_panic_handler(info);
+        return;
+    }
+    s_saving = true;
+
+    uint8_t *raw = (uint8_t *)&s_scratch;
+    for (size_t i = 0; i < sizeof(s_scratch); i++) {
+        raw[i] = 0;
+    }
+    if (info) {
+        s_scratch.pc = (uint32_t)info->addr;
+        s_scratch.core = (uint8_t)info->core;
+        if (g_panic_abort && g_panic_abort_details && g_panic_abort_details[0]) {
+            panic_copy_str(s_scratch.reason, sizeof(s_scratch.reason),
+                           g_panic_abort_details);
+        } else if (info->reason) {
+            panic_copy_str(s_scratch.reason, sizeof(s_scratch.reason),
+                           info->reason);
+        } else {
+            panic_copy_str(s_scratch.reason, sizeof(s_scratch.reason), "panic");
+        }
+        if (info->frame) {
+            s_scratch.nframes = panic_walk(info->frame, s_scratch.frames,
+                                           LOG_PANIC_FRAMES);
+        }
+    } else {
+        panic_copy_str(s_scratch.reason, sizeof(s_scratch.reason), "panic");
+    }
+    if (s_scratch.nframes == 0 && s_scratch.pc) {
+        uint32_t pc = panic_code_pc(s_scratch.pc);
+        if (pc) {
+            s_scratch.frames[0] = pc;
+            s_scratch.nframes = 1;
+        }
+    }
+
+    uint8_t *dst = (uint8_t *)&s_panic_dump;
+    s_panic_dump.magic = 0;
+    for (size_t i = 0; i < sizeof(s_scratch); i++) {
+        dst[i] = raw[i];
+    }
+    s_panic_dump.magic = LOG_PANIC_MAGIC;
+
+    __real_esp_panic_handler(info);
 }
 
 uint32_t log_shipper_crash_count(void)
@@ -642,11 +794,36 @@ static void put_back_ring_chunk(void)
     xSemaphoreGive(s_mu);
 }
 
+static bool take_panic_chunk(void)
+{
+    if (!s_panic_hold) {
+        return false;
+    }
+    size_t n = log_panic_format(s_chunk, sizeof(s_chunk) - 1,
+                                esp_timer_get_time() / 1000,
+                                s_fw, s_reset,
+                                (unsigned)s_crash_count, (unsigned)s_seq,
+                                &s_panic_dump);
+    if (n == 0) {
+        return false;
+    }
+    s_chunk[n] = 0;
+    s_pending_len = n;
+    s_pending_flash = false;
+    s_pending_spill = false;
+    s_pending_panic = true;
+    return true;
+}
+
 static bool prepare_chunk(void)
 {
     s_pending_len = 0;
     s_pending_flash = false;
     s_pending_spill = false;
+    s_pending_panic = false;
+    if (take_panic_chunk()) {
+        return true;
+    }
     if (take_spill_chunk()) {
         return true;
     }
@@ -661,7 +838,11 @@ static void consume_chunk(void)
     if (s_pending_len == 0) {
         return;
     }
-    if (s_pending_flash) {
+    if (s_pending_panic) {
+        s_panic_dump.magic = 0;
+        s_panic_hold = false;
+        s_pending_panic = false;
+    } else if (s_pending_flash) {
         s_flash_rd += s_pending_len;
         if (s_flash_rd >= s_flash_size) {
             unlink(LOGQ_PATH);
@@ -677,6 +858,11 @@ static void consume_chunk(void)
 static void revert_chunk(void)
 {
     if (s_pending_len == 0) {
+        return;
+    }
+    if (s_pending_panic) {
+        s_pending_panic = false;
+        s_pending_len = 0;
         return;
     }
     if (s_pending_spill) {
@@ -893,6 +1079,7 @@ static void shipper_task(void *arg)
             s_pending_len = 0;
             s_pending_flash = false;
             s_pending_spill = false;
+            s_pending_panic = false;
             if (ship_chunk()) {
                 sent = 1;
             } else {
@@ -958,6 +1145,30 @@ esp_err_t log_shipper_init(void)
 
     ESP_LOGI(TAG, "boot fw=%s reset=%s crashes=%u seq=%u", s_fw, s_reset,
              (unsigned)s_crash_count, (unsigned)s_seq);
+    if (s_panic_hold) {
+        s_flush_req = true;
+        if (log_panic_valid(&s_panic_dump)) {
+            ESP_LOGW(TAG, "panic reason=%s core=%u pc=0x%08x",
+                     s_panic_dump.reason[0] ? s_panic_dump.reason : "panic",
+                     (unsigned)s_panic_dump.core, (unsigned)s_panic_dump.pc);
+            char bt[192];
+            size_t used = 0;
+            uint8_t nf = s_panic_dump.nframes;
+            if (nf > LOG_PANIC_FRAMES) {
+                nf = LOG_PANIC_FRAMES;
+            }
+            bt[0] = 0;
+            for (uint8_t i = 0; i < nf && used + 12 < sizeof(bt); i++) {
+                int w = snprintf(bt + used, sizeof(bt) - used, " 0x%08x",
+                                 (unsigned)s_panic_dump.frames[i]);
+                if (w < 0 || (size_t)w >= sizeof(bt) - used) {
+                    break;
+                }
+                used += (size_t)w;
+            }
+            ESP_LOGW(TAG, "Backtrace:%s", bt);
+        }
+    }
     ESP_LOGI(TAG, "PSRAM log buf ring=%u chunk=%u payload=%u spill=%u",
              (unsigned)sizeof(s_ring), (unsigned)sizeof(s_chunk),
              (unsigned)sizeof(s_payload), (unsigned)sizeof(s_spill));

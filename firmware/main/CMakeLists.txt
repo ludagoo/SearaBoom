@@ -55,4 +55,6 @@ idf_component_register(
         "../clips/tune_fill.aac"
 )
 
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=esp_panic_handler")
+
 spiffs_create_partition_image(storage ../spiffs_image FLASH_IN_PROJECT)
