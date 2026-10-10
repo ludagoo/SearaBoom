@@ -485,41 +485,54 @@ static void spill_ring_to_flash(void)
 
 static bool peek_flash_chunk(void)
 {
-    if (flash_unread() == 0) {
-        return false;
-    }
-    FILE *f = fopen(LOGQ_PATH, "rb");
-    if (!f) {
-        flash_refresh_size();
-        return false;
-    }
-    if (fseek(f, (long)s_flash_rd, SEEK_SET) != 0) {
+    for (;;) {
+        if (flash_unread() == 0) {
+            if (s_flash_size > 0) {
+                unlink(LOGQ_PATH);
+                s_flash_rd = 0;
+                s_flash_size = 0;
+            }
+            return false;
+        }
+        FILE *f = fopen(LOGQ_PATH, "rb");
+        if (!f) {
+            flash_refresh_size();
+            return false;
+        }
+        if (fseek(f, (long)s_flash_rd, SEEK_SET) != 0) {
+            fclose(f);
+            return false;
+        }
+        size_t n = fread(s_chunk, 1, sizeof(s_chunk) - 1, f);
         fclose(f);
-        return false;
-    }
-    size_t n = fread(s_chunk, 1, sizeof(s_chunk) - 1, f);
-    fclose(f);
-    if (n == 0) {
-        unlink(LOGQ_PATH);
-        s_flash_rd = 0;
-        s_flash_size = 0;
-        return false;
-    }
-    bool eof = (s_flash_rd + n >= s_flash_size);
-    if (!eof) {
+        if (n == 0) {
+            unlink(LOGQ_PATH);
+            s_flash_rd = 0;
+            s_flash_size = 0;
+            return false;
+        }
+        bool eof = (s_flash_rd + n >= s_flash_size);
         size_t cut = n;
         while (cut > 0 && s_chunk[cut - 1] != '\n') {
             cut--;
         }
-        if (cut > 0) {
+        if (cut == 0) {
+            /* No newline: do not POST. sizeof(s_chunk)-1 is 1535, so a
+             * newline-free logq of LOG_FLASH_CAP became 32 opaque posts plus
+             * a short tail while prepare_chunk starved the RAM ring (boot
+             * fw=). Skip until a real line, or drop the remainder. */
+            s_flash_rd += n;
+            continue;
+        }
+        if (!eof) {
             n = cut;
         }
+        s_chunk[n] = 0;
+        s_pending_len = n;
+        s_pending_flash = true;
+        s_pending_spill = false;
+        return n > 0;
     }
-    s_chunk[n] = 0;
-    s_pending_len = n;
-    s_pending_flash = true;
-    s_pending_spill = false;
-    return n > 0;
 }
 
 static bool take_spill_chunk(void)
