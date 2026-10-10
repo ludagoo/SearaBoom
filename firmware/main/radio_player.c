@@ -1932,6 +1932,31 @@ void radio_player_loop(void)
             }
         }
     }
+    /* wifi-weak hold leaves HTTP running so the ring can refill to 224 KB.
+     * Hold-reconnect above requires the weak latch clear. A finished HTTP
+     * element cannot grow, so resume never fires (hold=1 weak=1 recon=0,
+     * rb stuck below 224 KB, http FINISHED, assoc=1). Reconnect that dead
+     * HTTP; leave a live element alone. */
+    if (s_hold_radio && s_wifi_weak_latched && s_running && s_http
+        && s_hold_started_ms > 0 && sta_associated() && !s_need_hard_on_wifi) {
+        int64_t now = esp_timer_get_time() / 1000;
+        int filled = http_rb_filled();
+        int need = radio_buf_play_need(1);
+        audio_element_state_t http_st = audio_element_get_state(s_http);
+        if (now - s_hold_started_ms >= SB_HTTP_SLOW_RECONNECT_MS
+            && filled >= 0 && filled < need
+            && http_st == AEL_STATE_FINISHED) {
+            if (s_hold_reconnects + 1 >= SB_HTTP_SLOW_RECONNECT_MAX) {
+                radio_hard_restart("wifi-weak hold — HTTP ended");
+                return;
+            }
+            s_hold_reconnects++;
+            radio_soft_restart("wifi-weak hold — HTTP ended");
+            s_hold_started_ms = now;
+            s_hold_last_filled = 0;
+            return;
+        }
+    }
     if (s_running && !s_clip_active && !s_hold_radio && !s_wifi_weak_latched) {
         check_stream_stall();
     }
